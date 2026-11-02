@@ -3,21 +3,16 @@ export class AttachmentInput {
   drafts=new Map();locked=false;
   constructor(root,button,preview,context,changed){
     Object.assign(this,{root,button,preview,context,changed});
-    const menu=document.createElement('div');menu.className='attachment-menu';menu.hidden=true;menu.setAttribute('role','menu');root.append(menu);this.menu=menu;
-    for(const [label,accept,capture] of [['相机','image/*','environment'],['照片','image/*'],['文件','']]){
-      const input=document.createElement('input');input.type='file';input.hidden=true;input.accept=accept;if(capture)input.setAttribute('capture',capture);else input.multiple=true;root.append(input);
-      const option=document.createElement('button');option.type='button';option.textContent=label;option.setAttribute('role','menuitem');option.onclick=()=>{this.close();input.click();};menu.append(option);
-      input.onchange=()=>{this.add([...input.files]);input.value='';};
-    }
-    button.onclick=()=>{menu.hidden=!menu.hidden;button.setAttribute('aria-expanded',String(!menu.hidden));};
-    document.addEventListener('click',e=>{if(!root.contains(e.target))this.close();});
-    root.addEventListener('keydown',e=>{if(e.key==='Escape')this.close();});
+    // Keep this synchronous with the tap so iOS opens its own source picker.
+    // No accept/capture restriction: the system offers photos, camera and files.
+    const input=document.createElement('input');input.type='file';input.hidden=true;input.multiple=true;root.append(input);
+    input.onchange=()=>{this.add([...input.files]);input.value='';};
+    button.onclick=()=>{if(!this.locked)input.click();};
     root.addEventListener('paste',e=>{const files=[...(e.clipboardData?.files??[])];if(files.length){e.preventDefault();this.add(files);}});
     root.addEventListener('dragover',e=>{if(e.dataTransfer?.types.includes('Files')){e.preventDefault();root.classList.add('file-dragover');}});
     root.addEventListener('dragleave',e=>{if(!root.contains(e.relatedTarget))root.classList.remove('file-dragover');});
     root.addEventListener('drop',e=>{e.preventDefault();root.classList.remove('file-dragover');this.add([...(e.dataTransfer?.files??[])]);});
   }
-  close(){this.menu.hidden=true;this.button.setAttribute('aria-expanded','false');}
   list(key=this.context()?.key){return this.drafts.get(key)??[];}
   get count(){return this.list().length;}
   add(files){
@@ -42,7 +37,7 @@ export class AttachmentInput {
   }
   async upload(context){
     const items=[...this.list(context.key)];if(!items.length)return [];
-    this.locked=true;this.close();this.render();this.changed('正在把附件传到电脑…');
+    this.locked=true;this.render();this.changed('正在把附件传到电脑…');
     try{for(const item of items){
       if(item.ref)continue;
       const query=new URLSearchParams({...context.target,name:item.file.name});

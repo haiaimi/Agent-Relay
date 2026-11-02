@@ -42,6 +42,7 @@ test('phone → relay → local process: streaming, approval, stop, idempotency,
     assert.equal((await request('/api/actions',{id:randomUUID(),type:'send',sessionId:id,text:'verify-model'})).status,200);await until(()=>relay.store.getSession(id)?.status==='idle');
     const oldSeq=relay.store.latestSeq();const duplicate=relay.store.sessionEvents(id)[0];assert.equal(relay.store.event(duplicate),null);assert.equal(relay.store.latestSeq(),oldSeq);
     const page=await request('/api/history?sessionId='+encodeURIComponent(id));assert.equal(page.status,200);assert.equal(page.value.cached,false);
+    assert.equal(page.value.session.status,'idle');assert.equal(page.value.session.id,id);
     const waiting=await request('/api/actions',{id:randomUUID(),type:'send',sessionId:id,text:'wait'});assert.equal(waiting.status,200);await until(()=>relay.store.getSession(id)?.status==='running');
     const usage={id:randomUUID(),type:'send',sessionId:id,text:'  /usage  '};
     assert.equal((await request('/api/actions',usage)).value.command,true);assert.equal(relay.store.getSession(id)?.status,'running');assert.equal(bridge.store.queued().length,0);

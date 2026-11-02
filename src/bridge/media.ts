@@ -12,8 +12,8 @@ type Source={path?:string;data?:string;name?:string};
 export function imageSources(raw:unknown):Source[]{
   const found:Source[]=[];
   const text=(value:string)=>{
-    if(value.includes('![')){
-      const visit=(tokens:any[])=>{for(const t of tokens){if(t.type==='image')found.push({path:t.attrGet('src'),name:t.content||'图片'});if(t.children)visit(t.children);}};
+    if(value.includes('](')||value.includes('![')){
+      const visit=(tokens:any[])=>{for(const t of tokens){if(t.type==='image')found.push({path:t.attrGet('src'),name:t.content||'图片'});else if(t.type==='link_open'){const href=t.attrGet('href')??'';if(!/^[a-z][a-z0-9+.-]*:/i.test(href.replace(/^[a-z]:[\\/]/i,''))&&/\.(?:png|jpe?g|gif|webp)$/i.test(href))found.push({path:href});}if(t.children)visit(t.children);}};
       visit(parser.parse(value,{}));
     }
     for(const match of value.matchAll(/^\s*(?:## .+?\.(?:png|jpe?g|gif|webp):|\-\s*\[Image[^\]]*\]:)\s*(.+)$/gim))found.push({path:match[1].trim()});
@@ -25,7 +25,15 @@ export function imageSources(raw:unknown):Source[]{
     if(Array.isArray(value)){for(const child of value)walk(child,depth+1);return;}
     if(typeof value!=='object')return;
     const type=String(value.type??'');
-    if(['localImage','local_image','image','input_image','image_url'].includes(type)){
+    if(['imageGeneration','image_generation_call'].includes(type)){
+      // The native history contains the actual result, even if savedPath expires.
+      const result=value.result;
+      if(typeof result==='string'&&result.startsWith('data:image/'))found.push({data:result,name:'生成的图片'});
+      else if(typeof result==='string'&&/^(?:iVBORw0KGgo|\/9j\/|R0lGOD|UklGR)/.test(result))found.push({data:`data:image/${result.startsWith('/9j/')?'jpeg':result.startsWith('R0lGOD')?'gif':result.startsWith('UklGR')?'webp':'png'};base64,${result}`,name:'生成的图片'});
+      else if(typeof value.savedPath==='string')found.push({path:value.savedPath});
+      else if(typeof value.path==='string')found.push({path:value.path});
+    }
+    if(['localImage','local_image','image','input_image','image_url','imageView','image_view'].includes(type)){
       if(typeof value.path==='string')found.push({path:value.path});
       const url=value.url??value.image_url?.url??value.image_url;
       if(typeof url==='string')found.push(url.startsWith('data:')?{data:url}:{path:url});
@@ -34,7 +42,7 @@ export function imageSources(raw:unknown):Source[]{
       if(typeof value.data==='string'&&typeof value.mimeType==='string')found.push({data:`data:${value.mimeType};base64,${value.data}`});
     }
     // Traverse content/results, not opaque base64 strings or raw generated tool code.
-    for(const [key,child] of Object.entries(value))if(!['data','image_url','url','path','source','input','arguments'].includes(key))walk(child,depth+1);
+    for(const [key,child] of Object.entries(value))if(!['data','image_url','url','path','savedPath','source','input','arguments','command','revisedPrompt'].includes(key)&&!(key==='result'&&['imageGeneration','image_generation_call'].includes(type)))walk(child,depth+1);
   };
   walk(raw);return found.slice(0,40);
 }

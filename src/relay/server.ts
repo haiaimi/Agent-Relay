@@ -13,6 +13,7 @@ interface Options { dataDir: string; phoneToken: string; bridgeToken: string; pu
 const staticFiles: Record<string,[string,string]> = {
   '/':['index.html','text/html; charset=utf-8'], '/app.js':['app.js','text/javascript; charset=utf-8'],
   '/message-text.js':['message-text.js','text/javascript; charset=utf-8'],
+  '/timeline.js':['timeline.js','text/javascript; charset=utf-8'],
   '/attachments.js':['attachments.js','text/javascript; charset=utf-8'], '/drawer.js':['drawer.js','text/javascript; charset=utf-8'],
   '/style.css':['style.css','text/css; charset=utf-8'], '/chatgpt.css':['chatgpt.css','text/css; charset=utf-8'], '/theme.js':['theme.js','text/javascript; charset=utf-8'], '/glass.css':['glass.css','text/css; charset=utf-8'], '/glass-optics.css':['glass-optics.css','text/css; charset=utf-8'],
   '/glass-gpu.js':['glass-gpu.js','text/javascript; charset=utf-8'], '/glass-renderer.js':['glass-renderer.js','text/javascript; charset=utf-8'], '/glass-init.js':['glass-init.js','text/javascript; charset=utf-8'],
@@ -150,7 +151,7 @@ export function createRelay(options: Options) {
         let page; let cached=false;
         try { page=await remote(s.hostId,{id:randomUUID(),type:'history',sessionId:id,cursor}); store.cache(id,cursor,page); }
         catch(err) { page=store.cached(id,cursor); if(!page) throw err; cached=true; }
-        return json(res,200,{...page,cached,events:cursor===undefined ? store.sessionEvents(id) : []});
+        return json(res,200,{...page,cached,session:store.getSession(id),events:cursor===undefined ? store.sessionEvents(id) : []});
       }
       if(req.method==='POST' && url.pathname==='/api/actions') {
         const value=await body(req); const action=validateAction(value);

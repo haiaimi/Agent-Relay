@@ -33,6 +33,7 @@ export class AgentRuntime {
   private flushTimer:NodeJS.Timeout;
   private closed=false;
   private busy=new Set<string>();
+  private nativeStarts=new Map<string,number>();
   private cancelled=new Set<string>();
   private catalogs=new Map<Provider,{at:number;models:AgentModel[]}>();
   private commandCatalogs=new Map<string,{at:number;commands:AgentCommand[]}>();
@@ -50,7 +51,7 @@ export class AgentRuntime {
     for(const s of store.sessions()) {if(['running','waiting'].includes(s.status))s.status='interrupted';this.managed.set(s.id,s);store.save(s);}
     this.codex=new CodexRpc(config.codexCommand ?? 'codex',config.codexArgs);
     this.codex.on('notification',msg=>{void this.codexEvent(msg).catch(e=>console.error('Codex event failed:',(e as Error).message));});
-    this.codex.on('failure',err=>{if(this.closed)return;this.loaded.clear();for(const s of this.managed.values())if(s.provider==='codex'&&['running','waiting'].includes(s.status)){this.event(s,'error',{message:err.message});this.status(s,'failed');}});
+    this.codex.on('failure',err=>{if(this.closed)return;this.loaded.clear();this.turns.clear();for(const s of this.managed.values())if(s.provider==='codex'&&s.managed&&['running','waiting'].includes(s.status)){this.event(s,'error',{message:err.message});this.status(s,'failed');}});
     this.flushTimer=setInterval(()=>this.flush(),100);
   }
   list():Session[]{
@@ -60,8 +61,11 @@ export class AgentRuntime {
       if(original){
         const before=JSON.stringify([s.title,s.status,s.statusOrigin,s.managed,s.updatedAt]);
         s.title=original.title;
-        const externalCodex=s.provider==='codex'&&original.statusOrigin==='native'&&['running','waiting'].includes(original.status)&&!this.turns.has(s.nativeId);
-        if(!s.managed||externalCodex){
+        const externalCodex=s.provider==='codex'&&!this.busy.has(s.id)&&!this.turns.has(s.nativeId)&&(original.statusOrigin==='native'||s.statusOrigin==='native');
+        const submitted=this.nativeStarts.get(s.id);
+        const awaitingNative=submitted!==undefined&&Date.now()-submitted<15000&&original.updatedAt<submitted&&!['running','waiting'].includes(original.status);
+        if(!awaitingNative)this.nativeStarts.delete(s.id);
+        if((!s.managed||externalCodex)&&!awaitingNative){
           s.status=original.status;s.statusOrigin=original.statusOrigin;
           if(externalCodex)s.managed=false;
           s.updatedAt=Math.max(s.updatedAt,original.updatedAt);
@@ -153,12 +157,13 @@ export class AgentRuntime {
     try{const handled=new Set<string>();for(const a of this.store.queued()){
       if(handled.has(a.sessionId!))continue;handled.add(a.sessionId!);const s=this.get(a.sessionId!);
       if(s.provider==='claude'&&!s.managed){const live=this.history.claudeLiveStatus(s.nativeId);s.status=live??'idle';if(live&&!claudeSteerSessions(this.claudeHome()).has(s.nativeId))continue;}
-      if(s.provider==='codex'&&!s.managed&&await this.codexDesktop.owner(s.nativeId))continue;
       if(this.steering.has(s.id)||this.busy.has(s.id)||['running','waiting'].includes(s.status))continue;
       this.store.inputState(a.id,'dispatching');
       try{await this.handle(a,true);this.store.inputState(a.id,'sent');}catch(e){
-        if(s.provider==='codex'&&codexWriterConflict(e))this.store.inputState(a.id,'queued');
+        if(e instanceof SteerDeliveryError&&e.uncertain){this.store.inputState(a.id,'unknown');this.event(s,'message',{id:a.id,role:'user',label:'你 · 投递待确认',text:a.text!,files:this.attached(a).files.map(f=>f.file)});this.event(s,'error',{message:'续聊投递结果未知，请查看本地会话，勿重复发送'});}
+        else if(s.provider==='codex'&&(codexWriterConflict(e)||/already.*(?:running|progress)|current turn|active turn|no-client-found|未找到本地 Codex/i.test((e as Error).message)))this.store.inputState(a.id,'queued');
         else{this.store.inputState(a.id,'failed');this.event(s,'error',{message:'排队消息未执行：'+(e as Error).message});}
+        this.save(this.get(s.id));
       }
     }}finally{this.draining=false;}
   }
@@ -272,6 +277,23 @@ export class AgentRuntime {
         try{await steerClaude(this.claudeHome(),s.nativeId,s.cwd,action.id,action.text!,action.attachmentIds?.length?this.attached(action).content:undefined);this.save(s);this.event(s,'message',{id:action.id,role:'user',text:action.text!,files:this.attached(action).files.map(f=>f.file)});return {ok:true,sessionId:s.id,native:true};}
         finally{this.busy.delete(s.id);}
       }
+      if(s.provider==='codex'&&!s.managed&&await this.codexDesktop.owner(s.nativeId)){
+        await this.checkModel(s.provider,action.model,action.effort);
+        this.busy.add(s.id);
+        try{
+          const prepared=this.attached(action),effort=action.effort??s.nextEffort;
+          await this.codexDesktop.startTurn(s.nativeId,action.id,prepared.text,prepared.input,{model:action.model??s.nextModel,...effort?{effort:effort==='default'?undefined:effort}:{}});
+          this.nativeStarts.set(s.id,Date.now());
+          s.nextModel=undefined;s.nextEffort=undefined;s.statusOrigin='native';this.status(s,'running');
+          this.event(s,'message',{id:action.id,role:'user',text:action.text!,files:prepared.files.map(f=>f.file)});
+          return {ok:true,sessionId:s.id,native:true};
+        }catch(error){
+          if(!fromQueue&&(codexWriterConflict(error)||/already.*(?:running|progress)|current turn|active turn/i.test((error as Error).message))){
+            this.store.enqueue(action);this.save(s);this.event(s,'message',{id:action.id,role:'user',label:'你 · 已排队',text:action.text!,files:this.attached(action).files.map(f=>f.file)});return {ok:true,sessionId:s.id,queued:true,external:true};
+          }
+          throw error;
+        }finally{this.busy.delete(s.id);}
+      }
     }
     if(action.type==='set-model'){
       const s=this.get(action.sessionId!);assertProjectPath(s.cwd,this.roots());
@@ -362,7 +384,7 @@ export class AgentRuntime {
           if(msg.message.model&&s.model!==msg.message.model){s.model=msg.message.model;this.save(s);}
           this.flush();const content=msg.message.content;
           const text=content.filter(x=>x.type==='text').map(x=>x.text).join('\n');
-          if(text)this.event(s,'message',{id:`claude-text:${msg.uuid}`,role:'assistant',text,replaces:[`claude-stream:${msg.message.id}`]});
+          if(text||imageSources(content).length)this.event(s,'message',messageImages(this.media,s.id,s.cwd,{id:`claude-text:${msg.uuid}`,role:'assistant',text,replaces:[`claude-stream:${msg.message.id}`]} as any,msg.message));
           for(const block of content)if(block.type==='tool_use')this.event(s,'message',{id:`claude-tool:${block.id}`,role:'tool',label:block.name,text:JSON.stringify(block.input).slice(0,24000)});
         } else if(msg.type==='result') {
           this.flush();if(msg.is_error)this.event(s,'error',{message:('errors' in msg?msg.errors.join('\n'):'Agent returned an error').slice(0,24000)});
@@ -377,7 +399,7 @@ export class AgentRuntime {
   private async codexEvent(msg:any){
     const p=msg.params ?? {};const threadId=p.threadId ?? p.thread?.id;
     const s=[...this.managed.values()].find(s=>s.provider==='codex'&&s.nativeId===threadId);
-    if(!s) {if(msg.id!==undefined)this.codex.send({id:msg.id,error:{code:-32601,message:'Unsupported request or unmanaged session'}});return;}
+    if(!s||!s.managed) {if(msg.id!==undefined)this.codex.send({id:msg.id,error:{code:-32601,message:'Unsupported request or unmanaged session'}});return;}
     if(msg.id!==undefined){
       if(['item/commandExecution/requestApproval','item/fileChange/requestApproval'].includes(msg.method)) {
         const allow=await this.approve(s,msg.method,p);this.codex.send({id:msg.id,result:{decision:allow?'accept':'decline'}});

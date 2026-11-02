@@ -128,11 +128,7 @@ select option { color: var(--ink); background: var(--surface); }
 .attachment-draft img { width: 40px; height: 40px; object-fit: cover; border-radius: 7px; }
 .attachment-draft>span { max-width: 145px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .attachment-draft button { flex: none; width: 26px; height: 30px; border: 0; background: transparent; color: var(--muted); font-size: 21px; }
-.attachment-menu { position: absolute; bottom: 65px; left: max(24px, calc((100% - 800px)/2)); z-index: 6; min-width: 160px; padding: 6px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); box-shadow: 0 8px 30px #0005; }
-.attachment-menu button { display: block; width: 100%; padding: 13px 16px; text-align: left; color: var(--ink); background: transparent; border: 0; border-radius: 9px; }
-.attachment-menu button:hover { background: var(--surface-hover); }
 #create-form { position: relative; }
-#create-form .attachment-menu { left: 0; bottom: 90px; }
 .file-dragover #composer { border-color: var(--focus); background: var(--surface-hover); }
 .file-gallery { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 10px; white-space: normal; }
 .file-card { display: flex; flex-direction: column; max-width: 270px; min-width: 120px; overflow: hidden; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
@@ -199,7 +195,6 @@ dialog::backdrop { background: #0009; backdrop-filter: none; }
   .drawer-backdrop { display: block; position: fixed; inset: 0; z-index: 9; border: 0; border-radius: 0; background: #0006; padding: 0; touch-action: pan-y; }
   .sidebar { touch-action: pan-y; }
   .sidebar.dragging { transition: none; transform: translateX(var(--drawer-offset)); }
-  .attachment-menu { left: 12px; }
   html:has(.workspace:not([hidden])), body:has(.workspace:not([hidden])) { height: 100%; overflow: hidden; }
   .workspace { position: fixed; top: var(--viewport-top, 0px); left: 0; width: 100%; height: var(--viewport-height, 100dvh); max-height: none; display: flex; flex-direction: column; }
   .main, .conversation { flex: 1; min-height: 0; }

@@ -4,7 +4,10 @@ import {SteerDeliveryError} from './claude-steer.js';
 
 const MAX_FRAME=2*1024*1024;
 const uuid=/^[a-f0-9]{8}-[a-f0-9-]{27}$/i;
-// Version 1 of the installed desktop's local follower protocol. Never expose
+// Each IPC method has its own version; the native router checks it during
+// client discovery, before forwarding. A wrong version looks like no owner.
+const methodVersions:Record<string,number>={initialize:0,'thread-owner-discovery':1,'thread-follower-steer-turn':1,'thread-follower-start-turn':2};
+// Installed desktop's local follower protocol. Never expose
 // arbitrary pipe paths, owner IDs or IPC methods through the phone API.
 export class CodexDesktop {
   private socket?:Socket;
@@ -12,7 +15,7 @@ export class CodexDesktop {
   private clientId='initializing-client';
   private buffer=Buffer.alloc(0);
   private closed=false;
-  private pending=new Map<string,{resolve:(r:any)=>void;reject:(e:Error)=>void;timer:NodeJS.Timeout;mutation:boolean}>();
+  private pending=new Map<string,{resolve:(r:any)=>void;reject:(e:Error)=>void;timer:NodeJS.Timeout;mutation:boolean;operation:string}>();
   private owners=new Map<string,{at:number;owner?:string;loading?:Promise<string|undefined>}>();
   constructor(private readonly pipePath=process.platform==='win32'?'\\\\.\\pipe\\codex-ipc':undefined){}
   available(threadId:string):boolean {
@@ -42,9 +45,21 @@ export class CodexDesktop {
       restoreMessage:{id,text,context:{},images:[],localImages:[],attachments:[],responsesapiClientMetadata:{}},
       attachments:[],clientUserMessageId:id
     },owner,true);
-    const result=reply.result?.result?.result;
+    // The IPC handler strips its internal {method, result} envelope.
+    const result=reply.result?.result;
     if(typeof result?.turnId!=='string')throw new SteerDeliveryError('Codex 引导结果未确认，请查看本地会话，勿重复点击',true);
     return result;
+  }
+  async startTurn(threadId:string,id:string,text:string,input:any[],settings:{model?:string;effort?:string}={}):Promise<{turnId:string}>{
+    const owner=await this.owner(threadId);
+    if(!owner)throw new Error('未找到本地 Codex 窗口；消息尚未投递');
+    const reply=await this.request('thread-follower-start-turn',{
+      conversationId:threadId,
+      turnStart:{request:{threadId,input,clientUserMessageId:id,...settings},context:{inheritThreadSettings:true,restoreMessage:{id,text,context:{},images:[],localImages:[],attachments:[],responsesapiClientMetadata:{}}}}
+    },owner,true);
+    const result=reply.result?.result;
+    if(typeof result?.turn?.id!=='string')throw new SteerDeliveryError('Codex 续聊结果未确认，请查看本地会话，勿重复发送',true);
+    return {turnId:result.turn.id};
   }
   private async start(){
     if(this.closed||!this.pipePath)throw new Error('本地 Codex 桌面连接不可用');
@@ -63,13 +78,15 @@ export class CodexDesktop {
   private request(method:string,params:unknown,targetClientId?:string,mutation=false):Promise<any>{
     const socket=this.socket;
     if(!socket?.writable)return Promise.reject(new Error('本地 Codex 连接已断开'));
+    const version=methodVersions[method],operation=method==='thread-follower-start-turn'?'续聊':'引导';
+    if(version===undefined)return Promise.reject(new Error('不支持的本地 Codex 方法'));
     const requestId=randomUUID();
-    const payload=Buffer.from(JSON.stringify({type:'request',requestId,sourceClientId:this.clientId,version:method==='initialize'?0:1,method,params,targetClientId,timeoutMs:mutation?15000:4000}));
+    const payload=Buffer.from(JSON.stringify({type:'request',requestId,sourceClientId:this.clientId,version,method,params,targetClientId,timeoutMs:mutation?15000:4000}));
     if(payload.length>MAX_FRAME)return Promise.reject(new Error('引导内容过长'));
     const frame=Buffer.alloc(4+payload.length);frame.writeUInt32LE(payload.length);payload.copy(frame,4);
     return new Promise((resolve,reject)=>{
-      const timer=setTimeout(()=>{this.pending.delete(requestId);reject(new SteerDeliveryError(mutation?'Codex 引导投递结果未知，请查看会话，勿重复点击':'Codex 桌面连接超时',mutation));},mutation?16000:5000);
-      this.pending.set(requestId,{resolve,reject,timer,mutation});socket.write(frame);
+      const timer=setTimeout(()=>{this.pending.delete(requestId);reject(new SteerDeliveryError(mutation?`Codex ${operation}投递结果未知，请查看会话，勿重复点击`:'Codex 桌面连接超时',mutation));},mutation?16000:5000);
+      this.pending.set(requestId,{resolve,reject,timer,mutation,operation});socket.write(frame);
     });
   }
   private read(chunk:Buffer){
@@ -86,7 +103,7 @@ export class CodexDesktop {
       if(r.type!=='response')continue;
       const p=this.pending.get(r.requestId);if(!p)continue;clearTimeout(p.timer);this.pending.delete(r.requestId);
       if(r.resultType==='success')p.resolve(r);
-      else p.reject(new SteerDeliveryError(p.mutation?'本地 Codex 未接受引导：'+String(r.error??'未知错误'):'Codex 会话不可用',p.mutation&&/timeout|connection|disconnected|outcome.unknown/i.test(String(r.error))));
+      else p.reject(new SteerDeliveryError(p.mutation?`本地 Codex 未接受${p.operation}：`+String(r.error??'未知错误'):'Codex 会话不可用',p.mutation&&/timeout|connection|disconnected|outcome.unknown/i.test(String(r.error))));
     }
   }
   private disconnect(socket:Socket){

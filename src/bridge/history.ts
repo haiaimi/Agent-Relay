@@ -15,6 +15,8 @@ export function itemMessage(item: any, ordinal: number): Message | null {
   const id=String((item.type==='userMessage' ? item.clientId : undefined) ?? item.id ?? `native-${ordinal}`);
   if(item.type==='userMessage') return {id,role:'user',text:(item.content ?? []).filter((x:any)=>x.type==='text'||x.type==='input_text').map((x:any)=>x.text).join('\n')};
   if(item.type==='agentMessage') return {id,role:'assistant',text:String(item.text ?? '')};
+  if(item.type==='imageView') return {id,role:'assistant',label:'图片预览',text:''};
+  if(item.type==='imageGeneration') return {id,role:'assistant',label:'生成的图片',text:item.status==='failed'?String(item.failure?.message??item.failure??'图片生成失败'):['inProgress','in_progress','generating','queued'].includes(item.status)?'图片生成中…':''};
   if(item.type==='commandExecution') return {id,role:'tool',label:`命令 · ${item.status ?? ''}`,text:`${item.command ?? ''}\n${item.aggregatedOutput ?? ''}`.slice(0,24000)};
   if(item.type==='mcpToolCall' || item.type==='dynamicToolCall') return {id,role:'tool',label:String(item.tool ?? '工具'),text:JSON.stringify({arguments:item.arguments,result:item.result,error:item.error}).slice(0,24000)};
   if(item.type==='fileChange') return {id,role:'tool',label:'文件改动',text:JSON.stringify(item.changes ?? []).slice(0,24000)};
@@ -27,6 +29,8 @@ function textContent(value: any): string {
 }
 export function transcriptLine(line: any, ordinal: number): Message | null {
   const payload=line.type==='response_item' ? line.payload : null;
+  if(payload&&['image_generation_call','imageGeneration','imageView','image_view'].includes(payload.type))return {...itemMessage({...payload,type:payload.type==='image_view'?'imageView':payload.type==='image_generation_call'?'imageGeneration':payload.type},ordinal)!,timestamp:Date.parse(line.timestamp)||undefined};
+  if(line.type==='event_msg'&&line.payload?.type==='item_completed'&&['imageView','imageGeneration'].includes(line.payload.item?.type))return {...itemMessage(line.payload.item,ordinal)!,timestamp:Date.parse(line.timestamp)||undefined};
   if(payload?.type==='message' && ['user','assistant'].includes(payload.role)) {
     const text=textContent(payload.content); if(!text&&!imageSources(payload.content).length) return null;
     return {id:`log-${ordinal}`,role:payload.role,text:text.slice(0,32000),timestamp:Date.parse(line.timestamp)||undefined};
@@ -122,10 +126,11 @@ export class NativeHistory {
     if(session.provider==='codex' && existsSync(historyDB)) {
       const db=new DatabaseSync(historyDB,{readOnly:true});
       try {
-        const rows=db.prepare('SELECT rollout_ordinal,item_json FROM thread_items WHERE thread_id=? AND rollout_ordinal<? ORDER BY rollout_ordinal DESC LIMIT 51').all(session.nativeId,cursor ?? Number.MAX_SAFE_INTEGER);
+        const hasTimestamp=db.prepare('PRAGMA table_info(thread_items)').all().some(c=>c.name==='created_at_ms');
+        const rows=db.prepare('SELECT rollout_ordinal,item_json,'+(hasTimestamp?'created_at_ms':'NULL AS created_at_ms')+' FROM thread_items WHERE thread_id=? AND rollout_ordinal<? ORDER BY rollout_ordinal DESC LIMIT 51').all(session.nativeId,cursor ?? Number.MAX_SAFE_INTEGER);
         if(rows.length) {
           const more=rows.length>50; const visible=rows.slice(0,50).reverse();
-          return {source:'Codex 本地历史数据库',cursor:more ? Number(visible[0].rollout_ordinal) : null,messages:visible.map(row=>{const raw=JSON.parse(String(row.item_json)),m=itemMessage(raw,Number(row.rollout_ordinal));return m&&this.media?messageImages(this.media,id,session.cwd,m,raw):m;}).filter((x):x is Message=>x!==null).map(m=>({...m,text:m.text.slice(0,16000)+(m.text.length>16000?'\n[长消息显示已截断]':'')}))};
+          return {source:'Codex 本地历史数据库',cursor:more ? Number(visible[0].rollout_ordinal) : null,messages:visible.map(row=>{const raw=JSON.parse(String(row.item_json)),m=itemMessage(raw,Number(row.rollout_ordinal));if(m&&Number(row.created_at_ms)>0)m.timestamp=Number(row.created_at_ms);return m&&this.media?messageImages(this.media,id,session.cwd,m,raw):m;}).filter((x):x is Message=>x!==null).map(m=>({...m,text:m.text.slice(0,16000)+(m.text.length>16000?'\n[长消息显示已截断]':'')}))};
         }
       } finally {db.close();}
     }

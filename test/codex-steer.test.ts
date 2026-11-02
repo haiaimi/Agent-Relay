@@ -27,6 +27,32 @@ test('managed Codex promotes exactly one queued message into the current turn wi
   }finally{await runtime.close();store.close();rmSync(root,{recursive:true,force:true});}
 });
 
+test('desktop idle followup targets the existing owner with a start request and preserves native permissions',async()=>{
+  const root=mkdtempSync(join(tmpdir(),'relay-desktop-start-'));
+  const path=process.platform==='win32'?'\\\\.\\pipe\\relay-desktop-start-'+randomUUID():join(root,'test.sock');
+  const nativeId=randomUUID(),ownerId=randomUUID(),turnId=randomUUID(),frames:any[]=[];
+  const server=createServer(socket=>{let buffer=Buffer.alloc(0);socket.on('data',chunk=>{buffer=Buffer.concat([buffer,chunk]);while(buffer.length>=4&&buffer.length>=buffer.readUInt32LE()+4){
+    const size=buffer.readUInt32LE(),message=JSON.parse(buffer.subarray(4,4+size).toString());buffer=buffer.subarray(4+size);frames.push(message);
+    // Model the native router's discovery gate, not just a permissive responder.
+    // start-turn v1 must be rejected even though owner discovery v1 succeeds.
+    const expected=message.method==='initialize'?0:message.method==='thread-follower-start-turn'?2:1;
+    if(message.version!==expected){const bytes=Buffer.from(JSON.stringify({type:'response',requestId:message.requestId,resultType:'error',error:'no-client-found'})),frame=Buffer.alloc(4+bytes.length);frame.writeUInt32LE(bytes.length);bytes.copy(frame,4);socket.write(frame);continue;}
+    const result=message.method==='initialize'?{clientId:randomUUID()}:message.method==='thread-owner-discovery'?{supportsUntrustedAppInput:true}:{result:{turn:{id:turnId,status:'inProgress'}}};
+    const bytes=Buffer.from(JSON.stringify({type:'response',requestId:message.requestId,resultType:'success',handledByClientId:ownerId,result})),frame=Buffer.alloc(4+bytes.length);frame.writeUInt32LE(bytes.length);bytes.copy(frame,4);socket.write(frame);
+  }});});server.listen(path);await once(server,'listening');
+  const desktop=new CodexDesktop(path);
+  try{
+    const input=[{type:'text',text:'继续',text_elements:[]},{type:'localImage',path:'C:/allowed/upload.png'}];
+    assert.equal((await desktop.startTurn(nativeId,randomUUID(),'继续',input,{model:'fixture-model',effort:'high'})).turnId,turnId);
+    const frame=frames.find(f=>f.method==='thread-follower-start-turn');
+    assert.equal(frame.version,2);assert.equal(frame.targetClientId,ownerId);assert.equal(frame.params.conversationId,nativeId);
+    assert.deepEqual(frame.params.turnStart.request.input,input);assert.equal(frame.params.turnStart.request.model,'fixture-model');assert.equal(frame.params.turnStart.request.effort,'high');
+    assert.equal(frame.params.turnStart.context.inheritThreadSettings,true);
+    assert.equal(frame.params.turnStart.request.approvalPolicy,undefined);assert.equal(frame.params.turnStart.request.permissions,undefined);
+    assert.equal(frames.some(f=>f.method==='thread/resume'),false);
+  }finally{desktop.close();await new Promise<void>(resolve=>server.close(()=>resolve()));rmSync(root,{recursive:true,force:true});}
+});
+
 test('native Codex discovers the desktop owner, targets it and keeps rejected input queued without opening another writer',async()=>{
   const root=mkdtempSync(join(tmpdir(),'relay-desktop-steer-'));mkdirSync(join(root,'work'));
   const path=process.platform==='win32'?'\\\\.\\pipe\\relay-desktop-test-'+randomUUID():join(root,'test.sock');
@@ -34,7 +60,7 @@ test('native Codex discovers the desktop owner, targets it and keeps rejected in
   const server=createServer(socket=>{let buffer=Buffer.alloc(0);socket.on('data',chunk=>{buffer=Buffer.concat([buffer,chunk]);while(buffer.length>=4&&buffer.length>=buffer.readUInt32LE()+4){const size=buffer.readUInt32LE(),m=JSON.parse(buffer.subarray(4,4+size).toString());buffer=buffer.subarray(4+size);frames.push(m);let result:any;
     if(m.method==='initialize')result={clientId};
     else if(m.method==='thread-owner-discovery'){assert.equal(m.params.conversationId,nativeId);result={supportsUntrustedAppInput:true};}
-    else {assert.equal(m.method,'thread-follower-steer-turn');assert.equal(m.version,1);assert.equal(m.targetClientId,ownerId);assert.equal(m.params.conversationId,nativeId);assert.equal(m.params.restoreMessage.context!=null,true);result={method:m.method,result:{result:{turnId}}};}
+    else {assert.equal(m.method,'thread-follower-steer-turn');assert.equal(m.version,1);assert.equal(m.targetClientId,ownerId);assert.equal(m.params.conversationId,nativeId);assert.equal(m.params.restoreMessage.context!=null,true);result={result:{turnId}};}
     if(disconnect&&m.method==='thread-follower-steer-turn'){socket.destroy();return;}
     const r=reject&&m.method==='thread-follower-steer-turn'?{type:'response',requestId:m.requestId,resultType:'error',error:'no active turn to steer'}:{type:'response',requestId:m.requestId,resultType:'success',method:m.method,handledByClientId:ownerId,result};
     const data=Buffer.from(JSON.stringify(r)),frame=Buffer.alloc(4+data.length);frame.writeUInt32LE(data.length);data.copy(frame,4);socket.write(frame.subarray(0,2));socket.write(frame.subarray(2));

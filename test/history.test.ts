@@ -13,14 +13,18 @@ test('native read-only history paginates Codex and reads compressed rollouts and
     state.exec('CREATE TABLE threads(id TEXT,title TEXT,cwd TEXT,updated_at INTEGER,archived INTEGER,agent_role TEXT,rollout_path TEXT,model TEXT)');
     for(const id of ['indexed','packed'])state.prepare('INSERT INTO threads VALUES(?,?,?,?,?,?,?,?)').run(id,'标题',root,123,0,null,packed,'fixture-model');state.close();
     writeFileSync(join(codex,'session_index.jsonl'),JSON.stringify({id:'indexed',thread_name:'本机短标题'})+'\n');
-    const history=new DatabaseSync(join(codex,'thread_history_1.sqlite'));history.exec('CREATE TABLE thread_items(thread_id TEXT,rollout_ordinal INTEGER,item_json TEXT)');
-    for(let i=0;i<110;i++)history.prepare('INSERT INTO thread_items VALUES(?,?,?)').run('indexed',i,JSON.stringify({id:'m'+i,type:'agentMessage',text:'第'+i+'条'}));history.close();
+    const history=new DatabaseSync(join(codex,'thread_history_1.sqlite'));history.exec('CREATE TABLE thread_items(thread_id TEXT,rollout_ordinal INTEGER,item_json TEXT,created_at_ms INTEGER)');
+    for(let i=0;i<110;i++)history.prepare('INSERT INTO thread_items VALUES(?,?,?,?)').run('indexed',i,JSON.stringify({id:'m'+i,type:'agentMessage',text:'第'+i+'条'}),1000+i);history.close();
     writeFileSync(packed+'.zst',zstdCompressSync(Buffer.from(JSON.stringify({type:'response_item',payload:{type:'message',role:'assistant',content:[{type:'output_text',text:'压缩历史'}]}})+'\n')));
     writeFileSync(join(claude,'projects','p','abc.jsonl'),JSON.stringify({type:'user',uuid:'user-1',sessionId:'abc',cwd:root,message:{content:'你好'}})+'\n'+JSON.stringify({type:'assistant',uuid:'a',message:{id:'answer-1',content:[{type:'text',text:'你好，手机'}]}})+'\n{"partial":');
     const reader=new NativeHistory('pc',codex,claude);assert.equal(reader.list().length,3);
     assert.equal(reader.list().find(s=>s.nativeId==='indexed')?.title,'本机短标题');
     const first=await reader.page('pc:codex:indexed');assert.equal(first.messages.length,50);assert.equal(first.cursor,60);
     const older=await reader.page('pc:codex:indexed',first.cursor!);assert.equal(older.messages[0].id,'m10');
+    assert.equal(first.messages.at(-1)?.timestamp,1109);
+    const update=new DatabaseSync(join(codex,'thread_history_1.sqlite'));
+    update.prepare('INSERT INTO thread_items VALUES(?,?,?,?)').run('indexed',110,JSON.stringify({id:'newest',type:'agentMessage',text:'失败之后的新回复'}),1110);update.close();
+    assert.equal((await reader.page('pc:codex:indexed')).messages.at(-1)?.text,'失败之后的新回复');
     assert.equal((await reader.page('pc:codex:packed')).messages[0].text,'压缩历史');
     const page=await reader.page('pc:claude:abc');assert.equal(page.messages.length,2);assert.equal(page.messages[1].id,'claude-text:a');
   }finally{rmSync(root,{recursive:true,force:true});}
