@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title">
+  <title id="title">信号中继</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#1C222C"/>
+      <stop offset="1" stop-color="#080A0D"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="116" fill="url(#bg)"/>
+  <path d="M145 169 256 256l111-87M145 343l111-87 111 87" fill="none" stroke="#F3F6FA" stroke-width="32" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="145" cy="169" r="42" fill="#F3F6FA"/>
+  <circle cx="367" cy="169" r="42" fill="#F3F6FA"/>
+  <circle cx="145" cy="343" r="42" fill="#F3F6FA"/>
+  <circle cx="367" cy="343" r="42" fill="#F3F6FA"/>
+  <circle cx="256" cy="256" r="51" fill="#76A9FF"/>
+</svg>

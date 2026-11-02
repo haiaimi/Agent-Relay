@@ -1,0 +1,7 @@
+[Unit]
+Description=Renew Agent Relay public IP certificate
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/agent-relay-certbot/bin/certbot renew --quiet --cert-name agent-relay-ip --deploy-hook "/usr/sbin/nginx -s reload"

@@ -1,0 +1,19 @@
+services:
+  relay:
+    build: ..
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8787:8787"
+    environment:
+      PHONE_TOKEN: ${PHONE_TOKEN:?Set PHONE_TOKEN}
+      BRIDGE_TOKEN: ${BRIDGE_TOKEN:?Set BRIDGE_TOKEN}
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?Set the external HTTPS origin}
+    volumes:
+      - relay-data:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+volumes:
+  relay-data:

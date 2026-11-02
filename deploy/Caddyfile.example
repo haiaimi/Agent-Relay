@@ -1,0 +1,9 @@
+# This separate HTTPS entry uses 8443, useful when 443 is occupied.
+# Verify cloud firewall/DNS before deploying it.
+# Obtain a certificate using an available challenge (e.g. HTTP on 80).
+relay.example.com:8443 {
+    encode gzip
+    reverse_proxy 127.0.0.1:8787 {
+        flush_interval -1
+    }
+}

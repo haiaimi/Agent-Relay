@@ -1,0 +1,16 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+bridge.config.json
+.data/
+*.sqlite*
+*.log
+coverage/
+test-results/
+playwright-report/
+*.pem
+*.key
+*.p12
+*.pfx

@@ -1,0 +1,13 @@
+{
+  "relayUrl": "ws://127.0.0.1:8787/bridge",
+  "hostId": "windows-pc",
+  "name": "我的工作电脑",
+  "dataDir": ".data/bridge",
+  "projects": [
+    { "id": "my-project", "name": "My Project", "path": "C:/Projects/my-project" }
+  ],
+  "codexCommand": "codex",
+  "syncIntervalSeconds": 15,
+  "discoverCodexProjects": true,
+  "syncHistory": true
+}

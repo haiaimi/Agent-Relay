@@ -1,0 +1,66 @@
+/* A fixed scene copy is clipped by the moving glass. The URL and image sizing
+   come from the same root property that paints #glassWallpaper. */
+#glassWallpaper {transition:none!important}
+body .movie[data-layer-glass]:hover {transform:none}
+:root[data-glass-layers="1"] [data-layer-glass] {
+  border-color:transparent!important;
+  box-shadow:none!important;
+}
+.lg-lens {
+  overflow:visible;
+  clip-path:inset(0 round var(--lg-radius,24px));
+}
+/* Keep the frosted tint while a fast native scroll outruns observer updates. */
+:root[data-glass-layers="1"] .lg-lens:not([data-active="1"]):not([data-flat="1"]) {visibility:visible}
+/* The long panel has only narrow ring strips. Their vector clip, rather than
+   a mask on fixed descendants, keeps WebKit from exposing rectangular tiles. */
+:root[data-glass-layers="1"] body [data-glass-flat="1"] {overflow:clip!important}
+:root[data-glass-layers="1"] .lg-lens[data-flat="1"] {display:block;clip-path:none;overflow:visible}
+:root[data-glass-layers="1"] .lg-lens[data-flat="1"]::after {display:block;background:rgba(9,11,13,.16);box-shadow:none;border-radius:inherit}
+:root[data-glass-layers="1"][data-theme="light"] .lg-lens[data-flat="1"]::after {background:rgba(245,248,250,.22)}
+:root[data-glass-renderer="webgl2"][data-glass-layers="1"] body [data-glass-flat="1"] {
+  background:transparent!important;
+  border-color:transparent!important;
+  box-shadow:none!important;
+}
+:root[data-glass-renderer="webgl2"][data-glass-layers="1"][data-theme="light"] body [data-glass-flat="1"] {
+  background:transparent!important;
+  border-color:transparent!important;
+}
+.lg-zone {overflow:visible;contain:none}
+.lg-picture {
+  position:fixed;
+  top:0;left:0;width:100vw;height:100lvh;
+  display:block;
+  background-image:var(--lq-backdrop)!important;
+  background-position:center!important;
+  background-size:100% 100%!important;
+  background-repeat:no-repeat!important;
+  animation:none!important;
+  transform:none;
+  will-change:auto!important;
+}
+.lg-rim {
+  mask-image:var(--lg-rim-mask,linear-gradient(transparent,transparent));
+  mask-size:100% 100%;
+  mask-repeat:no-repeat;
+}
+.lg-rim .lg-picture {
+  transform:scale(1.20);
+  transform-origin:center center;
+}
+.lg-lens[data-flat="1"] .lg-zone {border-radius:0;overflow:visible;clip-path:inset(0)}
+.lg-long-left,.lg-long-right {top:var(--lg-cap,30px);bottom:var(--lg-cap,30px);width:var(--lg-band,5px)}
+.lg-long-left {left:0;right:auto;mask-image:var(--lg-left-mask);mask-size:100% 100%;mask-repeat:no-repeat}
+.lg-long-right {right:0;left:auto;mask-image:var(--lg-right-mask);mask-size:100% 100%;mask-repeat:no-repeat}
+.lg-long-top,.lg-long-bottom {left:0;right:0;height:var(--lg-cap,39px)}
+.lg-long-top {top:0;bottom:auto;mask-image:var(--lg-top-mask);mask-size:100% 100%;mask-repeat:no-repeat}
+.lg-long-bottom {bottom:0;top:auto;mask-image:var(--lg-bottom-mask);mask-size:100% 100%;mask-repeat:no-repeat}
+.lg-lens[data-flat="1"] .lg-zone .lg-picture {transform:scale(1.20);transform-origin:center center}
+/* A radial tint forms an unrelated inner ellipse on nested cards. */
+:root[data-glass-layers="1"] .lg-lens[data-nested="1"]::after {
+  background:rgba(9,11,13,.34);
+}
+:root[data-glass-layers="1"][data-theme="light"] .lg-lens[data-nested="1"]::after {
+  background:rgba(245,248,250,.42);
+}

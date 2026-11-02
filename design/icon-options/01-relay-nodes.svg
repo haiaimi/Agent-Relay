@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title">
+  <title id="title">接力节点</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#20242B"/>
+      <stop offset="1" stop-color="#090B0E"/>
+    </linearGradient>
+    <linearGradient id="route" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#F5F7FA"/>
+      <stop offset="1" stop-color="#75A7FF"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="116" fill="url(#bg)"/>
+  <path d="M141 355V243c0-48 39-87 87-87h76" fill="none" stroke="url(#route)" stroke-width="51" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="m276 103 57 53-57 53" fill="none" stroke="#F5F7FA" stroke-width="47" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="141" cy="355" r="37" fill="#75A7FF"/>
+  <circle cx="141" cy="355" r="15" fill="#101419"/>
+</svg>

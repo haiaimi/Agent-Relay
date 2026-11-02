@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0d1117"><meta name="description" content="你的电脑执行，随时随地掌握会话。">
+  <script src="/theme.js"></script>
+  <link rel="manifest" href="/manifest.webmanifest"><link rel="icon" type="image/svg+xml" href="/icon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/chatgpt.css">
+  <title>Agent Relay · 会话工作台</title><script src="/vendor/markdown-it.umd.min.js" defer></script><script src="/vendor/purify.min.js" defer></script><script src="/vendor/highlight.min.js" defer></script><script src="/app.js" type="module"></script>
+</head>
+<body>
+  <section id="login" class="login" hidden>
+    <form id="login-form" class="login-card">
+      <button type="button" class="theme-toggle login-theme-toggle" data-theme-toggle aria-label="切换浅色模式"></button>
+      <img class="brand-symbol" src="/icon.svg" alt=""><p class="eyebrow">YOUR LOCAL WORKSPACE, ANYWHERE</p>
+      <h1>把工作留在电脑，<br>把会话带在身边。</h1><p class="muted">连接自己的 Agent Relay，浏览历史，继续下一步。</p>
+      <label for="token">访问密钥</label><input id="token" name="token" type="password" autocomplete="current-password" required placeholder="输入手机访问密钥">
+      <button class="primary" type="submit">进入工作台 <span aria-hidden="true">↗</span></button><p id="login-error" class="error" role="alert"></p>
+      <p class="fine">Agent 在你的电脑上运行。模型凭据保留在本机。</p>
+    </form>
+  </section>
+  <div id="workspace" class="workspace" hidden>
+    <aside class="sidebar" id="sidebar">
+      <header class="brand"><img class="brand-symbol" src="/icon.svg" alt=""><div><strong>Agent Relay</strong><span>本地执行 · 随处连接</span></div><button class="icon mobile-only" id="close-sidebar" aria-label="关闭会话列表">×</button></header>
+      <button id="new-session" class="primary new-session">＋ 新建会话 <span class="shortcut">N</span></button>
+      <div class="workspace-filters"><label class="sr-only" for="device-filter">工作设备</label><select id="device-filter"><option value="">全部工作设备</option></select><label class="sr-only" for="project-filter">Codex 项目</label><select id="project-filter"><option value="">全部项目</option></select><label class="sr-only" for="activity-filter">任务状态</label><select id="activity-filter"><option value="">全部状态</option><option value="active">正在运行 / 等待审批</option><option value="idle">已完成</option><option value="failed">失败 / 已停止</option></select></div>
+      <div class="search-wrap"><input id="search" type="search" aria-label="搜索会话" placeholder="搜索标题或项目…"><span aria-hidden="true">⌕</span></div>
+      <nav class="filters" aria-label="会话类型"><button data-provider="all" class="active">全部</button><button data-provider="codex">Codex</button><button data-provider="claude">Claude</button></nav>
+      <div class="list-heading"><span>最近会话</span><span id="session-count">0</span></div>
+      <div id="session-list" class="session-list"></div>
+      <footer class="sidebar-footer"><span id="connection"><i class="dot"></i>正在连接</span><button id="logout" class="text-button">退出</button></footer>
+    </aside>
+    <div id="drawer-edge" class="drawer-edge" aria-hidden="true"></div><button id="drawer-backdrop" class="drawer-backdrop" type="button" aria-label="关闭会话列表遮罩" hidden></button><main class="main">
+      <header class="topbar"><button id="open-sidebar" class="icon mobile-only" aria-label="打开会话列表">☰</button><div class="breadcrumb"><span class="device-caption">工作设备 /</span><span id="host-label">正在连接</span></div><select id="session-switch" aria-label="切换会话"><option value="">切换会话…</option></select><button type="button" class="theme-toggle" data-theme-toggle aria-label="切换浅色模式"></button><button id="refresh" class="text-button" aria-label="刷新会话"><span aria-hidden="true">↻</span><span class="refresh-caption"> 刷新</span></button></header>
+      <section id="welcome" class="welcome">
+        <p class="eyebrow">CONNECTED TO YOUR OWN COMPUTER</p><h1>下一步，<br><span>从这里开始。</span></h1><p class="muted">电脑负责执行，你负责方向。<br>选择一个历史会话，或从新的想法开始。</p>
+        <div id="host-cards" class="host-cards"></div><button id="welcome-new" class="primary">发起新会话 ↗</button>
+        <div class="welcome-note"><span aria-hidden="true">◉</span><p>历史正在后台同步，已同步的内容可在电脑离线时查看。<br>继续执行任务时，需要本地电脑保持在线。</p></div>
+      </section>
+      <section id="conversation" class="conversation" hidden>
+        <header class="conversation-head"><div><div class="session-heading"><div class="session-meta"><span id="agent-badge" class="agent-badge"></span><span id="session-status"></span></div><div class="conversation-actions"><button id="settings-toggle" class="settings-toggle" aria-label="会话设置：模型与思考强度" aria-haspopup="dialog"><span id="settings-preview">模型与强度</span><span aria-hidden="true"> ⚙</span></button><button id="stop" class="stop" hidden>■ 停止</button></div></div><h1><button id="session-title" class="session-title-button" type="button" aria-expanded="false" aria-label="展开完整会话标题"></button></h1></div></header>
+        <div id="timeline" class="timeline" aria-live="polite"><button id="older" class="text-button" hidden>加载更早的消息</button><p id="history-note" class="history-note"></p><div id="messages"></div></div>
+        <div class="composer-wrap"><div id="command-menu" class="command-menu" role="listbox" aria-label="命令自动补全" hidden></div><div id="attachment-preview" class="attachment-preview" aria-label="待发送附件" hidden></div><form id="composer"><button id="attach-button" class="attach-button" type="button" aria-label="添加附件" aria-expanded="false">＋</button><label class="sr-only" for="prompt">发送消息</label><textarea id="prompt" maxlength="32000" rows="1" aria-autocomplete="list" aria-controls="command-menu" aria-expanded="false" placeholder="消息或 / 命令…"></textarea><div class="composer-bottom"><span id="run-indicator" class="run-indicator" role="status" aria-label="任务正在执行" hidden><svg class="spinner" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle class="spinner-track" cx="12" cy="12" r="8"/><path class="spinner-arc" d="M12 4a8 8 0 0 1 8 8"/></svg></span><button id="send-button" type="submit" class="send" aria-label="发送消息" hidden>↑</button></div></form><p id="composer-note" class="composer-note">在本地电脑中执行</p></div>
+      </section>
+    </main>
+  </div>
+  <dialog id="session-settings" class="session-settings" aria-labelledby="settings-title"><div class="dialog-heading"><h2 id="settings-title">会话设置</h2><button id="settings-close" class="icon" aria-label="关闭会话设置">×</button></div><div class="model-control"><label for="model-select">模型</label><select id="model-select"><option value="">沿用本机模型</option></select><label for="effort-select">思考强度</label><select id="effort-select"><option value="">本机默认</option></select><span id="model-hint">切换后下一轮生效</span></div><p id="pending-settings" class="folder"></p><div class="settings-project"><p id="session-project" class="folder"></p><p id="session-folder" class="folder"></p></div><p id="settings-input-note" class="muted"></p></dialog>
+  <dialog id="create-dialog"><form id="create-form"><div class="dialog-heading"><h2>新建会话</h2><button type="button" id="cancel-create" class="icon" aria-label="取消">×</button></div><p class="muted">任务在选定的电脑和项目中执行。</p><label for="host-select">电脑</label><select id="host-select" required></select><label for="project-select">项目</label><select id="project-select" required></select><label for="workspace-select">工作目录</label><select id="workspace-select" required></select><label for="provider-select">Agent</label><select id="provider-select"><option value="codex">Codex</option><option value="claude">Claude Code</option></select><label for="create-model">模型</label><select id="create-model"><option value="">沿用本机默认模型</option></select><label for="create-effort">思考强度</label><select id="create-effort"><option value="">本机默认</option></select><label for="initial-prompt">想做什么？</label><textarea id="initial-prompt" maxlength="32000" rows="4" placeholder="描述任务…"></textarea><div id="create-attachment-preview" class="attachment-preview" aria-label="新会话待发送附件" hidden></div><button id="create-attach-button" class="text-button" type="button" aria-label="添加新会话附件" aria-expanded="false">＋ 图片或文件</button><p id="create-error" class="error" role="alert"></p><button type="submit" class="primary" id="create-submit">开始会话 ↗</button></form></dialog>
+  <dialog id="image-viewer" class="image-viewer" aria-labelledby="image-title"><div class="dialog-heading"><h2 id="image-title">图片</h2><button id="image-close" class="icon" type="button" aria-label="关闭图片">×</button></div><img id="image-full" alt="会话图片"><a id="image-original" target="_blank" rel="noopener noreferrer">打开原图 ↗</a></dialog>
+  <div id="toast" class="toast" role="status" hidden></div>
+</body>
+</html>
