@@ -223,18 +223,20 @@ dialog::backdrop { background: #0009; backdrop-filter: none; }
 .model-control label, .model-control>span { color: var(--muted); }
 .toast { color: var(--ink); background: var(--surface); border: 1px solid var(--line); }
 .empty-list { color: var(--muted); }
-.image-card { background: var(--surface); border-color: var(--line); }
-.image-thumb { position: relative; display: grid; place-items: center; height: 180px; min-height: 180px; overflow: hidden; background: var(--surface); }
+.image-card, .file-card.image-file { width: 100%; max-width: min(100%,calc(320px * var(--image-ratio,1.6))); min-width: 0; align-self: flex-start; justify-self: start; background: transparent; border: 0; border-radius: 10px; overflow: hidden; }
+.file-card.image-file { width: 240px; }
+.image-thumb, .file-card .image-thumb { position: relative; display: grid; place-items: center; width: 100%; max-width: 100%; height: auto; min-height: 0; aspect-ratio: var(--image-ratio,1.6); overflow: hidden; background: var(--surface); }
 .image-thumb img, .file-card .image-thumb img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
-.image-thumb .asset-status { position: absolute; right: 0; bottom: 0; left: 0; margin: 0; background: var(--surface); line-height: 16px; }
-.image-thumb:has(img[hidden]) .asset-status { top: 0; display: grid; place-items: center; }
-.file-card .image-thumb { width: 240px; max-width: 100%; height: 155px; min-height: 155px; }
+.image-thumb .asset-status { position: absolute; inset: 0; margin: 0; padding: 12px; display: grid; place-items: center; background: var(--surface); line-height: 16px; }
+.asset-status[data-state="loading"]::before { content: ''; width: 20px; height: 20px; border: 2px solid var(--line); border-top-color: var(--ink); border-radius: 50%; animation: image-loading 1s linear infinite; }
+@keyframes image-loading { to { transform: rotate(360deg); } }
+@media(prefers-reduced-motion:reduce) { .asset-status[data-state="loading"]::before { animation: none; } }
 .history-note { height: 18px; line-height: 18px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agent-activity { display: flex; align-items: center; gap: 9px; min-width: 0; height: 30px; margin: 0 0 8px; color: var(--muted); font-size: 12px; }
 .activity-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: #22c55e; }
 .activity-label { flex: none; color: var(--ink); }
 .activity-detail { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-@media(max-width:760px) { .image-thumb { height: 155px; min-height: 155px; } .agent-activity { font-size: 11px; height: 26px; margin-bottom: 5px; } }
+@media(max-width:760px) { .agent-activity { font-size: 11px; height: 26px; margin-bottom: 5px; } }
 .image-viewer>a { color: var(--link); }
 .message-body.markdown { white-space: normal; line-height: 1.75; overflow-wrap: anywhere; }
 .message-body.markdown > :last-child { margin-bottom: 0; }

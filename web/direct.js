@@ -50,8 +50,16 @@ export class AssetTransfers {
     catch(error){if(this.memory.get(key)===job)this.memory.delete(key);if(epoch===this.epoch)this.failures.set(key,{error,at:Date.now()});throw error;}
   }
   bind(img,status,target,kind,ref){
-    img.alt=ref.name||'图片';img.hidden=true;status.textContent='等待加载';
-    const load=async(retry,preview=false)=>{status.textContent=preview?'正在加载图片…':'正在读取原图…';try{const result=await this.read(target,kind,ref,retry,preview);img.src=result.url;img.hidden=false;status.textContent=result.mode;status.title=result.mode==='设备缓存'?'来自当前设备缓存':'通过已登录的服务器获取';return result;}catch(error){status.textContent='加载失败 · 点此重试';status.title=error.message;throw error;}};
+    img.alt=ref.name||'图片';img.hidden=true;status.textContent='';status.dataset.state='loading';status.setAttribute('role','status');status.setAttribute('aria-label','正在加载图片…');
+    const load=async(retry,preview=false)=>{
+      status.hidden=!img.hidden;status.textContent='';status.dataset.state='loading';status.setAttribute('aria-label','正在加载图片…');status.removeAttribute('title');
+      try{
+        const result=await this.read(target,kind,ref,retry,preview),decoded=new Image();decoded.src=result.url;await decoded.decode();
+        // Size the card before revealing the image; existing reading anchors handle the one-time resize.
+        img.parentElement.parentElement.style.setProperty('--image-ratio',String(decoded.naturalWidth/decoded.naturalHeight));
+        img.src=result.url;img.hidden=false;status.hidden=true;status.removeAttribute('title');return result;
+      }catch(error){status.hidden=false;status.dataset.state='error';status.setAttribute('aria-label','加载失败 · 点此重试');status.textContent='加载失败 · 点此重试';status.title=error.message;throw error;}
+    };
     const start=()=>load(false,true).catch(()=>{});img._directStart=start;this.nodes.add(img);
     if(!this.observer)this.observer=new IntersectionObserver(entries=>{for(const e of entries)if(e.isIntersecting){this.observer.unobserve(e.target);this.nodes.delete(e.target);e.target._directStart();}},{root:document.getElementById('timeline'),rootMargin:'300px'});
     // Observe the card, not a hidden image, so lazy loading works before src exists.

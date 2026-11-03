@@ -68,20 +68,20 @@ function messageBody(message){
 function imageGallery(message){
   const gallery=node('div','image-gallery');
   for(const ref of (message.images??[]).filter(ref=>message.role!=='tool'||ref.id)){
-    const figure=node('figure','image-card'),caption=node('figcaption','',ref.name||'图片');
+    const figure=node('figure','image-card');
     if(ref.id&&/^[a-f0-9]{64}$/.test(ref.id)){
       const target={hostId:selected.hostId,sessionId:selected.id},button=node('button','image-thumb'),img=node('img'),status=node('span','asset-status');button.type='button';button.setAttribute('aria-label','查看图片：'+(ref.name||'图片'));img.decoding='async';button.append(img,status);
       const load=directAssets.bind(img,status,target,'image',ref);
-      button.onclick=async()=>{try{const {url}=await load(true),viewer=$('image-viewer');$('image-title').textContent=ref.name||'图片';$('image-full').alt=ref.name||'会话图片';$('image-full').src=url;$('image-original').href=url;if(!viewer.open)viewer.showModal();}catch(error){toast(error.message);}};figure.append(button);
+      button.onclick=async()=>{try{const {url}=await load(true),viewer=$('image-viewer');$('image-title').textContent='图片';$('image-full').alt=ref.name||'会话图片';$('image-full').src=url;$('image-original').href=url;if(!viewer.open)viewer.showModal();}catch(error){toast(error.message);}};figure.append(button);
     }else figure.append(node('p','image-error',ref.error||'图片暂不可用'));
-    figure.append(caption);gallery.append(figure);
+    gallery.append(figure);
   }
   gallery.hidden=!gallery.childElementCount;return gallery;
 }
 function fileGallery(message){
   const gallery=node('div','file-gallery');for(const file of message.files??[]){
     if(!/^[a-f0-9-]{36}$/i.test(file.id))continue;const target={hostId:selected.hostId,sessionId:selected.id},card=node('div','file-card');
-    if(file.mime?.startsWith('image/')){const button=node('button','image-thumb'),img=node('img'),status=node('span','asset-status');button.type='button';button.setAttribute('aria-label','查看图片：'+file.name);button.append(img,status);const load=directAssets.bind(img,status,target,'file',file);button.onclick=async()=>{try{const {url}=await load(true);$('image-title').textContent=file.name;$('image-full').alt=file.name;$('image-full').src=url;$('image-original').href=url;$('image-viewer').showModal();}catch(error){toast(error.message);}};card.append(button);}
+    if(file.mime?.startsWith('image/')){card.classList.add('image-file');const button=node('button','image-thumb'),img=node('img'),status=node('span','asset-status');button.type='button';button.setAttribute('aria-label','查看图片：'+file.name);button.append(img,status);const load=directAssets.bind(img,status,target,'file',file);button.onclick=async()=>{try{const {url}=await load(true);$('image-title').textContent='图片';$('image-full').alt=file.name;$('image-full').src=url;$('image-original').href=url;$('image-viewer').showModal();}catch(error){toast(error.message);}};card.append(button);gallery.append(card);continue;}
     const link=node('button','file-download',file.name+' · '+Math.max(1,Math.round(file.size/1024))+' KB');link.type='button';link.title='通过服务器下载附件';link.onclick=async()=>{link.disabled=true;try{const result=await directAssets.read(target,'file',file,true),a=node('a');a.href=result.url;a.download=file.name;a.click();toast(result.mode);}catch(error){toast(error.message);}finally{link.disabled=false;}};card.append(link);gallery.append(card);
   }return gallery;
 }
