@@ -330,3 +330,5 @@ dialog::backdrop { background: #0009; backdrop-filter: none; }
 .language-toggle { flex:none; padding:6px 8px; color:var(--muted); border:1px solid var(--line); border-radius:8px; background:transparent; font-size:11px; }
 .login-card>.language-toggle { position:absolute; right:68px; top:22px; }
 @media(max-width:760px){.topbar .language-toggle{padding:5px;font-size:10px;}.filters{gap:1px;}.filters button{padding:7px 9px;}}
+
+.message.user.delivery-pending .message-label { display: block; font-size: 11px; margin-bottom: 6px; }

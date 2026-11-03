@@ -21,6 +21,10 @@ test('phone → relay → local process: streaming, approval, stop, idempotency,
   };
   let bridge:ReturnType<typeof startBridge>|undefined;
   try{
+    // Follow the real entry module graph, so a newly imported file cannot ship behind a missing static route.
+    const modules=['/app.js'],visited=new Set<string>();
+    for(const path of modules){if(visited.has(path))continue;visited.add(path);const response=await fetch(base+path);assert.equal(response.status,200,path);assert.match(response.headers.get('content-type')??'',/javascript/);const code=await response.text();for(const match of code.matchAll(/(?:from\s*|import\s*)['"](\.\/[^'"]+)['"]/g))modules.push(new URL(match[1],base+path).pathname);}
+    assert.ok(visited.has('/operations.js'));
     assert.equal((await request('/api/state')).status,401);
     assert.equal((await request('/api/login',{token:phone},false)).status,403);
     assert.equal((await request('/api/login',{token:'bad'})).status,401);

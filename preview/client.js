@@ -46,7 +46,7 @@
     if(!s)throw Error('示例会话不存在');
     if(a.type==='send'){
       const files=(a.attachmentIds??[]).map(id=>uploads.get(id)?.ref).filter(Boolean),command=a.text.trim().startsWith('/'),queued=!command&&['running','waiting'].includes(s.status);
-      const m=message(s,'user',a.text,null,true,{...queued?{label:'你 · 已排队'}:{},...files.length?{files}:{}});
+      const m=message(s,'user',a.text,null,true,{id:a.id,...queued?{label:'你 · 已排队'}:{},...files.length?{files}:{}});
       if(command){if(a.text.trim()==='/stop')return act({...a,type:'stop'});message(s,'assistant',a.text.startsWith('/usage')?'预览额度：100% 可用。此处为示例，不会查询真实账号。':a.text.startsWith('/btw')?'这是旁问的模拟回复，主任务继续执行。':'可体验 /help、/usage、/btw 和 /stop；模型与强度也可从输入栏调整。',null,true);return {sideQuestion:true};}
       if(queued){s.pendingIds.push(m.id);s.pendingCount=s.pendingIds.length;state();return {queued:true};}
       status(s,'running',{kind:'thinking',label:'正在思考',detail:'准备示例回复'});finish(s,'收到，我会按这个方向继续。这是一条模拟回复；演示中的消息和附件仅留在当前页面内存中。');return {};
@@ -54,7 +54,7 @@
     if(a.type==='stop'){clearTimeout(jobs.get(s.id));jobs.delete(s.id);s.pendingIds=[];s.pendingCount=0;for(const q of questions.values())if(q.sessionId===s.id&&q.status==='pending'){q.status='cancelled';emit('question.resolved',s,q);}s.questionCount=0;status(s,'interrupted');return {};}
     if(a.type==='steer'||a.type==='cancel-input'){s.pendingIds=s.pendingIds.filter(id=>id!==a.queuedId);s.pendingCount=s.pendingIds.length;const m=transcripts.get(s.id).find(m=>m.id===a.queuedId);if(m){m.label=a.type==='steer'?'你 · 引导已接收':'你 · 排队已取消';emit('message',s,m);}if(a.type==='steer'){status(s,'running',{kind:'plan',label:'已接收引导',detail:'正在按补充要求调整'});finish(s,'引导已接收，示例任务已按新的方向完成。');}state();return {mode:'active-turn'};}
     if(a.type==='answer'){const q=questions.get(a.questionId);if(!q||q.sessionId!==s.id||q.status!=='pending')throw Error('问题已关闭');q.status='answered';q.answers=a.answers;s.questionCount=0;emit('question.resolved',s,q);status(s,'running',{kind:'plan',label:'正在继续',detail:'根据你的选择调整设计'});finish(s,'已收到你的选择：**'+Object.values(a.answers).flat().join('、')+'**。方案已更新，已回答的问题会在原触发位置折叠。');return {};}
-    if(a.type==='set-model'){const queued=s.status==='running';if(a.model)s[queued?'nextModel':'model']=a.model;if(a.effort)s[queued?'nextEffort':'effort']=a.effort;state();return {queued};}
+    if(a.type==='set-model'){const queued=s.status==='running';if(a.model)s[queued?'nextModel':'model']=a.model;if(a.effort)s[queued?'nextEffort':'effort']=a.effort;state();return {queued,model:s[queued?'nextModel':'model'],effort:s[queued?'nextEffort':'effort']};}
     if(a.type==='set-permissions'){s.permissionMode=a.permissionMode;state();return {};}
     throw Error('该操作不在功能预览范围内');
   }

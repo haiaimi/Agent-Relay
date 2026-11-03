@@ -1,3 +1,4 @@
+import {SettingsWrites,SendReceipts} from './operations.js';
 import {agentLabel,agentChoice,hostAgents} from './agent-ui.js';
 import {AttachmentInput} from './attachments.js';
 import {setupDrawer,setupSidebarResize} from './drawer.js';
@@ -16,7 +17,9 @@ const questionPanel=new QuestionPanel($('question-cards'),(card,answers)=>action
 questionPanel.anchor=()=>orderedMessages(messages.values()).at(-1)?.id;
 questionPanel.beforeRender=()=>({anchor:readingAnchor(),follow:$('timeline').scrollHeight-$('timeline').scrollTop-$('timeline').clientHeight<40});
 questionPanel.afterRender=snapshot=>{if(!selected)return;renderMessages(true);if(snapshot?.follow)$('timeline').scrollTop=$('timeline').scrollHeight;else restoreReadingAnchor(snapshot?.anchor);rememberReadingPosition();};
-const modelCache=new Map(),modelLists=new Map(),settingChanges=new Set();let modelLoading=0,createModelLoading=0;
+const modelCache=new Map(),modelLists=new Map();let modelLoading=0,createModelLoading=0;
+const receipts=new SendReceipts();
+const settingsWrites=new SettingsWrites((sessionId,patch)=>action({type:'set-model',sessionId,...patch}),()=>renderHead(),(id,patch,result)=>{const session=state.sessions.find(s=>s.id===id);if(!session)return;const model=result.model??patch.model,effort=result.effort??patch.effort;Object.assign(session,result.queued?{nextModel:model,nextEffort:effort}:{model,effort,nextModel:undefined,nextEffort:undefined});if(selected?.id===id)selected=session;},(id,error)=>toast('模型设置未保存：'+error.message));
 const drafts=new Map(),expandedTools=new Set(),sending=new Set(),stopping=new Set();let commandOptions=[],commandCandidates=[],commandIndex=0,commandsLoading=0;
 const effortNames={default:'本机默认',none:'无',minimal:'最低',low:'低',medium:'中',high:'高',xhigh:'很高',max:'最高',ultra:'极高'};
 const permissionNames={request:'请求批准',auto:'帮我批准',full:'完整权限'};
@@ -126,7 +129,8 @@ function renderHead(){
   $('run-indicator').hidden=!active;
   $('stop-task').hidden=hasInput||!active;$('stop-task').disabled=stopping.has(selected.id);$('stop-task').setAttribute('aria-busy',String(stopping.has(selected.id)));
   $('stop-task').title=stopping.has(selected.id)?'正在停止…':selected.canStop===false?(selected.provider==='claude'&&!selected.managed?'请在电脑上按 Esc 停止此 Claude 窗口':'本地停止通道尚未就绪，点击重试'):'停止当前任务，同时取消排队消息；保留会话记录';$('run-indicator').setAttribute('aria-label',selected.status==='waiting'?'等待你确认':'任务正在执行');$('run-indicator').title=selected.status==='waiting'?'等待你确认':'任务正在执行';
-  $('model-select').disabled=!online||settingChanges.has(selected.id);$('effort-select').disabled=!online||settingChanges.has(selected.id);
+  $('model-select').disabled=!online;$('effort-select').disabled=!online;
+  const saving=settingsWrites.pending(selected.id);
   const presentation=settingsPresentation(selected,modelLists.get(selected.hostId+':'+selected.provider+':'+(selected.agentId??''))??[],!selected.settingsSource&&!selected.settingsError&&online);
   const permission=selected.nextPermissionMode??selected.permissionMode??'';
   $('permission-preview').textContent=presentation.permission;$('permission-toggle').dataset.mode=permission;
@@ -134,11 +138,11 @@ function renderHead(){
   $('permission-toggle').title=presentation.permissionPending||selected.settingsError||(selected.canSetPermissions===false?'此原生 Claude 窗口需在电脑上修改权限':'选择当前会话权限');
   for(const option of document.querySelectorAll('[data-permission]')){option.setAttribute('aria-pressed',String(option.dataset.permission===permission));option.disabled=!online||!hostOf(selected)?.capabilities?.permissions||selected.canSetPermissions===false||permissionChanges.has(selected.id);}
   $('permission-note').textContent=!hostOf(selected)?.capabilities?.permissions?'此电脑的连接程序需要更新后才能选择权限':selected.canSetPermissions===false?'独立 Claude 窗口的权限需在电脑上修改；网页启动的 Claude 支持切换':selected.nextPermissionMode?'已预设下一轮权限，当前任务保持原权限':'仅应用于当前会话；Agent 强制要求的确认仍会显示';
-  const targetModel=selected.nextModel??selected.model;if(targetModel&&[...$('model-select').options].some(o=>o.value===targetModel))$('model-select').value=targetModel;
-  const targetEffort=selected.nextEffort??selected.effort??'default';if([...$('effort-select').options].some(o=>o.value===targetEffort))$('effort-select').value=targetEffort;
+  const targetModel=saving?.model??selected.nextModel??selected.model;if(targetModel&&[...$('model-select').options].some(o=>o.value===targetModel))$('model-select').value=targetModel;
+  const targetEffort=saving?.effort??selected.nextEffort??selected.effort??'default';if([...$('effort-select').options].some(o=>o.value===targetEffort))$('effort-select').value=targetEffort;
   const settingsModels=modelLists.get(selected.hostId+':'+selected.provider+':'+(selected.agentId??''))??[];
   if(settingsModels.length)effortOptions($('effort-select'),settingsModels,targetModel,targetEffort);
-  $('pending-settings').textContent=presentation.pending;
+  $('pending-settings').textContent=saving?'正在后台保存模型设置…':presentation.pending;
   $('settings-preview').textContent=presentation.model;
   $('settings-toggle').title=[presentation.model,presentation.pending,selected.settingsError,selected.settingsSource==='transcript'?'最近一次任务的设置':null].filter(Boolean).join('\n');
   const pending=selected.pendingCount?` · ${selected.pendingCount} 条排队中`:'';
@@ -191,7 +195,7 @@ function rememberReadingPosition(){const t=$('timeline');retainedReadingAnchor=t
 function renderMessages(keepPosition=false){
   if(document.activeElement?.closest('.question-card')||readingSelection())keepPosition=true;
   const timeline=$('timeline'),nearBottom=timeline.scrollHeight-timeline.scrollTop-timeline.clientHeight<40;
-  const anchor=keepPosition||!nearBottom?readingAnchor():null,rows=[],live=new Set(),groups=new Set(),groupCards=new Set(),approvalIds=new Set(),sequence=timelineWithQuestions([...messages.values()].map(m=>displayMessage(m,selected?.provider)),questionPanel.cards.values()),placedQuestions=new Set();let group=null,changed=false;
+  const anchor=keepPosition||!nearBottom?readingAnchor():null,rows=[],live=new Set(),groups=new Set(),groupCards=new Set(),approvalIds=new Set(),sequence=timelineWithQuestions(receipts.messages(selected?.id,messages.values()).map(m=>displayMessage(m,selected?.provider)),questionPanel.cards.values()),placedQuestions=new Set();let group=null,changed=false;
   const text=(element,value)=>{if(element.textContent!==value){element.textContent=value;changed=true;}};
   for(const [index,m] of sequence.entries()){
     if(m.role==='question'){
@@ -205,6 +209,7 @@ function renderMessages(keepPosition=false){
       }else{const card=node('article','message '+m.role),label=node('div','message-label'),body=node('div');card.dataset.messageId=m.id;card.append(label,body);entry={role:m.role,card,label,body};}
       renderedMessages.set(m.id,entry);changed=true;
     }
+    entry.card.classList.toggle('delivery-pending',!!m.delivery);
     text(entry.label,m.label||(m.role==='user'?'你':m.role==='assistant'?(agentLabel(selected).toUpperCase()):m.role==='tool'?'工具调用':'运行提示'));
     const bodyVersion=JSON.stringify([m.text,!!m.images?.length]);
     if(entry.bodyVersion!==bodyVersion){if(m.role==='tool')text(entry.body,m.text);else{const body=messageBody(m);entry.body.replaceWith(body);entry.body=body;changed=true;}entry.bodyVersion=bodyVersion;}
@@ -254,7 +259,7 @@ function renderMessages(keepPosition=false){
 function applyEvent(event,draw=true,replay=false){
   if(event.sessionId!==selected?.id||seen.has(event.id))return;seen.add(event.id);const d=event.data;
   const wasNearBottom=$('timeline').scrollHeight-$('timeline').scrollTop-$('timeline').clientHeight<40;
-  if(event.type==='message'){questionPanel.replaceAnchors(d.replaces??[],d.id);for(const id of d.replaces??[])messages.delete(id);const old=messages.get(d.id);messages.set(d.id,{...old,...d,timestamp:d.timestamp??old?.timestamp??event.at,images:replay&&canonicalMessages.has(d.id)?old?.images:d.images??old?.images});}
+  if(event.type==='message'){receipts.observe(d);questionPanel.replaceAnchors(d.replaces??[],d.id);for(const id of d.replaces??[])messages.delete(id);const old=messages.get(d.id);messages.set(d.id,{...old,...d,timestamp:d.timestamp??old?.timestamp??event.at,images:replay&&canonicalMessages.has(d.id)?old?.images:d.images??old?.images});}
   if(event.type==='delta'){const old=messages.get(d.messageId);messages.set(d.messageId,{id:d.messageId,role:'assistant',text:(old?.text??'')+d.text,timestamp:old?.timestamp??event.at});}
   if(event.type==='error')messages.set(event.id,{id:event.id,role:'system',text:d.message,timestamp:event.at});
   if(event.type==='status'&&acceptsStatusEvent(selected,event,replay)){selected.status=d.status;selected.activity=d.activity??undefined;renderHead();}
@@ -275,7 +280,7 @@ async function history(older=false,silent=false){
     if(!older)historyEtag=page.etag;
     const beforeHeight=$('timeline').scrollHeight;const beforeTop=$('timeline').scrollTop;const nearBottom=beforeHeight-beforeTop-$('timeline').clientHeight<40;
     const firstPage=!historyPager.initialized;
-    for(const message of page.messages)canonicalMessages.add(message.id);
+    for(const message of page.messages){receipts.observe(message);canonicalMessages.add(message.id);}
     if(!historyPager.complete(request,page.cursor))return;
     const combined=older||firstPage?new Map(page.messages.map(m=>[m.id,m])):new Map(messages);
     if(older||firstPage){for(const [id,m] of messages){const old=combined.get(id);if(!old||m.text.length>old.text.length)combined.set(id,{...old,...m,images:m.images??old?.images});}}
@@ -325,7 +330,7 @@ function workspaces(){const host=state.hosts.find(h=>h.id===$('host-select').val
 function projects(){const host=state.hosts.find(h=>h.id===$('host-select').value);$('project-select').replaceChildren(...(host?.projects??[]).map(p=>new Option(`${p.source==='codex'?'Codex · ':''}${p.name}`,p.id)));$('create-submit').disabled=!host?.online||!host?.projects.length;$('new-project-button').disabled=!host?.online||!host?.capabilities?.createProject;$('new-project-button').title=host?.capabilities?.createProject?'在选定的工作电脑上创建或使用文件夹':'此电脑的连接程序需要更新后才能新建工程';$('create-permission').disabled=!host?.capabilities?.permissions;if(!host?.capabilities?.permissions)$('create-permission').value='request';updateCreatePermissionNote();$('new-project-path').placeholder=host?.platform?.startsWith('win')?'例如：E:\\Projects\\MyGame':'例如：/Users/you/Projects/MyGame';$('new-project-panel').hidden=true;const previous=$('provider-select').value;$('provider-select').replaceChildren(...hostAgents(host).map(a=>{const o=new Option(a.name+(a.configured===false?'（未配置）':''),a.provider==='api'?'api:'+a.id:a.provider);o.disabled=a.configured===false;return o;}));if([...$('provider-select').options].some(o=>o.value===previous&&!o.disabled))$('provider-select').value=previous;$('create-submit').disabled=$('create-submit').disabled||![...$('provider-select').options].some(o=>!o.disabled);workspaces();void createModels();}
 async function models(hostId,provider,agentId){const key=hostId+':'+provider+':'+(agentId??'');if(!modelCache.has(key))modelCache.set(key,api(`models?hostId=${encodeURIComponent(hostId)}&provider=${provider}${agentId?`&agentId=${encodeURIComponent(agentId)}`:''}`).catch(err=>{modelCache.delete(key);throw err;}));const list=(await modelCache.get(key)).models;modelLists.set(key,list);return list;}
 const selectOptionKeys=new WeakMap();
-function modelOptions(element,list,current){const placeholder=new Option(element.id==='model-select'?'选择模型…':'沿用本机默认模型','');placeholder.disabled=element.id==='model-select';element.replaceChildren(placeholder,...list.map(m=>new Option(m.name+(m.isDefault?'（默认）':''),m.id)));if(current&&!list.some(m=>m.id===current))element.add(new Option(`当前：${modelName(list,current)}`,current));element.value=current??'';}
+function modelOptions(element,list,current){if(element.id==='model-select'&&selected)current=settingsWrites.pending(selected.id)?.model??current;const placeholder=new Option(element.id==='model-select'?'选择模型…':'沿用本机默认模型','');placeholder.disabled=element.id==='model-select';element.replaceChildren(placeholder,...list.map(m=>new Option(m.name+(m.isDefault?'（默认）':''),m.id)));if(current&&!list.some(m=>m.id===current))element.add(new Option(`当前：${modelName(list,current)}`,current));element.value=current??'';}
 function effortOptions(element,list,model,current){
   const m=findModel(list,model)??(!model?list.find(m=>m.isDefault)??list[0]:null),options=[['default','使用模型推荐强度'],...(m?.efforts??[]).map(v=>[v,effortNames[v]??v])];
   if(current&&!options.some(([value])=>value===current))options.push([current,`当前：${effortNames[current]??current}`]);
@@ -344,10 +349,37 @@ const createContext=()=>({key:'create:'+ $('host-select').value+':'+$('project-s
 const composerFiles=new AttachmentInput(document.querySelector('.composer-wrap'),$('attach-button'),$('attachment-preview'),composerContext,message=>{if(message)toast(message);renderHead();});
 const createFiles=new AttachmentInput($('create-form'),$('create-attach-button'),$('create-attachment-preview'),createContext,message=>{if(message)$('create-error').textContent=message;});
 $('login-form').onsubmit=async e=>{e.preventDefault();$('login-error').textContent='';try{await api('login',{token:$('token').value});$('token').value='';await start();}catch(err){$('login-error').textContent=err.message;}};
-$('logout').onclick=async()=>{try{await api('logout',{});}finally{await directAssets.reset();questionPanel.reset(true);composerFiles.reset();createFiles.reset();state={hosts:[],sessions:[]};selected=null;messages.clear();approvals.clear();$('messages').replaceChildren();$('session-list').replaceChildren();$('conversation').hidden=true;$('welcome').hidden=false;loggedOut();}};
+$('logout').onclick=async()=>{try{await api('logout',{});}finally{await directAssets.reset();questionPanel.reset(true);composerFiles.reset();createFiles.reset();state={hosts:[],sessions:[]};receipts.entries.clear();selected=null;messages.clear();approvals.clear();$('messages').replaceChildren();$('session-list').replaceChildren();$('conversation').hidden=true;$('welcome').hidden=false;loggedOut();}};
 $('new-session').onclick=openCreate;$('welcome-new').onclick=openCreate;$('cancel-create').onclick=()=>$('create-dialog').close();$('host-select').onchange=()=>{projects();createFiles.render();};
 $('create-form').onsubmit=async e=>{e.preventDefault();if(!$('initial-prompt').value.trim()&&!createFiles.count){$('create-error').textContent='请输入任务或添加附件';return;}const context=createContext();$('create-submit').disabled=true;$('create-error').textContent='';try{const attachmentIds=await createFiles.upload(context);const result=await action({attachmentIds,type:'start',hostId:$('host-select').value,projectId:$('project-select').value,workspaceIndex:Number($('workspace-select').value),...agentChoice($('provider-select').value),model:$('create-model').value||undefined,effort:$('create-effort').value,...state.hosts.find(h=>h.id===$('host-select').value)?.capabilities?.permissions?{permissionMode:$('create-permission').value}:{}, text:$('initial-prompt').value});createFiles.clear(context.key);await refresh();$('create-dialog').close();$('initial-prompt').value='';const s=state.sessions.find(s=>s.id===result.sessionId);if(s)await select(s);}catch(err){$('create-error').textContent=err.message;}finally{$('create-submit').disabled=false;}};
-$('composer').onsubmit=async e=>{e.preventDefault();const text=$('prompt').value,s=selected,context=composerContext();if(!s||(!text.trim()&&!composerFiles.count)||sending.has(s.id))return;sending.add(s.id);hideCommands();renderHead();try{const attachmentIds=await composerFiles.upload(context);const result=await action({type:'send',sessionId:s.id,text,attachmentIds});composerFiles.clear(context.key);if(selected?.id===s.id&&$('prompt').value===text)$('prompt').value='';drafts.set(s.id,selected?.id===s.id?$('prompt').value:'');if(result.queued)toast('消息已排队，可在该条消息上操作');else if(result.sideQuestion)toast('旁问已发出，主任务继续执行');await refresh();}catch(err){toast(err.message);}finally{sending.delete(s.id);renderHead();resizeComposer();}};
+$('composer').onsubmit=async e=>{
+  e.preventDefault();const text=$('prompt').value,s=selected,context=composerContext();
+  if(!s||!hostOf(s)?.online||(!text.trim()&&!composerFiles.count)||sending.has(s.id))return;
+  const receipt=receipts.begin(s.id,text),hasFiles=!!composerFiles.count;
+  sending.add(s.id);$('prompt').value='';drafts.set(s.id,'');hideCommands();renderHead();renderMessages();resizeComposer();
+  $('timeline').scrollTop=$('timeline').scrollHeight;rememberReadingPosition();
+  let dispatched=false;
+  try{
+    // Capture the attachment batch synchronously; newly typed text remains a separate draft.
+    const attachmentIds=await composerFiles.upload(context);
+    const files=composerFiles.list(context.key).map(i=>i.ref).filter(Boolean);
+    receipts.update(receipt.id,{files});
+    if(selected?.id===s.id)renderMessages(true);
+    await settingsWrites.wait(s.id);
+    if(hasFiles)composerFiles.clear(context.key);
+    dispatched=true;
+    const result=await action({id:receipt.id,type:'send',sessionId:s.id,text,attachmentIds});
+    receipts.update(receipt.id,{label:result.queued?'你 · 已排队':result.sideQuestion?'你 · 旁问':'你',delivery:undefined});
+    if(result.queued)toast('消息已排队，可在该条消息上操作');
+    else if(result.sideQuestion)toast('旁问已发出，主任务继续执行');
+    // A receipt is enough to unlock the composer; inventory refresh is independent.
+    void refresh().catch(()=>{});
+  }catch(err){
+    receipts.update(receipt.id,{label:dispatched?'你 · 发送待确认':'你 · 发送失败',delivery:dispatched?'unknown':'failed'});
+    if(!dispatched&&!drafts.get(s.id)){drafts.set(s.id,text);if(selected?.id===s.id&&!$('prompt').value)$('prompt').value=text;}
+    toast(dispatched?'发送结果待确认，请查看会话，勿重复发送：'+err.message:'消息尚未发送：'+err.message);
+  }finally{sending.delete(s.id);renderHead();if(selected?.id===s.id){renderMessages(true);resizeComposer();}}
+};
 $('prompt').oninput=()=>{if(selected)drafts.set(selected.id,$('prompt').value);commandIndex=0;resizeComposer();renderCommands();renderHead();};
 $('messages').addEventListener('click',async event=>{
   const button=event.target.closest('.code-copy');if(!button)return;
@@ -392,19 +424,8 @@ $('device-filter').onchange=()=>{renderFilters();renderList();};$('project-filte
 $('session-title').onclick=()=>{const button=$('session-title');const expanded=button.getAttribute('aria-expanded')==='true';button.setAttribute('aria-expanded',String(!expanded));button.setAttribute('aria-label',expanded?'展开完整会话标题':'收起会话标题');};
 $('project-select').onchange=()=>{workspaces();createFiles.render();};$('provider-select').onchange=()=>void createModels();
 $('activity-filter').onchange=renderList;
-$('model-select').onchange=async()=>{
-  if(!selected||!$('model-select').value||settingChanges.has(selected.id))return;
-  const s=selected,model=$('model-select').value;settingChanges.add(s.id);renderHead();
-  try{const result=await action({type:'set-model',sessionId:s.id,model});await refresh();if(selected?.id===s.id)await sessionModels(selected);toast(result.queued?'已预设下一轮模型，当前任务继续执行':'下一轮使用 '+model);}
-  catch(err){toast(err.message);if(selected?.id===s.id)$('model-select').value=s.nextModel??s.model??'';}
-  finally{settingChanges.delete(s.id);renderHead();}
-};
-$('effort-select').onchange=async()=>{
-  if(!selected||settingChanges.has(selected.id))return;
-  const s=selected,model=$('model-select').value,effort=$('effort-select').value;settingChanges.add(s.id);renderHead();
-  try{const result=await action({type:'set-model',sessionId:s.id,model:model||undefined,effort});await refresh();toast(result.queued?'已预设下一轮思考强度，当前任务继续执行':'思考强度已更新');}
-  catch(err){toast(err.message);}finally{settingChanges.delete(s.id);renderHead();}
-};
+$('model-select').onchange=()=>{if(selected&&$('model-select').value)void settingsWrites.set(selected.id,{model:$('model-select').value,effort:'default'}).catch(()=>{});};
+$('effort-select').onchange=()=>{if(selected)void settingsWrites.set(selected.id,{model:$('model-select').value||undefined,effort:$('effort-select').value}).catch(()=>{});};
 $('create-model').onchange=async()=>{try{const choice=agentChoice($('provider-select').value),list=await models($('host-select').value,choice.provider,choice.agentId);effortOptions($('create-effort'),list,$('create-model').value);}catch(err){toast(err.message);}};
 document.querySelectorAll('[data-provider]').forEach(b=>b.onclick=()=>{provider=b.dataset.provider;document.querySelectorAll('[data-provider]').forEach(x=>x.classList.toggle('active',x===b));renderList();});
 

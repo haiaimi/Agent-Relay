@@ -263,8 +263,9 @@ export class AgentRuntime {
   async drainInputs(){
     if(this.draining||this.closed)return;this.draining=true;
     try{const handled=new Set<string>();for(const a of this.store.queued()){
-      if(handled.has(a.sessionId!))continue;handled.add(a.sessionId!);const s=this.get(a.sessionId!);
-      if(s.provider==='claude'&&!s.managed){const live=this.history.claudeLiveStatus(s.nativeId);s.status=live??'idle';if(live&&!claudeSteerSessions(this.claudeHome()).has(s.nativeId))continue;}
+      if(handled.has(a.sessionId!))continue;handled.add(a.sessionId!);let s=this.get(a.sessionId!);
+      if(s.provider==='codex'&&!s.managed&&!this.busy.has(s.id)){await this.history.refreshSessionStatus(s.id);this.list();s=this.get(s.id);}
+      if(s.provider==='claude'&&!s.managed){const live=this.history.claudeLiveStatus(s.nativeId);s.status=live??'idle';if(live&&live!=='idle'&&!claudeSteerSessions(this.claudeHome()).has(s.nativeId))continue;}
       if(this.stopping.has(s.id)||this.steering.has(s.id)||this.busy.has(s.id)||['running','waiting'].includes(s.status))continue;
       this.store.inputState(a.id,'dispatching');
       try{await this.handle(a,true);this.store.inputState(a.id,'sent');}catch(e){
@@ -393,10 +394,10 @@ export class AgentRuntime {
       if(!s.managed&&this.history.claudeIsRunning(s.nativeId))throw new Error('此终端专用命令需要在本地 Claude 中执行；网页当前支持 /usage、/help、/btw 等补全中的网页命令');
     }
     if(action.type==='send'){
-      let s=this.get(action.sessionId!);if(s.provider==='codex'){this.list();s=this.get(action.sessionId!);}assertProjectPath(s.cwd,this.roots());
+      let s=this.get(action.sessionId!);if(s.provider==='codex'){if(!fromQueue&&!s.managed&&!this.busy.has(s.id))await this.history.refreshSessionStatus(s.id);this.list();s=this.get(action.sessionId!);}assertProjectPath(s.cwd,this.roots());
       const live=s.provider==='claude'&&!s.managed?this.history.claudeLiveStatus(s.nativeId):undefined;
       if(s.provider==='claude'&&!s.managed){s.status=live??'idle';s.statusOrigin='native';}
-      if(!fromQueue&&(this.steering.has(s.id)||this.busy.has(s.id)||['running','waiting'].includes(s.status)||(live&&!claudeSteerSessions(this.claudeHome()).has(s.nativeId))||this.store.queued().some(a=>a.sessionId===s.id))){
+      if(!fromQueue&&(this.steering.has(s.id)||this.busy.has(s.id)||['running','waiting'].includes(s.status)||this.store.queued().some(a=>a.sessionId===s.id))){
         if(this.store.queued().filter(a=>a.sessionId===s.id).length>=100)throw new Error('排队消息已达 100 条，请等待处理');
         this.store.enqueue(action);s.pendingCount=(s.pendingCount??0)+1;this.save(s);this.event(s,'message',{id:action.id,role:'user',label:'你 · 已排队',text:action.text!,files:this.attached(action).files.map(f=>f.file)});
         return {ok:true,sessionId:s.id,queued:true,external:!s.managed};
@@ -439,6 +440,7 @@ export class AgentRuntime {
       if(action.live)this.history.refreshFocusedStatus(action.sessionId!);
       this.list();
       const s=this.get(action.sessionId!);
+      if(action.live&&!['running','waiting'].includes(s.status)&&this.store.queued().some(a=>a.sessionId===s.id))void this.drainInputs().catch(()=>{});
       if(s.provider==='api')return {...this.store.apiPage(s.id,action.cursor),session:s,questions:this.questions.list(s.id),questionsAsOf:Date.now()};
       if(!s.managed){
         if(action.live){Object.assign(s,this.history.settings(s.id),this.nativeSettings.get(s.id));void this.refreshNativeSettings(s).catch(()=>{});}

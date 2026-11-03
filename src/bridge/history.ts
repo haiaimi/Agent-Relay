@@ -76,6 +76,7 @@ export class NativeHistory {
   private statuses=new Map<string,Session['status']>();
   private focusedStatusAt=new Map<string,number>();
   private focusedProbes=new Set<string>();
+  private actionStatusReads=new Map<string,Promise<void>>();
   private statusVersions=new Map<string,number>();
   private statusRevision=0;
   private recentPages=new Map<string,{stamp:string;at:number;page:HistoryPage}>();
@@ -86,7 +87,7 @@ export class NativeHistory {
     const session=this.sessions.get(id),path=this.paths.get(id),now=Date.now();
     // Claude's live registrations are read by list(). Probe only the viewed
     // Codex writer, at most every two seconds, between global inventory scans.
-    if(!session||session.provider!=='codex'||!path||this.focusedProbes.has(id)||now-this.statusAt>15000||now-(this.focusedStatusAt.get(id)??0)<2000)return;
+    if(!session||session.provider!=='codex'||!path||this.actionStatusReads.has(id)||this.focusedProbes.has(id)||now-this.statusAt>15000||now-(this.focusedStatusAt.get(id)??0)<2000)return;
     this.focusedStatusAt.set(id,now);
     this.focusedProbes.add(id);
     const version=++this.statusRevision;this.statusVersions.set(session.nativeId,version);
@@ -95,6 +96,17 @@ export class NativeHistory {
       const status=result.get(session.nativeId);if(status)this.statuses.set(session.nativeId,status);else this.statuses.delete(session.nativeId);
     }).catch(()=>{}).finally(()=>this.focusedProbes.delete(id));
     if(this.focusedStatusAt.size>100)this.focusedStatusAt.delete(this.focusedStatusAt.keys().next().value!);
+  }
+  async refreshSessionStatus(id:string):Promise<void>{
+    const session=this.sessions.get(id),path=this.paths.get(id);
+    if(!session||session.provider!=='codex'||!path)return;
+    const active=this.actionStatusReads.get(id);if(active)return active;
+    const job=codexStatusesAsync(this.codexHome,new Map([[id,path]]),[session]).then(result=>{
+      // An action needs a completed fresh read, not the inventory's cached running bit.
+      this.statusVersions.set(session.nativeId,++this.statusRevision);
+      const status=result.get(session.nativeId);if(status)this.statuses.set(session.nativeId,status);else this.statuses.delete(session.nativeId);
+    }).finally(()=>{this.actionStatusReads.delete(id);});
+    this.actionStatusReads.set(id,job);return job;
   }
   list(refreshStatus=false): Session[] {
     this.projectIndex=readCodexProjects(this.codexHome);

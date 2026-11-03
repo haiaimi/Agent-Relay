@@ -85,3 +85,31 @@ test('active writer rejection queues the message without failing a native Codex 
     assert.equal(events.some(event=>event.type==='status'&&event.data.status==='failed'),false);
   }finally{await runtime.close();store.close();rmSync(root,{recursive:true,force:true});}
 });
+
+
+test('send and queued followups await fresh native status instead of reusing a stale running snapshot',async()=>{
+ const root=mkdtempSync(join(tmpdir(),'relay-fresh-send-')),store=new BridgeStore(join(root,'data')),desktop=new CodexDesktop(''),nativeId=randomUUID(),sent:string[]=[];
+ const session:Session={id:'pc:codex:'+nativeId,hostId:'pc',provider:'codex',nativeId,cwd:root,title:'native',updatedAt:1,status:'running',statusOrigin:'native',managed:false};store.save(session);
+ const runtime=new AgentRuntime({relayUrl:'ws://localhost',hostId:'pc',name:'PC',dataDir:join(root,'data'),projects:[{id:'p',name:'P',path:root}],codexHome:join(root,'empty'),claudeHome:join(root,'empty')},store,()=>{},()=>{},undefined,desktop);
+ let status:Session['status']='running',probes=0;
+ runtime.history.list=()=>[{...session,status,updatedAt:Date.now()+1000}];
+ runtime.history.refreshSessionStatus=async()=>{probes++;await new Promise(r=>setImmediate(r));status='idle';};
+ desktop.owner=async()=>randomUUID();desktop.startTurn=async(thread,id)=>{sent.push(id);status='running';return {turnId:randomUUID()};};
+ runtime.codex.start=async()=>{throw Error('Must not create another writer');};
+ try{
+  runtime.list();const direct={id:randomUUID(),type:'send' as const,sessionId:session.id,text:'fresh'};
+  assert.equal((await runtime.handle(direct)).queued,undefined);assert.deepEqual(sent,[direct.id]);assert.equal(probes,1);
+  const queued={...direct,id:randomUUID(),text:'queued'};store.enqueue(queued);
+  runtime.list();await runtime.drainInputs();assert.deepEqual(sent,[direct.id,queued.id]);assert.equal(store.queued().length,0);assert.equal(probes,2);
+ }finally{await runtime.close();store.close();rmSync(root,{recursive:true,force:true});}
+});
+
+
+test('idle native Claude without a control peer reports unavailable instead of queuing forever',async()=>{
+ const root=mkdtempSync(join(tmpdir(),'relay-claude-idle-')),store=new BridgeStore(join(root,'data'));
+ const session:Session={id:'pc:claude:native',hostId:'pc',provider:'claude',nativeId:'native',cwd:root,title:'native',updatedAt:1,status:'idle',statusOrigin:'native',managed:false};store.save(session);
+ const runtime=new AgentRuntime({relayUrl:'ws://localhost',hostId:'pc',name:'PC',dataDir:join(root,'data'),projects:[{id:'p',name:'P',path:root}],codexHome:join(root,'empty'),claudeHome:join(root,'empty')},store,()=>{},()=>{},undefined,new CodexDesktop(''));
+ runtime.history.list=()=>[session];runtime.history.claudeLiveStatus=()=> 'idle';
+ try{runtime.list();await assert.rejects(runtime.handle({id:randomUUID(),type:'send',sessionId:session.id,text:'continue'}),/消息未加入排队/);assert.equal(store.queued().length,0);}
+ finally{await runtime.close();store.close();rmSync(root,{recursive:true,force:true});}
+});
