@@ -20,6 +20,8 @@ Filter conversations by device, project, or status. Drag the sidebar edge to res
 
 ![Desktop interface: conversations, running status, and images](docs/images/desktop-en.png)
 
+Press Enter to send or Shift+Enter for a new line. Slash commands complete before sending, and IME confirmation does not send messages. Claude conversations show the actual model rather than masking it with the default model option.
+
 ### Mobile
 
 Swipe from the left edge to open the conversation list. Tap an image to enlarge it. Select the model, reasoning effort, and permissions from the composer. Appearance follows your system by default.

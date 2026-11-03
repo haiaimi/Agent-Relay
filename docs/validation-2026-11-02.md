@@ -187,3 +187,13 @@
 - 正式服务发布 `/opt/agent-relay/releases/20261103-multi-agent-i18n-v2`，静态关键六文件公开散列一致；预览发布 `/opt/agent-relay-preview/releases/20261103-demo-multi-agent-v2`，增至 9 个示例并展示其他 Agent。两端连接已恢复，服务 HTTP 200，本机没有托管任务，原有两条原生任务保持运行；离线 Mac 仍需用户更新连接程序。未改变真实会话权限。
 - 最后发布脚本的 CRLF 导致一次无效尝试，原服务一直保持上一版；脚本转 LF 后正确发布，并仅清理本次产生的异常路径。自动审批拒绝了一条组合桌面验证命令，未返回具体理由；没有重试该组合，后续通过已启动窗口只读观察、隔离 renderer 和协议测试完成验证。实际服务商的有效密钥、模型可用性与计费未实测；Windows/macOS 安装包尚未打包，桌面以 npm 命令启动。
 - 证据：忽略的 `.data/multi-agent-test-results.txt`、`.data/multi-agent-live-readiness.json`、`.data/multi-agent-web-proof.json`、`.data/multi-agent-browser-proof.json`、`.data/multi-agent-public-en.png`、`.data/multi-agent-mobile-en.png` 和 `.data/preview-public-proof.json`。使用与协议参考在 `docs/local-agents.md`。
+
+
+## 2026-11-03：Claude 具体模型与 Enter 发送
+
+- 只读核对正式会话：本机已同步 `claude-opus-5-5`，模型目录的 `default` 和 `opus` 都把它列为解析后的别名；之前网页按顺序取首项，导致显示 `Default (recommended)`。
+- 统一模型匹配：先精确 ID，再具体型号的别名，最后默认别名；只有默认项匹配时保留具体 ID。当前模型、模型弹窗及强度选项共用匹配规则，下一轮预设仍单独展示。
+- 输入框 Enter 通过原有表单发送，Shift+Enter 换行，Ctrl/Command+Enter 继续可用。保留命令菜单的补全、导航和完整纯命令发送；输入法组合态、Safari 紧邻 compositionend 的确认键、长按回车不重复提交，禁用发送按钮时快捷键也不投递。
+- 88 项完整测试、TypeScript 检查与构建、浏览器模块语法检查通过；补充模型别名顺序和 3 项键盘行为回归，最终预览改动另过预览测试。隔离预览中实际验证 Enter 发送、Shift+Enter 换行和 `/usage` 执行，未向真实任务发送测试内容。
+- 正式站发布 `/opt/agent-relay/releases/20261103-claude-model-enter`，七项静态文件 SHA-256 与本机一致，新增 composer 模块 HTTP 200；独立预览发布 `/opt/agent-relay-preview/releases/20261103-demo-claude-model-enter`，静态资源匹配，预览服务端写入仍拒绝。
+- 正式会话通过仅允许 GET 的本地验证代理打开，确认模型按钮及弹窗均显示 `Opus 5.5`；截图为忽略的 `.data/claude-model-enter-live.png`。健康检查 HTTP 200，Windows 连接正常，2 条原生任务保持运行；未重启电脑连接程序。

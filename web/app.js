@@ -5,7 +5,8 @@ import {userMessageText} from './message-text.js';
 import {orderedMessages,acceptsStatusEvent,HistoryPager,reconcileChildren,timelineWithQuestions} from './timeline.js';
 import {directAssets} from './direct.js';
 import {QuestionPanel} from './questions.js';
-import {settingsPresentation} from './session-settings.js';
+import {settingsPresentation,findModel,modelName} from './session-settings.js';
+import {setupComposerKeys} from './composer.js';
 const $=id=>document.getElementById(id);
 let state={hosts:[],sessions:[]},provider='all',selected=null,messages=new Map(),approvals=new Map(),seen=new Set(),events=null,refreshTimer;
 const historyPager=new HistoryPager();let olderError='',olderRequested=false,retainedReadingAnchor=null;
@@ -314,11 +315,11 @@ function workspaces(){const host=state.hosts.find(h=>h.id===$('host-select').val
 function projects(){const host=state.hosts.find(h=>h.id===$('host-select').value);$('project-select').replaceChildren(...(host?.projects??[]).map(p=>new Option(`${p.source==='codex'?'Codex · ':''}${p.name}`,p.id)));$('create-submit').disabled=!host?.online||!host?.projects.length;$('new-project-button').disabled=!host?.online||!host?.capabilities?.createProject;$('new-project-button').title=host?.capabilities?.createProject?'在选定的工作电脑上创建或使用文件夹':'此电脑的连接程序需要更新后才能新建工程';$('create-permission').disabled=!host?.capabilities?.permissions;if(!host?.capabilities?.permissions)$('create-permission').value='request';updateCreatePermissionNote();$('new-project-path').placeholder=host?.platform?.startsWith('win')?'例如：E:\\Projects\\MyGame':'例如：/Users/you/Projects/MyGame';$('new-project-panel').hidden=true;const previous=$('provider-select').value;$('provider-select').replaceChildren(...hostAgents(host).map(a=>{const o=new Option(a.name+(a.configured===false?'（未配置）':''),a.provider==='api'?'api:'+a.id:a.provider);o.disabled=a.configured===false;return o;}));if([...$('provider-select').options].some(o=>o.value===previous&&!o.disabled))$('provider-select').value=previous;$('create-submit').disabled=$('create-submit').disabled||![...$('provider-select').options].some(o=>!o.disabled);workspaces();void createModels();}
 async function models(hostId,provider,agentId){const key=hostId+':'+provider+':'+(agentId??'');if(!modelCache.has(key))modelCache.set(key,api(`models?hostId=${encodeURIComponent(hostId)}&provider=${provider}${agentId?`&agentId=${encodeURIComponent(agentId)}`:''}`).catch(err=>{modelCache.delete(key);throw err;}));const list=(await modelCache.get(key)).models;modelLists.set(key,list);return list;}
 function modelOptions(element,list,current){element.replaceChildren(new Option('沿用本机默认模型',''),...list.map(m=>new Option(m.name+(m.isDefault?'（默认）':''),m.id)));if(current&&!list.some(m=>m.id===current))element.add(new Option(`当前：${current}`,current));element.value=current??'';}
-function effortOptions(element,list,model,current){const m=list.find(m=>m.id===model||m.aliases?.includes(model))??(!model?list.find(m=>m.isDefault)??list[0]:null);element.replaceChildren(new Option('本机默认','default'),...(m?.efforts??[]).map(v=>new Option(effortNames[v]??v,v)));if(current&&![...element.options].some(o=>o.value===current))element.add(new Option(`当前：${effortNames[current]??current}`,current));element.value=current??'default';}
+function effortOptions(element,list,model,current){const m=findModel(list,model)??(!model?list.find(m=>m.isDefault)??list[0]:null);element.replaceChildren(new Option('本机默认','default'),...(m?.efforts??[]).map(v=>new Option(effortNames[v]??v,v)));if(current&&![...element.options].some(o=>o.value===current))element.add(new Option(`当前：${effortNames[current]??current}`,current));element.value=current??'default';}
 const settingChoiceKeys=new WeakMap();
 function renderSettingsChoices(list){
-  const model=$('model-select'),effort=$('effort-select'),current=list.find(m=>m.id===model.value||m.aliases?.includes(model.value));
-  $('model-picker-label').textContent=current?.name||(model.value?model.selectedOptions[0]?.textContent.replace(/^当前：|（默认）/g,''):null)||'正在读取…';
+  const model=$('model-select'),effort=$('effort-select'),current=findModel(list,model.value);
+  $('model-picker-label').textContent=modelName(list,model.value)||'正在读取…';
   const descriptions={none:'不进行额外推理',minimal:'尽量缩短推理时间',low:'响应更快，适合简单任务',medium:'兼顾推理深度与响应速度',high:'更深入地分析和验证',xhigh:'投入更多时间处理复杂问题',max:'使用模型支持的最高推理强度',ultra:'投入更充分的推理时间'};
   function choices(root,select,options){
     const signature=JSON.stringify([select.value,select.disabled,options]);if(settingChoiceKeys.get(root)===signature)return;settingChoiceKeys.set(root,signature);
@@ -330,7 +331,7 @@ function renderSettingsChoices(list){
       };return button;
     }));
   }
-  choices($('model-options'),model,[...model.options].filter(o=>o.value).map(o=>{const m=list.find(m=>m.id===o.value||m.aliases?.includes(o.value));return {value:o.value,label:m?.name||o.textContent.replace(/^当前：|（默认）/g,''),description:m?.description};}));
+  choices($('model-options'),model,[...model.options].filter(o=>o.value).map(o=>{const m=findModel(list,o.value);return {value:o.value,label:modelName(list,o.value)||o.textContent.replace(/^当前：|（默认）/g,''),description:m?.description};}));
   const options=[...effort.options].filter(o=>o.value!=='default').map(o=>({value:o.value,label:effortNames[o.value]||o.textContent,description:descriptions[o.value]}));
   if(list.length)options.push({value:'default',label:current?.defaultEffort?`推荐 · ${effortNames[current.defaultEffort]??current.defaultEffort}`:'使用模型推荐强度',description:'跟随当前模型的推荐设置'});
   choices($('effort-options'),effort,options);
@@ -358,19 +359,12 @@ $('messages').addEventListener('click',async event=>{
   try{await navigator.clipboard.writeText(code.textContent);button.textContent='已复制';setTimeout(()=>{if(button.isConnected)button.textContent='复制';},1500);}
   catch{toast('复制失败，请长按代码选择');}
 });
-$('prompt').onkeydown=e=>{
-  if(e.isComposing)return;
-  if(!$('command-menu').hidden){
-    if(e.key==='ArrowDown'||e.key==='ArrowUp'){e.preventDefault();commandIndex=(commandIndex+(e.key==='ArrowDown'?1:-1)+commandCandidates.length)%commandCandidates.length;renderCommands();return;}
-    if(e.key==='Tab'||(e.key==='Enter'&&!e.shiftKey&&!e.ctrlKey&&!e.metaKey)){
-      e.preventDefault();const candidate=commandCandidates[commandIndex];
-      if(e.key==='Enter'&&candidate&&!candidate.argumentHint&&$('prompt').value.trim()==='/'+candidate.name){hideCommands();$('composer').requestSubmit();}else completeCommand(commandIndex);return;
-    }
-    if(e.key==='Escape'){e.preventDefault();hideCommands();return;}
-  }
-  const command=commandOptions.find(c=>!c.argumentHint&&$('prompt').value.trim()==='/'+c.name);
-  if(e.key==='Enter'&&((e.ctrlKey||e.metaKey)||(!e.shiftKey&&command))){e.preventDefault();$('composer').requestSubmit();}
-};
+setupComposerKeys($('prompt'),{
+  open:()=>!$('command-menu').hidden,
+  current:()=>commandCandidates[commandIndex],
+  move:delta=>{commandIndex=(commandIndex+delta+commandCandidates.length)%commandCandidates.length;renderCommands();},
+  complete:()=>completeCommand(commandIndex),hide:hideCommands
+},()=>{if(!$('send-button').disabled)$('composer').requestSubmit();});
 async function stopTask(queueOnly=false){
   if(!selected||stopping.has(selected.id))return;
   if(!queueOnly&&!selected.managed&&selected.canStop===undefined){toast('此电脑的连接程序尚未支持停止原生任务，请更新连接程序或在电脑上停止');return;}

@@ -20,6 +20,7 @@ const staticFiles: Record<string,[string,string]> = {
   '/':['index.html','text/html; charset=utf-8'], '/app.js':['app.js','text/javascript; charset=utf-8'],
   '/message-text.js':['message-text.js','text/javascript; charset=utf-8'],
   '/session-settings.js':['session-settings.js','text/javascript; charset=utf-8'],
+    '/composer.js':['composer.js','text/javascript; charset=utf-8'],
   '/timeline.js':['timeline.js','text/javascript; charset=utf-8'],
   '/direct.js':['direct.js','text/javascript; charset=utf-8'],
   '/questions.js':['questions.js','text/javascript; charset=utf-8'],

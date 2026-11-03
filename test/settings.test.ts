@@ -7,7 +7,21 @@ import {CodexDesktop} from '../src/bridge/codex-desktop.js';
 import {TranscriptSettings,codexSettings,claudeSettings} from '../src/bridge/settings.js';
 import {AgentRuntime} from '../src/bridge/runtime.js';import {BridgeStore} from '../src/bridge/store.js';
 // @ts-ignore Browser module is exercised as shipped.
-import {settingsPresentation} from '../web/session-settings.js';
+import {settingsPresentation,findModel,modelName} from '../web/session-settings.js';
+
+test('Claude concrete model is not masked by the first generic default alias',()=>{
+  const catalog=[
+    {id:'default',name:'Default (recommended)',aliases:['claude-opus-5-5'],efforts:['low','high']},
+    {id:'opus',name:'Opus 5.5',aliases:['claude-opus-5-5'],efforts:['low','high']},
+    {id:'sonnet',name:'Sonnet 5.5',aliases:['claude-sonnet-5-5']}
+  ];
+  assert.equal(settingsPresentation({provider:'claude',model:'claude-opus-5-5',effort:'high'},catalog).model,'Opus 5.5 · 高');
+  assert.equal(findModel(catalog,'claude-opus-5-5').id,'opus');
+  assert.equal(modelName(catalog,'default'),'Default (recommended)');
+  assert.equal(modelName(catalog.slice(0,1),'claude-opus-5-5'),'claude-opus-5-5');
+  assert.equal(modelName([...catalog,{id:'claude-opus-5-5',name:'Exact model'}],'claude-opus-5-5'),'Exact model');
+  assert.equal(settingsPresentation({model:'claude-opus-5-5',nextModel:'sonnet'},catalog).pending,'下一轮：Sonnet 5.5 · 强度未读取');
+});
 
 test('presentation uses this session, keeps presets separate and never guesses a default model',()=>{
   const catalog=[{id:'sol',name:'Sol',isDefault:true,defaultEffort:'high'},{id:'astra',name:'Astra',defaultEffort:'medium'}];
