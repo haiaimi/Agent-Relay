@@ -45,7 +45,7 @@ export function startBridge(config:BridgeConfig,token:string){
         try{
           let cursor:number|undefined;const visited=new Set<number>();
           do{
-            const page=await runtime.history.page(session.id,cursor);const jobId=randomUUID();
+            const page=session.provider==='api'?await runtime.handle({id:randomUUID(),type:'history',sessionId:session.id,cursor}):await runtime.history.page(session.id,cursor);const jobId=randomUUID();
             await new Promise<void>((resolve,reject)=>{const timer=setTimeout(()=>{cacheWaits.delete(jobId);reject(new Error('History cache acknowledgement timed out'));},30000);cacheWaits.set(jobId,{resolve,reject,timer});send({type:'history.cache',jobId,sessionId:session.id,cursor,page});});pages++;
             const next=page.cursor;if(next===null)break;if(visited.has(next))throw new Error('History cursor did not advance');visited.add(next);cursor=next;
           }while(ready&&!stopped);
@@ -58,7 +58,7 @@ export function startBridge(config:BridgeConfig,token:string){
   }
   async function sync(){
     if(syncing||stopped)return;syncing=true;
-    try{publish(runtime.list());void runtime.drainInputs().catch(err=>console.error('Queued input failed:',(err as Error).message));const projects=runtime.projects(),fingerprint=JSON.stringify(projects);if(ready&&projectFingerprint!==fingerprint){projectFingerprint=fingerprint;send({type:'projects',projects});}}catch(err){console.error('History inventory failed:',(err as Error).message);}finally{syncing=false;}
+    try{publish(runtime.list());void runtime.drainInputs().catch(err=>console.error('Queued input failed:',(err as Error).message));const projects=runtime.projects(),fingerprint=JSON.stringify([projects,runtime.agents.catalog()]);if(ready&&projectFingerprint!==fingerprint){projectFingerprint=fingerprint;send({type:'projects',projects,agents:runtime.agents.catalog()});}}catch(err){console.error('History inventory failed:',(err as Error).message);}finally{syncing=false;}
   }
   async function action(value:unknown){
     let id='';
@@ -84,7 +84,7 @@ export function startBridge(config:BridgeConfig,token:string){
     let lastActivity=Date.now();
     const watchdog=setInterval(()=>{if(Date.now()-lastActivity>70_000)socket?.terminate();},15_000);
     socket.on('ping',()=>{lastActivity=Date.now();});
-    socket.on('open',()=>socket!.send(JSON.stringify({type:'hello',host:{id:config.hostId,name:config.name,hostname:hostname(),platform:`${platform()} ${arch()}`,projects:config.projects,capabilities:{createProject:true,permissions:true}}})));
+    socket.on('open',()=>socket!.send(JSON.stringify({type:'hello',host:{id:config.hostId,name:config.name,hostname:hostname(),platform:`${platform()} ${arch()}`,projects:config.projects,agents:runtime.agents.catalog(),capabilities:{createProject:true,permissions:true}}})));
     socket.on('message',raw=>{
       lastActivity=Date.now();
       try{

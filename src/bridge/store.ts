@@ -14,6 +14,7 @@ export class BridgeStore {
       CREATE TABLE IF NOT EXISTS input_queue(seq INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT UNIQUE,session_id TEXT NOT NULL,json TEXT NOT NULL,state TEXT NOT NULL);`);
     this.db.exec('CREATE TABLE IF NOT EXISTS bridge_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)');
     this.db.exec('CREATE TABLE IF NOT EXISTS local_projects(id TEXT PRIMARY KEY,json TEXT NOT NULL)');
+    this.db.exec('CREATE TABLE IF NOT EXISTS api_messages(seq INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT UNIQUE,session_id TEXT NOT NULL,json TEXT NOT NULL)');
     if(this.db.prepare("SELECT value FROM bridge_meta WHERE key='history-format'").get()?.value!=='3'){
       this.db.exec("DELETE FROM history_synced; INSERT OR REPLACE INTO bridge_meta VALUES('history-format','3')");
     }
@@ -22,7 +23,11 @@ export class BridgeStore {
   projects():Project[]{return this.db.prepare('SELECT json FROM local_projects ORDER BY rowid').all().map(r=>JSON.parse(String(r.json)));}
   saveProject(p:Project){this.db.prepare('INSERT OR REPLACE INTO local_projects VALUES(?,?)').run(p.id,JSON.stringify(p));}
   save(s:Session){this.db.prepare('INSERT OR REPLACE INTO sessions VALUES(?,?)').run(s.id,JSON.stringify(s));}
-  event(e:RelayEvent){this.db.prepare('INSERT OR IGNORE INTO outbox(id,json) VALUES(?,?)').run(e.id,JSON.stringify(e));}
+  event(e:RelayEvent){this.db.prepare('INSERT OR IGNORE INTO outbox(id,json) VALUES(?,?)').run(e.id,JSON.stringify(e));if(e.sessionId.includes(':api:')){
+    if(e.type==='message'){const m:any={timestamp:e.at,...e.data};this.db.prepare('INSERT INTO api_messages(id,session_id,json) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET json=excluded.json').run(m.id,e.sessionId,JSON.stringify(m));}
+    if(e.type==='delta'){const id=e.data.messageId,old=this.db.prepare('SELECT json FROM api_messages WHERE id=? AND session_id=?').get(id,e.sessionId),m=old?JSON.parse(String(old.json)):{id,role:'assistant',text:'',timestamp:e.at};m.text+=e.data.text;this.db.prepare('INSERT INTO api_messages(id,session_id,json) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET json=excluded.json').run(id,e.sessionId,JSON.stringify(m));}
+  }}
+  apiPage(id:string,cursor?:number){const rows=this.db.prepare('SELECT json FROM api_messages WHERE session_id=? ORDER BY seq').all(id);const end=cursor===undefined?rows.length:Math.min(cursor,rows.length),start=Math.max(0,end-50);return {messages:rows.slice(start,end).map(r=>JSON.parse(String(r.json))),cursor:start||null,source:'Local API Agent'};}
   outbox(){return this.db.prepare('SELECT json FROM outbox ORDER BY seq LIMIT 500').all().map(r=>JSON.parse(String(r.json)) as RelayEvent);}
   ack(id:string){this.db.prepare('DELETE FROM outbox WHERE id=?').run(id);}
   begin(id:string,request:unknown):{fresh:boolean;result?:any}{

@@ -5,6 +5,8 @@ dist/
 !.env.example
 bridge.config.json
 .data/
+**/agents.json
+**/api-sessions/
 *.sqlite*
 *.log
 coverage/

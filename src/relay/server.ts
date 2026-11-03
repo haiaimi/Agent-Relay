@@ -13,7 +13,10 @@ import {turnCredentials,type TurnConfig} from './turn.js';
 import {ImagePreviews} from './previews.js';
 
 interface Options { dataDir: string; phoneToken: string; bridgeToken: string; publicOrigin?: string;turn?:TurnConfig }
+function publicAgents(value:any){if(value===undefined)return undefined;if(!Array.isArray(value)||value.length>32)throw Error('Invalid agent catalog');return value.map(a=>{if(!/^[a-zA-Z0-9_-]{1,60}$/.test(a.id)||!['codex','claude','api'].includes(a.provider)||typeof a.name!=='string'||a.name.length>80)throw Error('Invalid agent');return {id:a.id,provider:a.provider,name:a.name,configured:a.configured!==false,tools:a.tools===true,revision:typeof a.revision==='string'?a.revision.slice(0,64):undefined};});}
 const staticFiles: Record<string,[string,string]> = {
+  '/agent-ui.js':['agent-ui.js','text/javascript; charset=utf-8'],
+  '/i18n.js':['i18n.js','text/javascript; charset=utf-8'],
   '/':['index.html','text/html; charset=utf-8'], '/app.js':['app.js','text/javascript; charset=utf-8'],
   '/message-text.js':['message-text.js','text/javascript; charset=utf-8'],
   '/session-settings.js':['session-settings.js','text/javascript; charset=utf-8'],
@@ -168,8 +171,8 @@ export function createRelay(options: Options) {
       }
       if(req.method==='GET'&&url.pathname==='/api/models'){
         const hostId=url.searchParams.get('hostId')??'',provider=url.searchParams.get('provider');
-        if(!store.hosts().some(h=>h.id===hostId)||!['codex','claude'].includes(provider??''))return json(res,400,{error:'请选择设备和 Agent'});
-        return json(res,200,await remote(hostId,{id:randomUUID(),type:'models',provider:provider as 'codex'|'claude'}));
+        if(!store.hosts().some(h=>h.id===hostId)||!['codex','claude','api'].includes(provider??''))return json(res,400,{error:'请选择设备和 Agent'});
+        return json(res,200,await remote(hostId,{id:randomUUID(),type:'models',provider:provider as 'codex'|'claude'|'api',agentId:url.searchParams.get('agentId')??undefined}));
       }
       if(req.method==='GET'&&url.pathname==='/api/commands'){
         const id=url.searchParams.get('sessionId')??'',s=store.getSession(id);if(!s)return json(res,404,{error:'会话不存在'});
@@ -229,7 +232,7 @@ export function createRelay(options: Options) {
           if(!/^[a-zA-Z0-9_-]{1,60}$/.test(msg.host?.id ?? '') || typeof msg.host.name!=='string' || msg.host.name.length>100 || !Array.isArray(msg.host.projects) || msg.host.projects.length>100) throw new Error('Invalid host');
           if(bridges.has(msg.host.id)) throw new Error('Host already connected');
           hostId=msg.host.id; clearTimeout(helloTimer);bridges.set(hostId,ws);
-          const host:Host={id:hostId,name:msg.host.name,hostname:typeof msg.host.hostname==='string'?msg.host.hostname.slice(0,100):undefined,platform:typeof msg.host.platform==='string'?msg.host.platform.slice(0,80):undefined,projects:msg.host.projects,online:true,lastSeen:Date.now(),capabilities:{createProject:msg.host.capabilities?.createProject===true,permissions:msg.host.capabilities?.permissions===true}}; store.host(host); emit('state',{});
+          const host:Host={id:hostId,name:msg.host.name,hostname:typeof msg.host.hostname==='string'?msg.host.hostname.slice(0,100):undefined,platform:typeof msg.host.platform==='string'?msg.host.platform.slice(0,80):undefined,projects:msg.host.projects,online:true,lastSeen:Date.now(),agents:publicAgents(msg.host.agents),capabilities:{createProject:msg.host.capabilities?.createProject===true,permissions:msg.host.capabilities?.permissions===true}}; store.host(host); emit('state',{});
           ws.send(JSON.stringify({type:'welcome'}));return;
         }
         if(!hostId) throw new Error('Hello required');
@@ -250,11 +253,11 @@ export function createRelay(options: Options) {
           if(s.state!=='syncing'||s.done%20===0)emit('state',{});
         }else if(msg.type==='projects'){
           if(!Array.isArray(msg.projects)||msg.projects.length>500||msg.projects.some((p:any)=>typeof p.id!=='string'||typeof p.name!=='string'||typeof p.path!=='string'||(p.roots!==undefined&&(!Array.isArray(p.roots)||p.roots.length>100||p.roots.some((r:unknown)=>typeof r!=='string')))))throw new Error('Invalid projects');
-          const prior=store.hosts().find(h=>h.id===hostId)!;store.host({...prior,projects:msg.projects,lastSeen:Date.now()});emit('state',{});
+          const prior=store.hosts().find(h=>h.id===hostId)!;store.host({...prior,projects:msg.projects,agents:publicAgents(msg.agents),lastSeen:Date.now()});emit('state',{});
         }else if(msg.type==='sessions') {
           if(!Array.isArray(msg.sessions) || msg.sessions.length>2000) throw new Error('Invalid session batch');
           for(const session of msg.sessions as Session[]) {
-            if(session.hostId!==hostId || session.id!==`${hostId}:${session.provider}:${session.nativeId}` || !['codex','claude'].includes(session.provider) || typeof session.updatedAt!=='number') throw new Error('Invalid session owner');
+            if(session.hostId!==hostId || session.id!==`${hostId}:${session.provider}:${session.nativeId}` || !['codex','claude','api'].includes(session.provider) || typeof session.updatedAt!=='number') throw new Error('Invalid session owner');
             store.session(session);
           }
           emit('state',{});

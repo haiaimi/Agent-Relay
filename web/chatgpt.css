@@ -327,3 +327,7 @@ dialog::backdrop { background: #0009; backdrop-filter: none; }
 .session-title-button { display: block; max-width: 100%; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; font-weight: inherit; line-height: inherit; text-align: left; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .session-title-button[aria-expanded="true"] { white-space: normal; overflow: visible; overflow-wrap: anywhere; }
 .session-title-button:hover { color: var(--ink); text-decoration: underline; text-decoration-color: var(--muted); text-underline-offset: 3px; }
+
+.language-toggle { flex:none; padding:6px 8px; color:var(--muted); border:1px solid var(--line); border-radius:8px; background:transparent; font-size:11px; }
+.login-card>.language-toggle { position:absolute; right:68px; top:22px; }
+@media(max-width:760px){.topbar .language-toggle{padding:5px;font-size:10px;}.filters{gap:1px;}.filters button{padding:7px 9px;}}

@@ -176,3 +176,14 @@
 - README 增加中文 / English 导航、预览站入口、电脑与手机界面，以及最新交互说明；新增完整英文 README。截图均来自公开预览站的合成会话，尺寸为电脑 1440×1000、手机 390×844，保存在 `docs/images/`。
 - 修正部署文档开头旧的 WebRTC 网络描述，与当前 HTTPS 资源中转保持一致。
 - 上传前完整 76 项测试、类型检查、构建与前端语法检查通过；README 本地链接和图片路径存在，改动无空白错误。候选文本检查没有发现本机真实凭据、私钥或常见令牌字面值；真实 .env、本机配置、会话数据库、附件和日志仍由 .gitignore 排除。
+
+## 2026-11-03：实际界面双语、API Agent 与独立桌面管理
+
+- 新增网页 EN / 中文切换，初始跟随浏览器语言，手动选择持久保存。界面文本、状态、按钮、命令提示和模型/权限选项翻译；会话正文、用户标题、模型名称和文件名保留原文。浏览器切换往返后正文与图片 URL 不变，手机 390×844 无横向溢出。
+- 新增独立 Electron 桌面窗口，隔离上下文、关闭 Node renderer 权限，仅提供固定 IPC。可勾选原生 Agent，添加 Grok / DeepSeek / MiMo 预设或兼容服务，管理本机密钥、发现/手动填写模型、选择图片/思考/工具能力；关闭窗口不停止工作进程。原生窗口已启动并只读检查；表单交互使用相同 renderer 的隔离替身验证了中英切换、服务预设、模型添加和保存，没有配置真实密钥或提交付费调用。截图在 `docs/images/desktop-manager.png`。
+- API Agent 在工作机器执行 Chat Completions 或 Responses 流式调用，支持受限文件工具、需批准的命令、问题卡片、队列与中断后沿会话引导、模型预设和本机持久上下文。配置及内部推理不通过 relay 同步；服务 API key 原值不返回桌面 renderer 或网页，输出错误不打印服务端响应正文。自动模式对修改仍确认，完整权限按用户选择处理。Shell 不是操作系统沙箱。原生会话适配保留，第三方网页聊天记录不会导入。
+- 模型与服务列表由本机宣布，变更版本会使网页缓存失效。停用服务阻止新请求；旧历史保留。已注册的 API 会话仍按设备及会话边界校验。文件工具拒绝 .env、Agent 密钥及内部 API 上下文路径，跨项目路径被拒绝。
+- 84 项完整测试、类型检查、构建、前端/桌面 JS 语法检查通过。新增覆盖两种协议、reasoning 上下文保留但不对外展示、密钥遮蔽/保留/清除、HTTP 地址与路径拒绝、拒绝写入、审批中停止、持久历史、续聊、截断不报成功，以及真实 relay→工作机器的模拟 API 端到端。
+- 正式服务发布 `/opt/agent-relay/releases/20261103-multi-agent-i18n-v2`，静态关键六文件公开散列一致；预览发布 `/opt/agent-relay-preview/releases/20261103-demo-multi-agent-v2`，增至 9 个示例并展示其他 Agent。两端连接已恢复，服务 HTTP 200，本机没有托管任务，原有两条原生任务保持运行；离线 Mac 仍需用户更新连接程序。未改变真实会话权限。
+- 最后发布脚本的 CRLF 导致一次无效尝试，原服务一直保持上一版；脚本转 LF 后正确发布，并仅清理本次产生的异常路径。自动审批拒绝了一条组合桌面验证命令，未返回具体理由；没有重试该组合，后续通过已启动窗口只读观察、隔离 renderer 和协议测试完成验证。实际服务商的有效密钥、模型可用性与计费未实测；Windows/macOS 安装包尚未打包，桌面以 npm 命令启动。
+- 证据：忽略的 `.data/multi-agent-test-results.txt`、`.data/multi-agent-live-readiness.json`、`.data/multi-agent-web-proof.json`、`.data/multi-agent-browser-proof.json`、`.data/multi-agent-public-en.png`、`.data/multi-agent-mobile-en.png` 和 `.data/preview-public-proof.json`。使用与协议参考在 `docs/local-agents.md`。

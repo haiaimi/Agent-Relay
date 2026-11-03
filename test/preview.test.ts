@@ -10,7 +10,7 @@ test('preview uses isolated sample state and handles queue, answers and completi
   const context={window:page,location:{href:'https://demo.invalid/preview/',origin:'https://demo.invalid'},document:{addEventListener:()=>{}},structuredClone,URL,Response,Blob,EventTarget,MessageEvent,Event,crypto:webcrypto,setInterval:()=>0,setTimeout:(fn:()=>void)=>{timers.set(++timerId,fn);return timerId},clearTimeout:(id:number)=>timers.delete(id)};
   const source=readFileSync(new URL('../preview/client.js',import.meta.url),'utf8');runInNewContext(source,context);
   const api=async(path:string,body?:object)=>{const response=await page.fetch('/preview/api/'+path,body?{body:JSON.stringify(body)}:{});assert.equal(response.status,200);return response.json()};
-  const initial=await api('state');assert.equal(initial.sessions.length,6);assert.equal(initial.hosts.length,2);
+  const initial=await api('state');assert.equal(initial.sessions.length,9);assert.equal(initial.hosts.length,2);
   assert.ok(initial.sessions.some((s:any)=>s.status==='running'));assert.ok(initial.sessions.some((s:any)=>s.status==='idle'));
   const history=await api('history?sessionId=demo:lighting');assert.ok(history.messages.some((m:any)=>m.images?.length));
   const queued=await api('actions',{type:'send',sessionId:'demo:lighting',text:'请补充细节'});assert.equal(queued.queued,true);

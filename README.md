@@ -12,7 +12,7 @@
 
 **[打开功能预览站](https://43.161.245.226:8443/preview/)** · 无需密钥，电脑和手机均可访问。
 
-预览包含 6 个 Codex / Claude 示例会话、两台虚拟设备、图片，以及运行中、已完成和等待回答状态。可以体验发送、排队、逐条引导、问题回答、模型及权限设置；所有操作仅影响当前页面的演示数据，刷新即可恢复。预览不连接真实 Agent。
+预览包含 9 个 Codex / Claude / API Agent 示例会话、两台虚拟设备、图片，以及运行中、已完成和等待回答状态。可以体验发送、排队、逐条引导、问题回答、模型及权限设置；所有操作仅影响当前页面的演示数据，刷新即可恢复。预览不连接真实 Agent。
 
 ### 电脑网页
 
@@ -38,6 +38,7 @@
 | src/relay/ | 服务器鉴权、消息转发、SQLite 缓存、图片及文件接口 |
 | src/shared/ | 消息协议、路径及资源边界检查 |
 | web/ | 手机与桌面网站，包含本地前端依赖，无外部 CDN |
+| desktop/ | 独立本机配置窗口，选择 Agent、API 服务与模型，密钥留在本机 |
 | preview/ | 与正式 UI 同源的独立演示站，含合成会话、图片和本地模拟交互 |
 | scripts/ | 配置初始化、Windows 后台运行/登录自启动、显式模型验证 |
 | deploy/ | Docker Compose、systemd、nginx、Caddy 和发布脚本模板 |
@@ -46,6 +47,8 @@
 
 ## 功能
 
+- 网页操作界面支持中文 / English，跟随浏览器语言并保存手动选择；消息正文和会话标题保留原文。
+- 独立桌面窗口选择接入的 Agent 与模型。除 Codex / Claude 原生适配外，可配置 Grok、DeepSeek、MiMo 和自定义 Chat Completions / Responses 服务；密钥留在本机。详见 [桌面与多 Agent 接入](docs/local-agents.md)。
 - 统一浏览 Codex / Claude 的实时及历史会话，按工作设备、项目、状态和标题筛选。
 - 保留 Codex 原生 project ID、项目名、多个 workspace 根目录、无项目状态及子会话归属。
 - 查询本机可用模型和思考强度；运行中修改作为下一轮预设。
@@ -83,6 +86,10 @@ npm run bridge
 默认导入 Codex 项目及 workspace 根目录，并允许在这些目录发起或恢复任务。通过 bridge.config.json 的 projects 添加允许目录；设 discoverCodexProjects: false 可仅使用显式目录。目录检查会解析符号链接 / junction；手机不能指定任意程序或目录。
 
 电脑使用 .env 中的 BRIDGE_TOKEN 连接服务器；手机使用不同的 PHONE_TOKEN。真实 .env、bridge.config.json、会话数据库、上传文件和日志均不入库。仓库内提供可修改的示例配置。
+
+需要独立的本机模型配置窗口时运行 `npm run desktop`，也可使用 Windows 的 `scripts/start-desktop.ps1`。窗口可管理原生 Agent 和 API 模型，并启动尚未运行的连接工具。API Agent 的模型调用仍在本机发起；不是把服务商网页聊天记录同步过来。
+
+![本机 Agent 与模型管理窗口（隔离示例配置）](docs/images/desktop-manager.png)
 
 ## 部署与运行
 

@@ -2,6 +2,7 @@
 (() => {
   const assets=window.RELAY_DEMO_ASSETS,base=Date.now()-3600000,clone=v=>structuredClone(v),nativeFetch=window.fetch.bind(window),NativeEvents=window.EventSource;
   const hosts=[{id:'demo-pc',name:'设计与开发电脑',hostname:'STUDIO-PC',platform:'win32',online:true,lastSeen:Date.now(),capabilities:{createProject:true,permissions:true},projects:[{id:'light',name:'Light Studio',path:'E:\\Demo\\LightStudio',source:'codex'},{id:'coast',name:'Coastline',path:'E:\\Demo\\Coastline',source:'configured'}]},{id:'demo-mac',name:'随身工作电脑',hostname:'MACBOOK-PRO',platform:'darwin',online:true,lastSeen:Date.now(),capabilities:{permissions:true},projects:[{id:'notes',name:'产品文档',path:'/Users/demo/Projects/Notes',source:'configured'}]}];
+  hosts[0].agents=[{id:'codex',provider:'codex',name:'Codex'},{id:'claude',provider:'claude',name:'Claude Code'},...['grok','deepseek','mimo'].map(id=>({id,provider:'api',name:{grok:'Grok',deepseek:'DeepSeek',mimo:'MiMo'}[id],configured:true,tools:true}))];
   const sessions=[],transcripts=new Map(),questions=new Map(),pastEvents=new Map(),uploads=new Map(),viewers=new Set(),jobs=new Map();let seq=0;
   function session(id,title,provider,status,project='light',hostId='demo-pc'){
     const p=hosts.find(h=>h.id===hostId).projects.find(p=>p.id===project),s={id:'demo:'+id,hostId,provider,nativeId:id,title,status,projectId:p.id,projectName:p.name,projectSource:p.source,cwd:p.path,updatedAt:base+sessions.length*1000,managed:true,canSteer:true,canStop:true,canSetPermissions:true,permissionMode:'request',settingsSource:'agent',model:provider==='codex'?'demo-codex':'demo-claude',effort:'high',pendingIds:[],pendingCount:0};sessions.push(s);transcripts.set(s.id,[]);return s;
@@ -31,6 +32,7 @@
   message(docs,'assistant','已整理目录结构，正在补齐交互示例与使用说明。你也可以在运行时发送补充要求，再逐条选择引导。');docs.activity={kind:'plan',label:'正在编写文档',detail:'第 2 / 3 步：补齐交互示例'};
   const intro=session('guide','欢迎体验 Agent Relay','claude','idle','notes','demo-mac');
   message(intro,'assistant','这里是 **Agent Relay 功能预览**。\n\n你可以体验：\n1. 在侧栏切换 Codex / Claude 会话。\n2. 浏览已完成的任务和图片，点击图片查看原图。\n3. 查看运行中的步骤，发送补充消息并点击引导。\n4. 回答 Agent 的选择题，切换模型、思考强度与权限。\n5. 手机上从左边缘拖开侧栏，电脑拖动侧栏边缘调宽。\n\n所有设备、会话、模型回复和指标都是示例，不会连接工作电脑。刷新页面即可重置。');
+  for(const [id,name,status,text,image] of [['grok','Grok','running','正在整理交互方案与实现步骤。','light'],['deepseek','DeepSeek','idle','代码检查已完成，项目边界与工具调用均已验证。','chart'],['mimo','MiMo','idle','已根据图片整理设计说明，保留柔和的海岸配色。','coast']]){const s=session(id,name+' · API Agent 演示','api',status);s.agentId=id;s.agentName=name;s.model='demo-'+id;message(s,'user','展示 '+name+' 的示例会话。');message(s,'assistant',text,[image]);if(status==='running')s.activity={kind:'plan',label:'正在执行',detail:'整理实现步骤（演示）'};}
   function notify(type,data){for(const v of viewers)v.dispatchEvent(new MessageEvent(type,{data:JSON.stringify(data)}));}
   function state(){notify('state',{});}
   function emit(type,s,data){const event={id:'demo-event-'+(++seq),hostId:s.hostId,sessionId:s.id,type,data,at:Date.now()};if(type.startsWith('question')){const events=pastEvents.get(s.id)??[];events.push(event);pastEvents.set(s.id,events);}notify('event',event);}
@@ -39,7 +41,7 @@
   const commands=[{name:'help',description:'查看演示功能'},{name:'usage',description:'显示示例额度，未读取真实账号'},{name:'stop',description:'停止示例任务'},{name:'model',description:'切换示例模型'},{name:'effort',description:'切换思考强度'},{name:'btw',description:'不打断任务的旁问',argumentHint:'<问题>'}];
   function act(a){
     let s=sessions.find(s=>s.id===a.sessionId);if(a.type==='create-project'){const h=hosts.find(h=>h.id===a.hostId);if(!h)throw Error('请选择演示电脑');const p={id:crypto.randomUUID(),name:a.projectName,path:a.projectPath,source:'configured'};h.projects.push(p);state();return {project:p};}
-    if(a.type==='start'){s=session(crypto.randomUUID(),a.text.trim().slice(0,40)||'新的演示会话',a.provider,'running',a.projectId,a.hostId);s.model=a.model||s.model;s.effort=a.effort||'high';s.permissionMode=a.permissionMode||'request';message(s,'user',a.text,null,true);status(s,'running',{kind:'thinking',label:'正在思考',detail:'准备示例回复'});finish(s,'已收到你的任务。这是功能预览中的模拟回复，你可以继续对话，或刷新页面恢复初始示例。');return {sessionId:s.id};}
+    if(a.type==='start'){s=session(crypto.randomUUID(),a.text.trim().slice(0,40)||'新的演示会话',a.provider,'running',a.projectId,a.hostId);if(a.provider==='api'){s.agentId=a.agentId;s.agentName=hosts.find(h=>h.id===a.hostId).agents.find(a=>a.id===s.agentId).name;s.model='demo-'+a.agentId;}s.model=a.model||s.model;s.effort=a.effort||'high';s.permissionMode=a.permissionMode||'request';message(s,'user',a.text,null,true);status(s,'running',{kind:'thinking',label:'正在思考',detail:'准备示例回复'});finish(s,'已收到你的任务。这是功能预览中的模拟回复，你可以继续对话，或刷新页面恢复初始示例。');return {sessionId:s.id};}
     if(!s)throw Error('示例会话不存在');
     if(a.type==='send'){
       const files=(a.attachmentIds??[]).map(id=>uploads.get(id)?.ref).filter(Boolean),command=a.text.trim().startsWith('/'),queued=!command&&['running','waiting'].includes(s.status);
@@ -62,6 +64,7 @@
     try{
       if(path==='state')return response({hosts,sessions:[...sessions].sort((a,b)=>b.updatedAt-a.updatedAt)});
       if(path==='history'){if(!s)return response({error:'示例会话不存在'},404);const list=transcripts.get(s.id),end=url.searchParams.has('cursor')?Number(url.searchParams.get('cursor')):list.length,start=Math.max(0,end-18);return response({messages:list.slice(start,end),cursor:start||null,source:'演示会话',session:s,events:pastEvents.get(s.id)??[],questions:[...questions.values()].filter(q=>q.sessionId===s.id&&q.status==='pending'),questionsAsOf:Date.now()});}
+      if(path==='models'&&url.searchParams.get('provider')==='api'){const id=url.searchParams.get('agentId');return response({models:[{id:'demo-'+id,name:id+' · Demo model',isDefault:true,efforts:['low','high'],defaultEffort:'high'}]});}
       if(path==='models')return response({models:url.searchParams.get('provider')==='claude'?[{id:'demo-claude',name:'Claude · 演示模型',isDefault:true,efforts:['low','medium','high'],defaultEffort:'high'},{id:'demo-claude-fast',name:'Claude · 快速演示',efforts:['low','medium','high'],defaultEffort:'medium'}]:[{id:'demo-codex',name:'Codex · 演示模型',isDefault:true,efforts:['low','medium','high','xhigh'],defaultEffort:'high'},{id:'demo-codex-fast',name:'Codex · 快速演示',efforts:['low','medium','high'],defaultEffort:'medium'}]});
       if(path==='commands')return response({commands});
       if(path==='actions')return response(act(JSON.parse(options.body||'{}')));

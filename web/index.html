@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#0d1117"><meta name="description" content="你的电脑执行，随时随地掌握会话。">
-  <script src="/theme.js"></script>
+  <script src="/theme.js"></script><script src="/i18n.js"></script>
   <link rel="manifest" href="/manifest.webmanifest"><link rel="icon" type="image/svg+xml" href="/icon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/chatgpt.css">
   <title>Agent Relay · 会话工作台</title><script src="/vendor/markdown-it.umd.min.js" defer></script><script src="/vendor/purify.min.js" defer></script><script src="/vendor/highlight.min.js" defer></script><script src="/app.js" type="module"></script>
 </head>
@@ -24,7 +24,7 @@
       <button id="new-session" class="primary new-session">＋ 新建会话 <span class="shortcut">N</span></button>
       <div class="workspace-filters"><label class="sr-only" for="device-filter">工作设备</label><select id="device-filter"><option value="">全部工作设备</option></select><label class="sr-only" for="project-filter">Codex 项目</label><select id="project-filter"><option value="">全部项目</option></select><label class="sr-only" for="activity-filter">任务状态</label><select id="activity-filter"><option value="">全部状态</option><option value="active">正在运行 / 等待审批</option><option value="idle">已完成</option><option value="failed">失败 / 已停止</option></select></div>
       <div class="search-wrap"><input id="search" type="search" aria-label="搜索会话" placeholder="搜索标题或项目…"><span aria-hidden="true">⌕</span></div>
-      <nav class="filters" aria-label="会话类型"><button data-provider="all" class="active">全部</button><button data-provider="codex">Codex</button><button data-provider="claude">Claude</button></nav>
+      <nav class="filters" aria-label="会话类型"><button data-provider="all" class="active">全部</button><button data-provider="codex">Codex</button><button data-provider="claude">Claude</button><button data-provider="api">其他 Agent</button></nav>
       <div class="list-heading"><span>最近会话</span><span id="session-count">0</span></div>
       <div id="session-list" class="session-list"></div>
       <footer class="sidebar-footer"><span id="connection"><i class="dot"></i>正在连接</span><button id="logout" class="text-button">退出</button></footer>

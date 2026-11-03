@@ -20,6 +20,8 @@ import {createLocalProject} from './projects.js';
 import {toolActivity} from './activity.js';
 import {codexSettings,claudeSettings,type SessionSettings} from './settings.js';
 import type {Activity} from '../shared/protocol.js';
+import {AgentRegistry} from './agents.js';
+import {ApiAgentRun} from './api-agent.js';
 
 const codexWriterConflict=(error:unknown)=>/already has an active writer/i.test((error as Error)?.message??'');
 
@@ -29,6 +31,8 @@ export interface BridgeConfig {
   codexHome?:string;claudeHome?:string;discoverCodexProjects?:boolean;syncHistory?:boolean;
 }
 export class AgentRuntime {
+  readonly agents:AgentRegistry;
+  private apiRuns=new Map<string,{runner:ApiAgentRun;promise:Promise<void>}>();
   private managed=new Map<string,Session>();
   private turns=new Map<string,string>();
   private loaded=new Set<string>();
@@ -57,6 +61,7 @@ export class AgentRuntime {
   readonly codex:CodexRpc;
   readonly questions:QuestionBroker;
   constructor(readonly config:BridgeConfig,readonly store:BridgeStore,readonly onSessions:(sessions:Session[])=>void,readonly onEvent:(e:RelayEvent)=>void,private readonly claudeQuery:typeof query=query,readonly codexDesktop=new CodexDesktop()){
+    this.agents=new AgentRegistry(config.dataDir);
     this.media=new MediaStore(config.dataDir,store.db);
     this.questions=new QuestionBroker(card=>{
       const s=this.managed.get(card.sessionId)??this.history?.get(card.sessionId);if(!s)return;
@@ -124,6 +129,7 @@ export class AgentRuntime {
     return [...all.values()];
   }
   private canSteer(s:Session,peers?:Set<string>):boolean{
+    if(s.provider==='api')return this.apiRuns.has(s.id)&&['running','waiting'].includes(s.status);
     if(s.provider==='claude')return s.managed?this.claude.has(s.id)&&['running','waiting'].includes(s.status):(peers??claudeSteerSessions(this.claudeHome())).has(s.nativeId);
     return ['running','waiting'].includes(s.status)&&(s.managed?this.turns.has(s.nativeId):this.codexDesktop.available(s.nativeId));
   }
@@ -141,7 +147,7 @@ export class AgentRuntime {
   private async approve(s:Session,label:string,details:unknown,signal?:AbortSignal,nativeKey?:string):Promise<{allow:boolean;remember:boolean}>{
     const id=randomUUID();this.status(s,'waiting');
     if(nativeKey)this.nativeApprovals.set(nativeKey,id);
-    this.event(s,'approval',{approvalId:id,label,details:imageSafeJson(details).slice(0,24000),expiresAt:Date.now()+600_000,rememberLabel:s.provider==='claude'?'本会话允许此工具，不再询问':'本会话不再询问此操作',rememberDescription:s.provider==='claude'?`仅在当前会话内允许 ${label} 工具；其他会话仍单独确认`:'使用 Codex 本机会话批准范围，不写入全局授权'});
+    this.event(s,'approval',{approvalId:id,label,details:imageSafeJson(details).slice(0,24000),expiresAt:Date.now()+600_000,rememberLabel:s.provider!=='codex'?'本会话允许此工具，不再询问':'本会话不再询问此操作',rememberDescription:s.provider!=='codex'?`仅在当前会话内允许 ${label} 工具；其他会话仍单独确认`:'使用 Codex 本机会话批准范围，不写入全局授权'});
     return new Promise(resolve=>{
       const finish=(allow:boolean,remember=false)=>{const p=this.approvals.get(id);if(!p)return;clearTimeout(p.timer);this.approvals.delete(id);signal?.removeEventListener('abort',abort);if(!nativeKey)this.event(s,'approval.resolved',{approvalId:id,allow,remember:allow&&remember});if(s.status==='waiting')this.status(s,'running');resolve({allow,remember:allow&&remember});};
       const abort=()=>finish(false);const timer=setTimeout(abort,600_000);this.approvals.set(id,{sessionId:s.id,resolve:finish,timer});signal?.addEventListener('abort',abort,{once:true});if(signal?.aborted)abort();
@@ -186,7 +192,9 @@ export class AgentRuntime {
   }
   private claudeExecutable(){return this.config.claudeCommand ?? (process.platform==='win32'?join(homedir(),'.local','bin','claude.exe'):'claude');}
   private claudeHome(){return this.history.claudeHome;}
-  async models(provider:Provider):Promise<AgentModel[]>{
+  async models(provider:Provider,agentId?:string):Promise<AgentModel[]>{
+    if(provider==='api')return this.agents.get(agentId).models;
+    this.agents.enabled(provider);
     const prior=this.catalogs.get(provider);if(prior&&Date.now()-prior.at<600_000)return prior.models;
     let models:AgentModel[]=[];
     if(provider==='codex'){
@@ -202,7 +210,7 @@ export class AgentRuntime {
     }
     models=[...new Map(models.map(m=>[m.id,m])).values()];this.catalogs.set(provider,{at:Date.now(),models});return models;
   }
-  private async checkModel(provider:Provider,model?:string,effort?:string){if(!model&&!effort)return;const list=await this.models(provider),selected=list.find(m=>m.id===model||m.aliases?.includes(model??''))??(!model?list.find(m=>m.isDefault)??list[0]:undefined);if(!selected)throw new Error('该模型不在本机 Agent 返回的列表中，请刷新后重选');if(effort&&effort!=='default'&&!selected.efforts?.includes(effort))throw new Error('该模型不支持此思考强度，请重新选择');}
+  private async checkModel(provider:Provider,model?:string,effort?:string,agentId?:string){if(!model&&!effort)return;const list=await this.models(provider,agentId),selected=list.find(m=>m.id===model||m.aliases?.includes(model??''))??(!model?list.find(m=>m.isDefault)??list[0]:undefined);if(!selected)throw new Error('该模型不在本机 Agent 返回的列表中，请刷新后重选');if(effort&&effort!=='default'&&!selected.efforts?.includes(effort))throw new Error('该模型不支持此思考强度，请重新选择');}
   async commands(s:Session):Promise<AgentCommand[]>{
     const base:AgentCommand[]=[{name:'help',description:'查看可用命令',source:'relay'},{name:'usage',description:'查询账号额度与重置时间，不打断任务',source:'relay'},{name:'stop',description:'停止当前任务并取消排队；独立 Claude 窗口需在电脑上停止',source:'relay'},{name:'model',description:'设置下一轮模型',argumentHint:'<模型 ID>',source:'relay'},{name:'effort',description:'设置下一轮思考强度',argumentHint:'<low|medium|high|xhigh|max|default>',source:'relay'}];
     if(s.provider!=='claude')return base;
@@ -213,6 +221,7 @@ export class AgentRuntime {
     try{const list=await active.supportedCommands();const commands=list.filter(c=>!c.name.startsWith('__')).map(c=>({name:c.name,description:c.description,argumentHint:c.argumentHint,source:'claude' as const}));this.commandCatalogs.set(s.cwd,{at:Date.now(),commands});return [...base,...commands.filter(c=>!base.some(b=>b.name===c.name))];}finally{release();active.close();}
   }
   private async usage(s:Session):Promise<string>{
+    if(s.provider==='api')throw Error('Usage is available from the model provider console; no balance API is configured');
     let timer:NodeJS.Timeout|undefined,probe:Query|undefined,release=()=>{};
     try{
       const read=async()=>{
@@ -259,6 +268,8 @@ export class AgentRuntime {
     }catch(e){this.event(s,'error',{message:'/btw 旁问失败：'+(e as Error).message});}finally{release();active?.close();if(active)this.sideQueries.delete(active);}
   }
   async handle(action:Action,fromQueue=false):Promise<any>{
+    if(action.type==='start')this.agents.enabled(action.provider!,action.agentId);
+    if(action.type==='send'){const current=this.get(action.sessionId!);if(!action.text?.trimStart().startsWith('/'))this.agents.enabled(current.provider,current.agentId);}
     if(action.type==='create-project')return {project:createLocalProject(this.store,action)};
     if(action.type==='set-permissions'){
       const s=this.get(action.sessionId!);assertProjectPath(s.cwd,this.roots());const mode=action.permissionMode!;
@@ -281,7 +292,7 @@ export class AgentRuntime {
       return {file:this.files.import(payload)};
     }
     if(['start','send'].includes(action.type)&&action.attachmentIds?.length){if(action.text?.trimStart().startsWith('/'))throw new Error('附件请随普通消息发送，不能与 / 命令混用');this.attached(action);}
-    if(action.type==='models')return {models:await this.models(action.provider!)};
+    if(action.type==='models')return {models:await this.models(action.provider!,action.agentId)};
     if(action.type==='asset'){this.get(action.sessionId!);return this.media.payload(action.sessionId!,action.assetId!);}
     if(action.type==='file'){const scope=this.directScope(action),{file,bytes}=this.files.read(scope,action.fileId!);return {scope,file,data:bytes.toString('base64')};}
     if(action.type==='commands'){const s=this.get(action.sessionId!);assertProjectPath(s.cwd,this.roots());return {commands:await this.commands(s)};}
@@ -299,6 +310,11 @@ export class AgentRuntime {
       this.steering.add(s.id);
       this.save(s);this.event(s,'message',{id:input.id,role:'user',label:'你 · 正在引导',text:input.text!,files:this.attached(input).files.map(f=>f.file)});
       try{
+        if(s.provider==='api'){
+          const active=this.apiRuns.get(s.id);if(!active)throw Error('Current API turn is no longer running');active.runner.stop();await active.promise;
+          if(this.cancelled.has(s.id))throw Error('Steering was cancelled');
+          const result=await this.handle(input,true);this.store.inputState(input.id,'sent');this.save(this.get(s.id));return {...result,steered:true,mode:'interrupt-resume'};
+        }
         if(s.provider==='codex'){
           if(s.managed){
             const turn=this.turns.get(s.nativeId);
@@ -392,7 +408,7 @@ export class AgentRuntime {
     if(action.type==='set-model'){
       const s=this.get(action.sessionId!);assertProjectPath(s.cwd,this.roots());
       const model=action.model??s.nextModel??s.model;
-      await this.checkModel(s.provider,model,action.effort);
+      await this.checkModel(s.provider,model,action.effort,s.agentId);
       if(this.busy.has(s.id)||['running','waiting'].includes(s.status)){s.nextModel=model;s.nextEffort=action.effort??(action.model&&action.model!==s.model?'default':s.nextEffort??s.effort);this.save(s);return {ok:true,queued:true,model:s.nextModel,effort:s.nextEffort};}
       const chosenEffort=action.effort??(action.model&&action.model!==s.model?'default':s.nextEffort??s.effort);
       if(s.provider==='codex'&&!s.managed){await this.codexDesktop.setModel(s.nativeId,model,chosenEffort);this.nativeSettings.set(s.id,{...this.nativeSettings.get(s.id),model,effort:chosenEffort,settingsSource:'desktop'});}
@@ -401,6 +417,7 @@ export class AgentRuntime {
     if(action.type==='history'){
       this.list();
       const s=this.get(action.sessionId!);
+      if(s.provider==='api')return {...this.store.apiPage(s.id,action.cursor),session:s,questions:this.questions.list(s.id),questionsAsOf:Date.now()};
       if(!s.managed){
         let settings={...this.history.settings(s.id)};s.settingsError=undefined;
         if(s.provider==='codex')try{const live=await this.codexDesktop.readSettings(s.nativeId);if(live)settings={...settings,...live};}catch{s.settingsError='无法读取桌面当前设置';}
@@ -436,6 +453,7 @@ export class AgentRuntime {
       if(action.queueOnly)return {ok:true,queueCancelled:true};
       this.questions.cancelSession(s.id);
       this.cancelled.add(s.id);
+      this.apiRuns.get(s.id)?.runner.stop();
       if(!s.managed)return {ok:true,external:true,stopRequested:active};
       for(const p of this.approvals.values())if(p.sessionId===s.id)p.resolve(false);
       const claude=this.claude.get(s.id);if(claude){claude.controller.abort();claude.query.close();}
@@ -448,24 +466,29 @@ export class AgentRuntime {
       const project=this.projects().find(x=>x.id===action.projectId);if(!project)throw new Error('Project is not allowed by the local configuration');
       const workspace=(project.roots??[project.path])[action.workspaceIndex??0];if(!workspace)throw new Error('Unknown workspace in this project');
       const cwd=assertProjectPath(workspace,this.roots());
-      await this.checkModel(action.provider!,action.model,action.effort);if(action.effort==='default')action.effort=undefined;
+      await this.checkModel(action.provider!,action.model,action.effort,action.agentId);if(action.effort==='default')action.effort=undefined;
+      if(action.provider==='api'){const agent=this.agents.get(action.agentId);action.model??=agent.models.find(m=>m.isDefault)?.id??agent.models[0].id;}
       let nativeId=randomUUID();
       if(action.provider==='codex') {
         await this.codex.start();const result=await this.codex.call('thread/start',{cwd,projectId:project.source==='codex'?project.nativeProjectId:undefined,model:action.model,...(({approvalPolicy,approvalsReviewer,sandbox})=>({approvalPolicy,approvalsReviewer,sandbox}))(codexPermissions(action.permissionMode,cwd))});nativeId=result.thread.id;this.loaded.add(nativeId);action.model=result.model??action.model;action.effort??=result.reasoningEffort??undefined;
       }
       session={id:sessionKey(this.config.hostId,action.provider!,nativeId),hostId:this.config.hostId,provider:action.provider!,nativeId,cwd,title:(action.text!.trim()||this.attached(action).files[0]?.file.name||'新会话').replace(/\s+/g,' ').slice(0,100),updatedAt:Date.now(),status:'idle',managed:true,model:action.model,effort:action.effort,permissionMode:action.permissionMode??'request',projectId:project.id,projectName:project.name,projectSource:project.source,statusOrigin:'relay'};
+      if(session.provider==='api'){session.agentId=action.agentId;session.agentName=this.agents.get(action.agentId).name;}
       session.settingsSource='agent';this.save(session);
     } else {
       session=this.get(action.sessionId!);assertProjectPath(session.cwd,this.roots());
       if(this.busy.has(session.id)||['running','waiting'].includes(session.status))throw new Error('Session is already running; wait or stop it before sending another turn');
       if(session.provider==='claude'&&!session.managed&&this.history.claudeIsRunning(session.nativeId))throw new Error('This Claude session is open in another local process. End that process before resuming here.');
-      await this.checkModel(session.provider,action.model,action.effort);const pickedEffort=action.effort??session.nextEffort??session.effort;session={...session,managed:true,statusOrigin:'relay',permissionMode:session.nextPermissionMode??session.permissionMode??'request',nextPermissionMode:undefined,model:action.model??session.nextModel??session.model,effort:pickedEffort==='default'?undefined:pickedEffort,nextModel:undefined,nextEffort:undefined};this.save(session);
+      await this.checkModel(session.provider,action.model,action.effort,session.agentId);const pickedEffort=action.effort??session.nextEffort??session.effort;session={...session,managed:true,statusOrigin:'relay',permissionMode:session.nextPermissionMode??session.permissionMode??'request',nextPermissionMode:undefined,model:action.model??session.nextModel??session.model,effort:pickedEffort==='default'?undefined:pickedEffort,nextModel:undefined,nextEffort:undefined};this.save(session);
     }
     if(this.busy.has(session.id))throw new Error('A turn is already starting');
     this.busy.add(session.id);this.cancelled.delete(session.id);this.status(session,'running');
     const prepared=this.attached(action);for(const f of prepared.files)this.files.link(prepared.scope,this.config.hostId+'|'+session.id,f.file.id);
     const userId=action.id;
-    if(session.provider==='codex'){
+    if(session.provider==='api'){
+      this.event(session,'message',{id:userId,role:'user',text:action.text!,files:prepared.files.map(f=>f.file)});
+      const runner=new ApiAgentRun(this.config.dataDir,session.nativeId),run=this.runApi(session,runner,prepared);this.apiRuns.set(session.id,{runner,promise:run});this.save(session);void run.finally(()=>{if(this.apiRuns.get(session.id)?.runner===runner)this.apiRuns.delete(session.id);});
+    }else if(session.provider==='codex'){
       try {
         await this.codex.start();
         if(!this.loaded.has(session.nativeId)) {const restored=await this.codex.call('thread/resume',{threadId:session.nativeId,excludeTurns:true,cwd:session.cwd,model:session.model,...(({approvalPolicy,approvalsReviewer,sandbox})=>({approvalPolicy,approvalsReviewer,sandbox}))(codexPermissions(session.permissionMode,session.cwd))});session.model=restored.model??session.model;this.save(session);this.loaded.add(session.nativeId);}
@@ -487,6 +510,18 @@ export class AgentRuntime {
       finally {this.busy.delete(session.id);}
     } else {this.event(session,'message',{id:userId,role:'user',text:action.text!,files:prepared.files.map(f=>f.file)});const run=this.runClaude(session,prepared.text,action.type!=='start',userId,prepared.files.length?prepared.content:undefined);this.claudeRuns.set(session.id,run);void run.finally(()=>{if(this.claudeRuns.get(session.id)===run)this.claudeRuns.delete(session.id);});}
     return {ok:true,sessionId:session.id};
+  }
+  private async runApi(s:Session,runner:ApiAgentRun,prepared:ReturnType<AgentRuntime['attached']>){
+    try{
+      const agent=this.agents.get(s.agentId),imageParts=prepared.files.filter(f=>f.file.mime.startsWith('image/')).map(f=>agent.protocol==='chat'?{type:'image_url',image_url:{url:`data:${f.file.mime};base64,${f.bytes.toString('base64')}`}}:{type:'input_image',image_url:`data:${f.file.mime};base64,${f.bytes.toString('base64')}`});
+      const content=imageParts.length?[{type:agent.protocol==='chat'?'text':'input_text',text:prepared.text},...imageParts]:prepared.text;
+      await runner.run(agent,s.model!,s.effort,s.cwd,content,s.permissionMode??'request',{
+        delta:(id,text)=>this.delta(s,id,text),message:m=>{this.flush();this.event(s,'message',m);},activity:(label,detail)=>this.activity(s,{kind:'tool',label,detail}),
+        approve:async(name,input,signal)=>{if(s.approvedTools?.includes(name))return true;const decision=await this.approve(s,name,input,signal);if(decision.allow&&decision.remember){s.approvedTools=[...new Set([...(s.approvedTools??[]),name])];this.save(s);}return decision.allow;},
+        ask:async(input,signal)=>{this.status(s,'waiting');return await this.questions.ask(s.id,'api:'+randomUUID(),normalizeQuestions(input.questions,'codex'),signal);}
+      });this.flush();this.status(s,runner.controller.signal.aborted?'interrupted':'idle');
+    }catch(e){this.flush();if(!runner.controller.signal.aborted)this.event(s,'error',{message:(e as Error).message});this.status(s,runner.controller.signal.aborted?'interrupted':'failed');}
+    finally{this.questions.cancelSession(s.id);this.busy.delete(s.id);for(const p of this.approvals.values())if(p.sessionId===s.id)p.resolve(false);}
   }
   private async runClaude(s:Session,text:string,resume:boolean,userId:string,content?:any[]){
     const controller=new AbortController();
@@ -560,5 +595,5 @@ export class AgentRuntime {
       for(const a of this.approvals.values())if(a.sessionId===s.id)a.resolve(false);
     } else if(msg.method==='error')this.event(s,'error',{message:p.error?.message ?? 'Codex error'});
   }
-  async close(){if(this.closed)return;this.closed=true;this.questions.close();clearInterval(this.flushTimer);this.flush();for(const p of this.approvals.values())p.resolve(false);for(const v of this.claude.values()){v.controller.abort();v.query.close();}for(const q of this.sideQueries)q.close();for(const q of this.usageQueries)q.close();this.codexDesktop.close();this.codex.close();}
+  async close(){if(this.closed)return;this.closed=true;this.questions.close();for(const active of this.apiRuns.values())active.runner.stop();clearInterval(this.flushTimer);this.flush();for(const p of this.approvals.values())p.resolve(false);for(const v of this.claude.values()){v.controller.abort();v.query.close();}for(const q of this.sideQueries)q.close();for(const q of this.usageQueries)q.close();this.codexDesktop.close();this.codex.close();}
 }

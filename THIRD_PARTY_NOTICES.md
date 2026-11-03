@@ -13,3 +13,5 @@ Other runtime and development dependencies are declared in package.json and pinn
 The local bridge uses [werift](https://github.com/shinyoshiaki/werift-webrtc) 0.26.0 (MIT) for WebRTC ICE/DTLS/SCTP data channels. Its license and those of its dependencies are distributed by npm in their respective packages.
 
 The relay uses [sharp](https://sharp.pixelplumbing.com/) (Apache-2.0, version pinned in package.json) and its packaged libvips dependencies to generate cached image previews. Their license notices are distributed in the npm packages.
+
+The optional desktop manager uses [Electron](https://www.electronjs.org/) (MIT, version pinned in package.json). Its runtime, Chromium, and other third-party licenses are supplied with the installed Electron distribution. Desktop binaries are not vendored in this repository.

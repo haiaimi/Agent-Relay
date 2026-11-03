@@ -11,6 +11,8 @@
 
 真实密钥、模型凭据、`bridge.config.json`、`.data/` 与工程 workspace 不上传 Git。服务器不安装或登录 Agent。
 
+本机可用 `npm run desktop` 打开独立桌面窗口，选择 Codex / Claude 原生接入，或配置 Grok、DeepSeek、MiMo 与自定义 API Agent。API 模型不要求安装 Codex / Claude，但需要自己的服务商密钥。详见 [桌面与多 Agent 接入](local-agents.md)。网页右上角的 EN / 中文切换仅翻译操作界面，保留会话正文。
+
 ## 2. 服务器：Node / systemd
 
 模板约定服务用户为 `ubuntu`，Node 位于 `/opt/agent-relay-runtime/bin/node`，发布目录为 `/opt/agent-relay/releases/<版本>`，`current` 指向当前版本。其他环境请相应修改 `deploy/agent-relay.service`，确认目录和服务用户一致。
@@ -20,7 +22,7 @@
 ```sh
 git clone git@github.com:haiaimi/Agent-Relay.git
 cd Agent-Relay
-npm ci
+ELECTRON_SKIP_BINARY_DOWNLOAD=1 npm ci
 npm run check
 npm run build
 npm prune --omit=dev

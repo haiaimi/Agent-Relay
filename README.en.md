@@ -12,13 +12,13 @@ The workstation connects outward to synchronize conversations. Images and attach
 
 **[Open the interactive preview](https://43.161.245.226:8443/preview/)** · No access key required. Works on desktop and mobile.
 
-Explore six sample Codex / Claude conversations, two virtual workstations, images, and running, completed, or waiting-for-answer states. Try sending messages, queues, steering, answering questions, model selection, and permissions. Demo actions only affect the current browser page. Reload to reset. The preview does not connect to a real agent.
+Explore nine sample Codex / Claude / API agent conversations, two virtual workstations, images, and running, completed, or waiting-for-answer states. Try sending messages, queues, steering, answering questions, model selection, and permissions. Demo actions only affect the current browser page. Reload to reset. The preview does not connect to a real agent.
 
 ### Desktop
 
 Filter conversations by device, project, or status. Drag the sidebar edge to resize it. Read conversations and images, follow the current execution step, and send follow-up messages.
 
-![Desktop interface: conversations, running status, and images](docs/images/desktop.png)
+![Desktop interface: conversations, running status, and images](docs/images/desktop-en.png)
 
 ### Mobile
 
@@ -38,6 +38,7 @@ This repository includes the workstation tool, relay server, and website.
 | `src/relay/` | Server authentication, forwarding, SQLite cache, image and file endpoints |
 | `src/shared/` | Protocol, path validation, and resource boundaries |
 | `web/` | Mobile and desktop UI, with bundled frontend dependencies and no external CDN |
+| `desktop/` | Independent workstation manager for agents, API endpoints, and models; keys stay local |
 | `preview/` | Independent demo using the same UI with synthetic conversations, images, and browser-local actions |
 | `scripts/` | Setup, Windows background/startup helpers, and explicit live-model checks |
 | `deploy/` | Docker Compose, systemd, nginx, Caddy, and release templates |
@@ -46,6 +47,8 @@ This repository includes the workstation tool, relay server, and website.
 
 ## Features
 
+- The operational web UI supports Chinese and English, follows browser language by default, and remembers manual selection. Conversation content and titles stay in their original language.
+- An independent desktop window selects enabled agents and models. Keep native Codex / Claude adapters or configure Grok, DeepSeek, MiMo, and custom Chat Completions / Responses endpoints. Keys remain local. See the [desktop and multi-agent guide](docs/local-agents.md#english).
 - Browse live and historical Codex / Claude conversations; filter by workstation, project, status, or title.
 - Preserve native Codex project IDs, multiple workspace roots, unassigned sessions, and child-session ownership.
 - Read available models and reasoning levels; distinguish current settings from presets for the next turn.
@@ -85,6 +88,10 @@ Codex projects and workspace roots are imported by default and become allowed ta
 The workstation uses `BRIDGE_TOKEN`; the browser uses a different `PHONE_TOKEN`. Real `.env`, `bridge.config.json`, model credentials, session databases, uploads, and logs are excluded from Git. Editable example configuration is included.
 
 ## Deployment and operation
+
+Run `npm run desktop` to open the local agent/model manager (`scripts/start-desktop.ps1` is also available on Windows). It can reuse or start the workstation bridge; closing the window leaves tasks running. API agents run requests from the workstation and create their own conversations; they do not import provider website chats.
+
+![Desktop agent and model manager, using an isolated sample configuration](docs/images/desktop-manager.png)
 
 See the **[server, workstation, and website deployment guide](docs/deployment.md)** (Chinese) for HTTPS, Windows background operation and startup, upgrades, rollback, backups, and troubleshooting.
 
