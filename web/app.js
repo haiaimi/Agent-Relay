@@ -139,7 +139,6 @@ function renderHead(){
   const targetEffort=selected.nextEffort??selected.effort??'default';if([...$('effort-select').options].some(o=>o.value===targetEffort))$('effort-select').value=targetEffort;
   const settingsModels=modelLists.get(selected.hostId+':'+selected.provider+':'+(selected.agentId??''))??[];
   if(settingsModels.length)effortOptions($('effort-select'),settingsModels,targetModel,targetEffort);
-  renderSettingsChoices(settingsModels);
   $('pending-settings').textContent=presentation.pending;
   $('settings-preview').textContent=presentation.model;
   $('settings-toggle').title=[presentation.model,presentation.pending,selected.settingsError,selected.settingsSource==='transcript'?'最近一次任务的设置':null].filter(Boolean).join('\n');
@@ -324,27 +323,13 @@ async function queuedAction(type,queuedId){const s=selected;if(!s||sending.has(s
 function workspaces(){const host=state.hosts.find(h=>h.id===$('host-select').value),project=host?.projects.find(p=>p.id===$('project-select').value);$('workspace-select').replaceChildren(...(project?.roots??(project?[project.path]:[])).map((root,i)=>new Option(root,String(i))));}
 function projects(){const host=state.hosts.find(h=>h.id===$('host-select').value);$('project-select').replaceChildren(...(host?.projects??[]).map(p=>new Option(`${p.source==='codex'?'Codex · ':''}${p.name}`,p.id)));$('create-submit').disabled=!host?.online||!host?.projects.length;$('new-project-button').disabled=!host?.online||!host?.capabilities?.createProject;$('new-project-button').title=host?.capabilities?.createProject?'在选定的工作电脑上创建或使用文件夹':'此电脑的连接程序需要更新后才能新建工程';$('create-permission').disabled=!host?.capabilities?.permissions;if(!host?.capabilities?.permissions)$('create-permission').value='request';updateCreatePermissionNote();$('new-project-path').placeholder=host?.platform?.startsWith('win')?'例如：E:\\Projects\\MyGame':'例如：/Users/you/Projects/MyGame';$('new-project-panel').hidden=true;const previous=$('provider-select').value;$('provider-select').replaceChildren(...hostAgents(host).map(a=>{const o=new Option(a.name+(a.configured===false?'（未配置）':''),a.provider==='api'?'api:'+a.id:a.provider);o.disabled=a.configured===false;return o;}));if([...$('provider-select').options].some(o=>o.value===previous&&!o.disabled))$('provider-select').value=previous;$('create-submit').disabled=$('create-submit').disabled||![...$('provider-select').options].some(o=>!o.disabled);workspaces();void createModels();}
 async function models(hostId,provider,agentId){const key=hostId+':'+provider+':'+(agentId??'');if(!modelCache.has(key))modelCache.set(key,api(`models?hostId=${encodeURIComponent(hostId)}&provider=${provider}${agentId?`&agentId=${encodeURIComponent(agentId)}`:''}`).catch(err=>{modelCache.delete(key);throw err;}));const list=(await modelCache.get(key)).models;modelLists.set(key,list);return list;}
-function modelOptions(element,list,current){element.replaceChildren(new Option('沿用本机默认模型',''),...list.map(m=>new Option(m.name+(m.isDefault?'（默认）':''),m.id)));if(current&&!list.some(m=>m.id===current))element.add(new Option(`当前：${current}`,current));element.value=current??'';}
-function effortOptions(element,list,model,current){const m=findModel(list,model)??(!model?list.find(m=>m.isDefault)??list[0]:null);element.replaceChildren(new Option('本机默认','default'),...(m?.efforts??[]).map(v=>new Option(effortNames[v]??v,v)));if(current&&![...element.options].some(o=>o.value===current))element.add(new Option(`当前：${effortNames[current]??current}`,current));element.value=current??'default';}
-const settingChoiceKeys=new WeakMap();
-function renderSettingsChoices(list){
-  const model=$('model-select'),effort=$('effort-select'),current=findModel(list,model.value);
-  $('model-picker-label').textContent=modelName(list,model.value)||'正在读取…';
-  const descriptions={none:'不进行额外推理',minimal:'尽量缩短推理时间',low:'响应更快，适合简单任务',medium:'兼顾推理深度与响应速度',high:'更深入地分析和验证',xhigh:'投入更多时间处理复杂问题',max:'使用模型支持的最高推理强度',ultra:'投入更充分的推理时间'};
-  function choices(root,select,options){
-    const signature=JSON.stringify([select.value,select.disabled,options]);if(settingChoiceKeys.get(root)===signature)return;settingChoiceKeys.set(root,signature);
-    root.replaceChildren(...options.map(({value,label,description})=>{
-      const button=node('button','permission-option setting-option');button.type='button';button.disabled=select.disabled;button.setAttribute('aria-pressed',String(value===select.value));button.append(node('strong','',label));if(description)button.append(node('span','',description));
-      button.onclick=async()=>{const s=selected;if(!s||settingChanges.has(s.id))return;if(select.value===value)return;select.value=value;settingChanges.add(s.id);renderHead();
-        // Keep the chosen value through renderHead, which reflects server state.
-        select.value=value;try{await select.onchange();if(select===model)$('model-picker').open=false;}finally{settingChanges.delete(s.id);renderHead();}
-      };return button;
-    }));
-  }
-  choices($('model-options'),model,[...model.options].filter(o=>o.value).map(o=>{const m=findModel(list,o.value);return {value:o.value,label:modelName(list,o.value)||o.textContent.replace(/^当前：|（默认）/g,''),description:m?.description};}));
-  const options=[...effort.options].filter(o=>o.value!=='default').map(o=>({value:o.value,label:effortNames[o.value]||o.textContent,description:descriptions[o.value]}));
-  if(list.length)options.push({value:'default',label:current?.defaultEffort?`推荐 · ${effortNames[current.defaultEffort]??current.defaultEffort}`:'使用模型推荐强度',description:'跟随当前模型的推荐设置'});
-  choices($('effort-options'),effort,options);
+const selectOptionKeys=new WeakMap();
+function modelOptions(element,list,current){const placeholder=new Option(element.id==='model-select'?'选择模型…':'沿用本机默认模型','');placeholder.disabled=element.id==='model-select';element.replaceChildren(placeholder,...list.map(m=>new Option(m.name+(m.isDefault?'（默认）':''),m.id)));if(current&&!list.some(m=>m.id===current))element.add(new Option(`当前：${modelName(list,current)}`,current));element.value=current??'';}
+function effortOptions(element,list,model,current){
+  const m=findModel(list,model)??(!model?list.find(m=>m.isDefault)??list[0]:null),options=[['default','使用模型推荐强度'],...(m?.efforts??[]).map(v=>[v,effortNames[v]??v])];
+  if(current&&!options.some(([value])=>value===current))options.push([current,`当前：${effortNames[current]??current}`]);
+  const signature=JSON.stringify(options);if(selectOptionKeys.get(element)!==signature){element.replaceChildren(...options.map(([value,label])=>new Option(label,value)));selectOptionKeys.set(element,signature);}
+  const value=current??'default';if(element.value!==value)element.value=value;
 }
 async function sessionModels(s){const n=++modelLoading;modelOptions($('model-select'),[],s.nextModel??s.model);$('model-hint').textContent='正在读取本机模型列表…';try{const list=await models(s.hostId,s.provider,s.agentId);if(selected?.id!==s.id||n!==modelLoading)return;modelOptions($('model-select'),list,selected.nextModel??selected.model);effortOptions($('effort-select'),list,selected.nextModel??selected.model,selected.nextEffort??selected.effort);$('model-hint').textContent='运行中也可预设，下一轮生效';renderHead();}catch(err){if(selected?.id===s.id)$('model-hint').textContent=err.message;}}
 async function createModels(){const n=++createModelLoading,host=$('host-select').value,choice=agentChoice($('provider-select').value);modelOptions($('create-model'),[]);effortOptions($('create-effort'),[]);if(!host)return;if(!choice.provider){$('create-error').textContent='请在本机桌面窗口启用并配置 Agent';return;}try{const list=await models(host,choice.provider,choice.agentId);if(n===createModelLoading){modelOptions($('create-model'),list);effortOptions($('create-effort'),list);}}catch(err){if(n===createModelLoading)$('create-error').textContent=err.message;}}
@@ -406,8 +391,19 @@ $('session-switch').onchange=()=>{const s=state.sessions.find(s=>s.id===$('sessi
 $('session-title').onclick=()=>{const button=$('session-title');const expanded=button.getAttribute('aria-expanded')==='true';button.setAttribute('aria-expanded',String(!expanded));button.setAttribute('aria-label',expanded?'展开完整会话标题':'收起会话标题');};
 $('project-select').onchange=()=>{workspaces();createFiles.render();};$('provider-select').onchange=()=>void createModels();
 $('activity-filter').onchange=renderList;
-$('model-select').onchange=async()=>{if(!selected||!$('model-select').value)return;const s=selected,model=$('model-select').value;$('model-select').disabled=true;try{const result=await action({type:'set-model',sessionId:s.id,model});await refresh();await sessionModels(selected);toast(result.queued?'已预设下一轮模型，当前任务继续执行':'下一轮使用 '+model);}catch(err){toast(err.message);if(selected?.id===s.id)$('model-select').value=s.nextModel??s.model??'';}finally{renderHead();}};
-$('effort-select').onchange=async()=>{if(!selected)return;try{const result=await action({type:'set-model',sessionId:selected.id,model:$('model-select').value||undefined,effort:$('effort-select').value});await refresh();toast(result.queued?'已预设下一轮思考强度，当前任务继续执行':'思考强度已更新');}catch(err){toast(err.message);}finally{renderHead();}};
+$('model-select').onchange=async()=>{
+  if(!selected||!$('model-select').value||settingChanges.has(selected.id))return;
+  const s=selected,model=$('model-select').value;settingChanges.add(s.id);renderHead();
+  try{const result=await action({type:'set-model',sessionId:s.id,model});await refresh();if(selected?.id===s.id)await sessionModels(selected);toast(result.queued?'已预设下一轮模型，当前任务继续执行':'下一轮使用 '+model);}
+  catch(err){toast(err.message);if(selected?.id===s.id)$('model-select').value=s.nextModel??s.model??'';}
+  finally{settingChanges.delete(s.id);renderHead();}
+};
+$('effort-select').onchange=async()=>{
+  if(!selected||settingChanges.has(selected.id))return;
+  const s=selected,model=$('model-select').value,effort=$('effort-select').value;settingChanges.add(s.id);renderHead();
+  try{const result=await action({type:'set-model',sessionId:s.id,model:model||undefined,effort});await refresh();toast(result.queued?'已预设下一轮思考强度，当前任务继续执行':'思考强度已更新');}
+  catch(err){toast(err.message);}finally{settingChanges.delete(s.id);renderHead();}
+};
 $('create-model').onchange=async()=>{try{const choice=agentChoice($('provider-select').value),list=await models($('host-select').value,choice.provider,choice.agentId);effortOptions($('create-effort'),list,$('create-model').value);}catch(err){toast(err.message);}};
 document.querySelectorAll('[data-provider]').forEach(b=>b.onclick=()=>{provider=b.dataset.provider;document.querySelectorAll('[data-provider]').forEach(x=>x.classList.toggle('active',x===b));renderList();});
 
@@ -421,7 +417,6 @@ function positionComposerDialog(dialog,anchor){
   dialog.style.left=Math.max(8,Math.min(innerWidth-width-8,rect.right-width))+'px';
   dialog.style.top=Math.max(8,Math.min(innerHeight-height-8,rect.top-height-10))+'px';
 }
-$('model-picker').addEventListener('toggle',()=>{if($('session-settings').open)positionComposerDialog($('session-settings'),$('settings-toggle'));});
 for(const dialog of [$('permission-menu'),$('session-settings')]){
   let outsidePress=false;
   const outside=event=>{const r=dialog.getBoundingClientRect();return event.target===dialog&&(event.clientX<r.left||event.clientX>r.right||event.clientY<r.top||event.clientY>r.bottom);};

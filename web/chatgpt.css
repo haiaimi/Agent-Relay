@@ -168,18 +168,9 @@ button.file-download { border: 0; background: transparent; color: var(--link); t
 .permission-menu::-webkit-scrollbar-button { display: none; }
 .session-settings.permission-menu { width: min(360px,calc(100vw - 24px)); max-width: 360px; max-height: 75dvh; padding: 14px; border-radius: 18px; overflow-y: auto; }
 .session-settings.permission-menu .dialog-heading h2 { font-size: 15px; }
-.model-picker { margin: 6px 0 8px; }
-.model-picker>summary { display: flex; align-items: center; gap: 10px; padding: 12px; border-radius: 10px; cursor: pointer; list-style: none; font-size: 12px; color: var(--muted); }
-.model-picker>summary::-webkit-details-marker { display: none; }
-.model-picker>summary:hover, .model-picker[open]>summary { background: var(--surface); }
-.model-picker>summary strong { margin-left: auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); font-size: 14px; font-weight: 550; }
-.model-picker-arrow { flex: none; }
-.model-picker[open] .model-picker-arrow { transform: rotate(180deg); }
-#model-options { max-height: 30dvh; overflow-y: auto; overscroll-behavior: contain; }
-.settings-section-title { margin: 8px 12px 4px; color: var(--muted); font-size: 12px; font-weight: 500; }
-.setting-option strong { font-size: 14px; font-weight: 550; }
-.setting-option:disabled { opacity: .55; cursor: default; }
-.setting-option:focus-visible, .model-picker>summary:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+.session-settings .settings-field { display: flex; align-items: center; gap: 12px; margin: 12px 0; min-width: 0; }
+.session-settings .settings-field label { flex: 0 0 64px; margin: 0; color: var(--muted); font-size: 12px; font-weight: 400; }
+.session-settings .settings-field select { flex: 1; min-width: 0; width: 0; height: 44px; padding: 8px 10px; border-radius: 9px; font-size: 16px; line-height: 24px; appearance: auto; }
 .session-settings #pending-settings { color: var(--ink); }
 .project-picker-heading { display: flex; align-items: center; justify-content: space-between; margin-top: 17px; gap: 10px; }
 .project-picker-heading label { margin: 0; }

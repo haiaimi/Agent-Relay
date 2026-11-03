@@ -229,3 +229,12 @@
 - 正式站 `/opt/agent-relay/releases/20261103-fast-live-sync`，预览 `/opt/agent-relay-preview/releases/20261103-demo-fast-live-sync`；九项网页资源散列与本机一致。本地连接工具在确认无托管任务后由守护脚本加载新的异步探测，原生任务保持运行。服务器未修改资源配置。
 - 更新后短抽样 Codex 129–192ms、Claude 90–108ms。持续采样仍有一段秒级响应：后续 20 次中位 304ms、P95 3754ms、最大 3794ms，同期健康接口多数 31–36ms，随后读取恢复 200–300ms。此尾部延迟没有宣称已全部解决；500ms 是检查目标，非所有链路延迟保证。未直接测量手机运营商网络。
 - 详情与局限见 `docs/synchronization.md`。忽略证据包括 `.data/live-sync-tests.txt`、`.data/fast-sync-ui-proof.json`、`.data/sync-network-after.json`、`.data/sync-steady-profile.json` 及公网资源散列记录。所有探测仅查询，不向真实 Agent 发消息。
+
+
+## 2026-11-03：紧凑的原生模型下拉框
+
+- 模型和思考强度改为两行原生 select，移除会撑高弹窗的自定义模型列表及强度卡片；手机交给浏览器/系统呈现选项。保留无边框关闭按钮、点击外部关闭、中英文标签、下一轮预设和实际模型名称。
+- 强度选项只在可选项变化时重建，避免前台半秒同步反复替换选项；设置提交期间两个控件禁用，防止并发覆盖。
+- 独立演示中实测运行中更换模型与强度，下一轮预设正确，当前任务模型不变。1280×720 桌面弹窗初始高约 204px；390×844 手机有下一轮说明时约 233px，宽 360px，没有内部滚动。点击外部关闭成功，浏览器无 JS 错误。手机截图：忽略的 `.data/compact-model-select-mobile.png`。
+- 9 项设置、输入和翻译回归、JS 语法与类型检查通过；没有向真实 Agent 发送消息或更改运行设置。
+- 正式站发布 `/opt/agent-relay/releases/20261103-compact-model-select`，预览发布 `/opt/agent-relay-preview/releases/20261103-demo-compact-model-select`；九项正式站资源散列匹配本机，公网预览确认两个原生下拉框及紧凑布局，证据 `.data/compact-model-select-public.png`。服务器健康接口 200；未重启本机连接程序。
