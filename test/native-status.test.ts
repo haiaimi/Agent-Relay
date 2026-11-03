@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {codexTailStatus,codexStatuses} from '../src/bridge/native-status.js';
+import {codexTailStatus,codexStatuses,codexStatusesAsync} from '../src/bridge/native-status.js';
 import {spawn} from 'node:child_process';
 import {once} from 'node:events';
 import {mkdtempSync,mkdirSync,writeFileSync,utimesSync,rmSync} from 'node:fs';
@@ -25,5 +25,8 @@ test('Windows active writer uses live index when file mtime is delayed',{skip:pr
     const output=await Promise.race([once(writer.stdout,'data').then(([b])=>String(b)),once(writer,'exit').then(()=>{throw new Error('Lock writer exited before ready');})]);assert.match(output,/locked/);
     const session={id:'test:codex:fixture',nativeId,provider:'codex',updatedAt:Date.now()} as Session;
     assert.equal(codexStatuses(root,new Map([[session.id,log]]),[session]).get(nativeId),'running');
+    let settled=false;const asynchronous=codexStatusesAsync(root,new Map([[session.id,log]]),[session]).then(result=>{settled=true;return result;});
+    await new Promise(r=>setImmediate(r));assert.equal(settled,false,'status process must leave the event loop available');
+    assert.equal((await asynchronous).get(nativeId),'running');
   }finally{if(writer.exitCode===null&&writer.signalCode===null){const exited=once(writer,'exit');writer.kill();await exited;}assert.ok(root.startsWith(join(tmpdir(),'relay-lock-status-')));rmSync(root,{recursive:true,force:true});}
 });

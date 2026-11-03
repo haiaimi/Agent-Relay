@@ -1,7 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {DatabaseSync} from 'node:sqlite';
-import {mkdtempSync,mkdirSync,writeFileSync,rmSync} from 'node:fs';
+import {mkdtempSync,mkdirSync,writeFileSync,appendFileSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {zstdCompressSync} from 'node:zlib';
@@ -49,6 +49,9 @@ test('native read-only history paginates Codex and reads compressed rollouts and
     assert.equal((await reader.page('pc:codex:indexed')).messages.at(-1)?.text,'失败之后的新回复');
     assert.equal((await reader.page('pc:codex:packed')).messages[0].text,'压缩历史');
     const page=await reader.page('pc:claude:abc');assert.equal(page.messages.length,2);assert.equal(page.messages[1].id,'claude-text:a');
+    assert.equal(await reader.page('pc:claude:abc'),page);
+    appendFileSync(join(claude,'projects','p','abc.jsonl'),'\n'+JSON.stringify({type:'assistant',uuid:'new-output',message:{content:[{type:'text',text:'新的实时输出'}]}})+'\n');
+    assert.equal((await reader.page('pc:claude:abc')).messages.at(-1)?.text,'新的实时输出');
   }finally{rmSync(root,{recursive:true,force:true});}
 });
 test('Claude reused API message ids preserve each text block and separate tools',()=>{

@@ -2,14 +2,14 @@ import {agentLabel,agentChoice,hostAgents} from './agent-ui.js';
 import {AttachmentInput} from './attachments.js';
 import {setupDrawer,setupSidebarResize} from './drawer.js';
 import {userMessageText,displayMessage} from './message-text.js';
-import {orderedMessages,acceptsStatusEvent,HistoryPager,reconcileChildren,timelineWithQuestions} from './timeline.js';
+import {orderedMessages,acceptsStatusEvent,HistoryPager,reconcileChildren,timelineWithQuestions,LivePoller} from './timeline.js';
 import {directAssets} from './direct.js';
 import {QuestionPanel} from './questions.js';
 import {settingsPresentation,findModel,modelName} from './session-settings.js';
 import {setupComposerKeys} from './composer.js';
 const $=id=>document.getElementById(id);
 let state={hosts:[],sessions:[]},provider='all',selected=null,messages=new Map(),approvals=new Map(),seen=new Set(),events=null,refreshTimer;
-const historyPager=new HistoryPager();let olderError='',olderRequested=false,retainedReadingAnchor=null;
+const historyPager=new HistoryPager();let olderError='',olderRequested=false,retainedReadingAnchor=null,historyEtag=null;
 const canonicalMessages=new Set(),renderedMessages=new Map(),renderedGroups=new Map(),renderedApprovals=new Map();
 let lastMessagesChanged=false;
 const questionPanel=new QuestionPanel($('question-cards'),(card,answers)=>action({type:'answer',sessionId:card.sessionId,questionId:card.id,answers}),()=>!!hostOf(selected)?.online,toast);
@@ -86,7 +86,7 @@ function fileGallery(message){
   }return gallery;
 }
 function toast(text){$('toast').textContent=text;$('toast').hidden=false;clearTimeout(toast.timer);toast.timer=setTimeout(()=>$('toast').hidden=true,5000);}
-async function api(path,body){const response=await fetch('/api/'+path,{method:body?'POST':'GET',headers:body?{'Content-Type':'application/json'}:{},body:body?JSON.stringify(body):undefined});const result=await response.json();if(response.status===401&&path!=='login'){loggedOut();throw new Error('请重新登录');}if(!response.ok||result.error)throw new Error(result.error||'请求失败');return result;}
+async function api(path,body,etag){const response=await fetch('/api/'+path,{method:body?'POST':'GET',headers:{...body?{'Content-Type':'application/json'}:{},...etag?{'If-None-Match':etag}:{}},body:body?JSON.stringify(body):undefined});if(response.status===304)return {unchanged:true};const result=await response.json();if(response.status===401&&path!=='login'){loggedOut();throw new Error('请重新登录');}if(!response.ok||result.error)throw new Error(result.error||'请求失败');if(path.startsWith('history?'))result.etag=response.headers.get('ETag');return result;}
 function loggedOut(){events?.close();events=null;$('login').hidden=false;$('workspace').hidden=true;}
 function hostOf(s){return state.hosts.find(h=>h.id===s?.hostId);}
 function folder(path){return path?.replace(/[\\/]+$/,'').split(/[\\/]/).pop()||'未指定项目';}
@@ -269,8 +269,10 @@ async function history(older=false,silent=false){
   if(older){olderError='';renderHistoryLoader();}
   if(!silent&&!older){$('history-note').textContent='正在读取会话…';$('history-note').dataset.state='loading';}
   try{
-    const page=await api(`history?sessionId=${encodeURIComponent(current.id)}${older?`&cursor=${request.cursor}`:''}`);
+    const page=await api(`history?sessionId=${encodeURIComponent(current.id)}${older?`&cursor=${request.cursor}`:'&live=1'}`,undefined,older?null:historyEtag);
     if(!historyPager.current(request)||selected?.id!==current.id)return;
+    if(page.unchanged)return true;
+    if(!older)historyEtag=page.etag;
     const beforeHeight=$('timeline').scrollHeight;const beforeTop=$('timeline').scrollTop;const nearBottom=beforeHeight-beforeTop-$('timeline').clientHeight<40;
     const firstPage=!historyPager.initialized;
     for(const message of page.messages)canonicalMessages.add(message.id);
@@ -285,7 +287,8 @@ async function history(older=false,silent=false){
     renderHead();
     $('history-note').textContent=page.cached?'电脑离线或未响应 · 显示之前缓存的历史':`${page.source} · 内容在本机读取`;$('history-note').dataset.state=page.cached?'cached':'ready';
     const restored=renderMessages(older||!firstPage);if(older&&!restored&&lastMessagesChanged)$('timeline').scrollTop=beforeTop+$('timeline').scrollHeight-beforeHeight;else if(!older&&(firstPage||lastMessagesChanged&&nearBottom))$('timeline').scrollTop=$('timeline').scrollHeight;
-  }catch(err){if(selected?.id===request.sessionId&&historyPager.generation===request.generation){if(older)olderError=err.message;else{$('history-note').textContent=err.message;$('history-note').dataset.state='error';}}}
+    return true;
+  }catch(err){if(selected?.id===request.sessionId&&historyPager.generation===request.generation){if(older)olderError=err.message;else{$('history-note').textContent=err.message;$('history-note').dataset.state='error';}}return false;}
   finally{historyPager.release(request);if(selected?.id===request.sessionId&&historyPager.generation===request.generation){renderHistoryLoader();rememberReadingPosition();requestAnimationFrame(()=>{if(olderRequested||older&&!olderError||$('timeline').scrollHeight<=$('timeline').clientHeight+80)maybeLoadOlder();});}}
 }
 function renderHistoryLoader(){const hint=$('older');hint.hidden=!historyPager.initialized;hint.dataset.state=historyPager.active?.older?'loading':olderError?'error':historyPager.cursor===null?'end':'ready';hint.textContent=hint.dataset.state==='loading'?'正在加载更早消息…':olderError?'加载失败，继续下拉重试':historyPager.cursor===null?'已到最早消息':'下拉查看更早消息';hint.title=olderError;}
@@ -295,7 +298,7 @@ function maybeLoadOlder(retry=false){
   olderRequested=true;if(historyPager.active)return;
   olderRequested=false;void history(true,true);
 }
-async function select(s){if(selected)drafts.set(selected.id,$('prompt').value);selected=s;questionPanel.reset();canonicalMessages.clear();renderedMessages.clear();renderedGroups.clear();renderedApprovals.clear();$('messages').replaceChildren();historyPager.reset(s.id);olderError='';olderRequested=false;retainedReadingAnchor=null;renderHistoryLoader();$('session-title').setAttribute('aria-expanded','false');$('session-title').setAttribute('aria-label','展开完整会话标题');$('prompt').value=drafts.get(s.id)??'';hideCommands();messages=new Map();markdownCache.clear();seen=new Set();approvals=new Map();$('welcome').hidden=true;$('conversation').hidden=false;drawer.close();renderList();renderHead();renderMessages();resizeComposer();void sessionModels(s);void sessionCommands(s);await history();}
+async function select(s){if(selected)drafts.set(selected.id,$('prompt').value);selected=s;questionPanel.reset();canonicalMessages.clear();renderedMessages.clear();renderedGroups.clear();renderedApprovals.clear();$('messages').replaceChildren();historyPager.reset(s.id);historyEtag=null;olderError='';olderRequested=false;retainedReadingAnchor=null;renderHistoryLoader();$('session-title').setAttribute('aria-expanded','false');$('session-title').setAttribute('aria-label','展开完整会话标题');$('prompt').value=drafts.get(s.id)??'';hideCommands();messages=new Map();markdownCache.clear();seen=new Set();approvals=new Map();$('welcome').hidden=true;$('conversation').hidden=false;drawer.close();renderList();renderHead();renderMessages();resizeComposer();void sessionModels(s);void sessionCommands(s);await history();livePoller.wake(false);}
 function hideCommands(){$('command-menu').hidden=true;$('prompt').setAttribute('aria-expanded','false');$('prompt').removeAttribute('aria-activedescendant');}
 async function sessionCommands(s){const n=++commandsLoading;commandOptions=[{name:'help',description:'查看可用命令'},{name:'usage',description:'查询账号额度与重置时间，不打断任务'},{name:'stop',description:'停止任务或取消排队'},{name:'model',description:'选择下一轮模型',argumentHint:'<模型 ID>'},{name:'effort',description:'选择思考强度',argumentHint:'<强度>'},...(s.provider==='claude'?[{name:'btw',description:'不打断主任务的旁问',argumentHint:'<问题>'}]:[])];renderCommands();try{const result=await api('commands?sessionId='+encodeURIComponent(s.id));if(n!==commandsLoading||selected?.id!==s.id)return;commandOptions=result.commands;renderCommands();}catch{/* Built-in relay completions remain available if discovery is offline. */}}
 function renderCommands(){
@@ -305,7 +308,14 @@ function renderCommands(){
 function completeCommand(i){const c=commandCandidates[i];if(!c)return;$('prompt').value='/'+c.name+' ';drafts.set(selected.id,$('prompt').value);hideCommands();resizeComposer();renderHead();$('prompt').focus();}
 function stream(){
   events?.close();events=new EventSource('/api/events');events.onopen=()=>renderHosts();events.onerror=()=>renderHosts();
-  events.addEventListener('state',()=>{clearTimeout(refreshTimer);refreshTimer=setTimeout(()=>void refresh().catch(e=>toast(e.message)),150);});
+  events.addEventListener('state',e=>{if(JSON.parse(e.data??'{}').incremental)return;clearTimeout(refreshTimer);refreshTimer=setTimeout(()=>void refresh().catch(e=>toast(e.message)),150);});
+  events.addEventListener('sessions',e=>{
+    const updates=JSON.parse(e.data).sessions;if(!Array.isArray(updates))return;
+    const sessions=new Map(state.sessions.map(s=>[s.id,s]));for(const s of updates)sessions.set(s.id,s);
+    state.sessions=[...sessions.values()].sort((a,b)=>b.updatedAt-a.updatedAt);
+    if(selected)selected=sessions.get(selected.id)??selected;
+    renderList();renderHead();if(selected)renderMessages(true);
+  });
   events.addEventListener('reset',()=>{void refresh();if(selected)void history();});
   events.addEventListener('event',e=>{const event=JSON.parse(e.data);applyEvent(event);if(event.type==='status')void refresh().catch(()=>{});});
 }
@@ -444,8 +454,7 @@ $('settings-close').onclick=()=>$('session-settings').close();
 window.addEventListener('resize',fitViewport);window.visualViewport?.addEventListener('resize',fitViewport);window.visualViewport?.addEventListener('scroll',fitViewport);document.addEventListener('focusin',()=>requestAnimationFrame(fitViewport));document.addEventListener('focusout',()=>requestAnimationFrame(fitViewport));fitViewport();
 async function start(){await refresh();$('login').hidden=true;$('workspace').hidden=false;stream();}
 void start().catch(()=>loggedOut());
-let polling=false;
-setInterval(async()=>{if(polling||document.hidden||!selected||!hostOf(selected)?.online||$('workspace').hidden)return;polling=true;try{await history(false,true);}finally{polling=false;}},5000);
-document.addEventListener('visibilitychange',()=>{if(!document.hidden&&!$('workspace').hidden){void refresh().then(()=>selected&&history(false,true)).catch(()=>{});}});
+const livePoller=new LivePoller({enabled:()=>!document.hidden&&!!selected&&!$('workspace').hidden,interval:()=>['running','waiting'].includes(selected?.status)?500:2000,run:()=>hostOf(selected)?.online?history(false,true):Promise.resolve(true)});
+document.addEventListener('visibilitychange',()=>{if(document.hidden)livePoller.pause();else if(!$('workspace').hidden){void refresh().then(()=>livePoller.wake()).catch(()=>{});}});
 
 $('image-close').onclick=()=>{$('image-viewer').close();$('image-full').removeAttribute('src');};

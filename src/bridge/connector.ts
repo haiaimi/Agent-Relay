@@ -70,7 +70,7 @@ export function startBridge(config:BridgeConfig,token:string){
         const result=await runtime.handle(command);send({type:'result',id,result});return;
       }
       if(command.type==='history'||command.type==='models'||command.type==='commands'){
-        await sync();const result=await runtime.handle(command);send({type:'result',id,result});return;
+        if(!command.live)await sync();const result=await runtime.handle(command);send({type:'result',id,result});return;
       }
       const previous=store.begin(id,command);
       if(!previous.fresh){const result=previous.result;send(result?.error?{type:'result',id,error:result.error}:{type:'result',id,result});return;}

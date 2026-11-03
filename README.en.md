@@ -22,6 +22,8 @@ Filter conversations by device, project, or status. Drag the sidebar edge to res
 
 Press Enter to send or Shift+Enter for a new line. Slash commands complete before sending, and IME confirmation does not send messages. Claude conversations show the actual model rather than masking it with the default model option.
 
+Visible running conversations check for updates every 0.5 seconds; idle conversations every 2 seconds. Polling pauses while the page is hidden. Requests are serialized and unchanged content is not downloaded again. This is a polling target, not a guarantee of end-to-end latency; native status follows the workstation's checks.
+
 ### Mobile
 
 Swipe from the left edge to open the conversation list. Tap an image to enlarge it. Select the model, reasoning effort, and permissions from the composer. Appearance follows your system by default.

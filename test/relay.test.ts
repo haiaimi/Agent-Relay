@@ -43,6 +43,10 @@ test('phone → relay → local process: streaming, approval, stop, idempotency,
     const oldSeq=relay.store.latestSeq();const duplicate=relay.store.sessionEvents(id)[0];assert.equal(relay.store.event(duplicate),null);assert.equal(relay.store.latestSeq(),oldSeq);
     const page=await request('/api/history?sessionId='+encodeURIComponent(id));assert.equal(page.status,200);assert.equal(page.value.cached,false);
     assert.equal(page.value.session.status,'idle');assert.equal(page.value.session.id,id);
+    const liveUrl=base+'/api/history?sessionId='+encodeURIComponent(id)+'&live=1';
+    const livePage=await fetch(liveUrl,{headers:{cookie}});assert.equal(livePage.status,200);await livePage.json();
+    const unchanged=await fetch(liveUrl,{headers:{cookie,'If-None-Match':livePage.headers.get('etag')!}});
+    assert.equal(unchanged.status,304);assert.equal(await unchanged.text(),'');
     const waiting=await request('/api/actions',{id:randomUUID(),type:'send',sessionId:id,text:'wait'});assert.equal(waiting.status,200);await until(()=>relay.store.getSession(id)?.status==='running');
     await until(()=>relay.store.getSession(id)?.activity?.kind==='reply');assert.equal(relay.store.getSession(id)?.activity?.label,'正在回复');
     const usage={id:randomUUID(),type:'send',sessionId:id,text:'  /usage  '};

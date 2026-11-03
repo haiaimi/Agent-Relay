@@ -51,6 +51,8 @@ export class AgentRuntime {
   private stopping=new Set<string>();
   private catalogs=new Map<Provider,{at:number;models:AgentModel[]}>();
   private nativeSettings=new Map<string,SessionSettings>();
+  private nativeSettingsAt=new Map<string,number>();
+  private nativeSettingsReads=new Map<string,Promise<void>>();
   private commandCatalogs=new Map<string,{at:number;commands:AgentCommand[]}>();
   private draining=false;
   private sideQueries=new Set<Query>();
@@ -91,6 +93,7 @@ export class AgentRuntime {
     };
     this.codexDesktop.onSettings=(threadId,settings)=>{
       const id=sessionKey(config.hostId,'codex',threadId),s=this.managed.get(id)??this.history.get(id);if(!s||s.managed)return;
+      this.nativeSettingsAt.set(id,Date.now());
       const merged={...this.nativeSettings.get(id),...settings};if(JSON.stringify(merged)===JSON.stringify(this.nativeSettings.get(id)))return;
       this.nativeSettings.set(id,merged);this.onSessions([{...s,...merged}]);
     };
@@ -162,6 +165,24 @@ export class AgentRuntime {
     return {scope,files,text,input,content};
   }
   private get(id:string):Session{const s=this.managed.get(id)??this.history.get(id);if(!s)throw new Error('Unknown local session');if(!s.managed)Object.assign(s,this.nativeSettings.get(id));return s;}
+  private refreshNativeSettings(s:Session,force=false):Promise<void>{
+    const prior=this.nativeSettingsReads.get(s.id);if(prior)return prior;
+    if(!force&&Date.now()-(this.nativeSettingsAt.get(s.id)??0)<10000)return Promise.resolve();
+    this.nativeSettingsAt.set(s.id,Date.now());
+    const read=(async()=>{
+      let settings={...this.history.settings(s.id)},error:string|undefined;
+      if(s.provider==='codex')try{const live=await this.codexDesktop.readSettings(s.nativeId);if(live)settings={...settings,...live};}catch{error='无法读取桌面当前设置';}
+      if(s.provider==='codex'&&settings.effort==='default')try{
+        await this.codex.start();const config=await this.codex.call('config/read',{cwd:s.cwd,includeLayers:false});
+        if(typeof config.config?.model_reasoning_effort==='string')settings.effort=config.config.model_reasoning_effort;
+      }catch{/* Keep unresolved metadata explicit. */}
+      const current=this.managed.get(s.id)??this.history.get(s.id)??s;
+      if(this.closed||current.managed)return;
+      this.nativeSettings.set(s.id,settings);Object.assign(s,settings,{settingsError:error});
+      this.onSessions([{...current,...settings,settingsError:error}]);
+    })().finally(()=>this.nativeSettingsReads.delete(s.id));
+    this.nativeSettingsReads.set(s.id,read);return read;
+  }
   directScope(action:Action){
     if(action.sessionId){const s=this.get(action.sessionId);assertProjectPath(s.cwd,this.roots());return this.config.hostId+'|'+s.id;}
     const project=this.projects().find(p=>p.id===action.projectId);if(!project)throw new Error('项目不存在');assertProjectPath(project.path,this.roots());return this.config.hostId+'|project:'+project.id;
@@ -415,18 +436,13 @@ export class AgentRuntime {
       const updated={...s,model,effort:chosenEffort==='default'&&s.managed?undefined:chosenEffort,nextModel:undefined,nextEffort:undefined};this.save(updated);return {ok:true,model:updated.model,effort:updated.effort};
     }
     if(action.type==='history'){
+      if(action.live)this.history.refreshFocusedStatus(action.sessionId!);
       this.list();
       const s=this.get(action.sessionId!);
       if(s.provider==='api')return {...this.store.apiPage(s.id,action.cursor),session:s,questions:this.questions.list(s.id),questionsAsOf:Date.now()};
       if(!s.managed){
-        let settings={...this.history.settings(s.id)};s.settingsError=undefined;
-        if(s.provider==='codex')try{const live=await this.codexDesktop.readSettings(s.nativeId);if(live)settings={...settings,...live};}catch{s.settingsError='无法读取桌面当前设置';}
-        if(s.provider==='codex'&&settings.effort==='default')try{
-          await this.codex.start();const config=await this.codex.call('config/read',{cwd:s.cwd,includeLayers:false});
-          if(typeof config.config?.model_reasoning_effort==='string')settings.effort=config.config.model_reasoning_effort;
-        }catch{/* Leave unresolved metadata explicit in the UI. */}
-        // Live owner settings always win over the historical thread table.
-        this.nativeSettings.set(s.id,settings);Object.assign(s,settings);
+        if(action.live){Object.assign(s,this.history.settings(s.id),this.nativeSettings.get(s.id));void this.refreshNativeSettings(s).catch(()=>{});}
+        else await this.refreshNativeSettings(s,true);
       }
       this.onSessions([s]);
       if(s.provider==='codex'&&!s.managed){void this.codexDesktop.watch(s.nativeId).catch(()=>{});this.syncAsyncQuestions(s);}

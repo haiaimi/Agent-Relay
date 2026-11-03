@@ -29,6 +29,7 @@ export interface Action {
   agentId?:string;
   id: string; type: 'start' | 'send' | 'steer' | 'cancel-input' | 'stop' | 'approve' | 'answer' | 'history' | 'asset' | 'file' | 'models' | 'commands' | 'set-model' | 'upload' | 'direct' | 'create-project' | 'set-permissions';
   sessionId?: string; provider?: Provider; projectId?: string;
+  live?:boolean;
   text?: string; assetId?:string;queuedId?:string; approvalId?: string; allow?: boolean; cursor?: number; model?: string;effort?:string; workspaceIndex?:number;attachmentIds?:string[];upload?:FilePayload;
   offer?:DirectOffer;
   fileId?:string;
@@ -50,6 +51,7 @@ export function validateAction(value: any): Action {
   if(value.type==='create-project'&&(typeof value.projectName!=='string'||!value.projectName.trim()||value.projectName.length>100||/[\r\n\x00]/.test(value.projectName)||typeof value.projectPath!=='string'||!value.projectPath.trim()||value.projectPath.length>2000||/[\r\n\x00]/.test(value.projectPath)||value.createFolder!==undefined&&typeof value.createFolder!=='boolean'))throw new Error('请输入项目名称和工作电脑上的文件夹绝对路径');
   if(value.type==='file'&&!uploadId.test(value.fileId??''))throw new Error('无效附件 ID');
   if(value.queueOnly!==undefined&&(value.type!=='stop'||typeof value.queueOnly!=='boolean'))throw new Error('无效停止方式');
+  if(value.live!==undefined&&(value.type!=='history'||typeof value.live!=='boolean'||value.cursor!==undefined))throw new Error('Invalid live history request');
   if(value.type==='answer'&&(!/^[a-f0-9-]{36}$/i.test(value.questionId??'')||!value.answers||typeof value.answers!=='object'||Array.isArray(value.answers)||JSON.stringify(value.answers).length>30000))throw new Error('无效问题回答');
   if(value.type==='direct'&&(!validDirectSdp(value.offer,'offer',value.relay===true)||Boolean(value.sessionId)===Boolean(value.projectId)||value.relay!==undefined&&typeof value.relay!=='boolean'||value.iceServers!==undefined&&(!value.relay||!validTurnServers(value.iceServers))))throw new Error('无效直连协商或目标');
   if(value.attachmentIds!==undefined&&(!['start','send'].includes(value.type)||!Array.isArray(value.attachmentIds)||value.attachmentIds.length>MAX_ATTACHMENTS||new Set(value.attachmentIds).size!==value.attachmentIds.length||!value.attachmentIds.every((id:unknown)=>typeof id==='string'&&uploadId.test(id))))throw new Error('无效附件列表');
@@ -69,5 +71,5 @@ export function validateAction(value: any): Action {
   if(value.workspaceIndex!==undefined&&(!Number.isInteger(value.workspaceIndex)||value.workspaceIndex<0||value.workspaceIndex>100))throw new Error('Invalid workspace');
   if (value.type === 'approve' && (typeof value.approvalId !== 'string' || value.approvalId.length > 200 || typeof value.allow !== 'boolean')) throw new Error('Invalid approval');
   if (value.cursor !== undefined && (!Number.isSafeInteger(value.cursor) || value.cursor < 0)) throw new Error('Invalid history cursor');
-  return Object.fromEntries(Object.entries(value).filter(([k]) => ['agentId','id','type','sessionId','provider','projectId','text','assetId','fileId','queuedId','approvalId','allow','cursor','model','effort','workspaceIndex','attachmentIds','upload','offer','relay','iceServers','questionId','answers','queueOnly','permissionMode','approvalScope','projectName','projectPath','createFolder'].includes(k))) as unknown as Action;
+  return Object.fromEntries(Object.entries(value).filter(([k]) => ['live','agentId','id','type','sessionId','provider','projectId','text','assetId','fileId','queuedId','approvalId','allow','cursor','model','effort','workspaceIndex','attachmentIds','upload','offer','relay','iceServers','questionId','answers','queueOnly','permissionMode','approvalScope','projectName','projectPath','createFolder'].includes(k))) as unknown as Action;
 }

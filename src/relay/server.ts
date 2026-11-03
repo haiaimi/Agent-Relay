@@ -69,11 +69,11 @@ export function createRelay(options: Options) {
     const message = `${seq ? `id: ${seq}\n` : ''}event: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
     for(const res of viewers) { if(res.writableLength>1024*1024) res.destroy(); else res.write(message); }
   }
-  function remote(host: string, action: Action): Promise<any> {
+  function remote(host: string, action: Action,timeoutMs=90_000): Promise<any> {
     const socket=bridges.get(host);
     if(!socket || socket.readyState!==WebSocket.OPEN) return Promise.reject(new Error('本地电脑离线，请上线后重试'));
     return new Promise((resolve,reject)=>{
-      const timer=setTimeout(()=>{pending.delete(action.id);reject(new Error('电脑响应超时；操作不会自动重发，请检查会话状态'));},90_000);
+      const timer=setTimeout(()=>{pending.delete(action.id);reject(new Error('电脑响应超时；操作不会自动重发，请检查会话状态'));},timeoutMs);
       pending.set(action.id,{resolve,reject,host,timer});
       socket.send(JSON.stringify({type:'action',action}));
     });
@@ -195,10 +195,15 @@ export function createRelay(options: Options) {
         if(!s) return json(res,404,{error:'会话不存在'});
         const cursor=url.searchParams.has('cursor') ? Number(url.searchParams.get('cursor')) : undefined;
         if(cursor!==undefined && (!Number.isSafeInteger(cursor)||cursor<0)) return json(res,400,{error:'Invalid cursor'});
+        const live=cursor===undefined&&url.searchParams.get('live')==='1';
         let page; let cached=false;
-        try { page=await remote(s.hostId,{id:randomUUID(),type:'history',sessionId:id,cursor}); store.cache(id,cursor,page); }
+        try { page=await remote(s.hostId,{id:randomUUID(),type:'history',sessionId:id,cursor,...live?{live:true}:{}},live?8000:90_000); store.cache(id,cursor,page); }
         catch(err) { page=store.cached(id,cursor); if(!page) throw err; cached=true; }
-        return json(res,200,{...page,cached,session:store.getSession(id),events:cursor===undefined ? store.sessionEvents(id) : []});
+        const result={...page,cached,session:store.getSession(id),events:cursor===undefined ? store.sessionEvents(id) : []};
+        const etag='"'+createHash('sha256').update(JSON.stringify({...result,questionsAsOf:undefined})).digest('hex')+'"';
+        res.setHeader('ETag',etag);res.setHeader('Cache-Control','private, no-cache');
+        if(req.headers['if-none-match']===etag){res.writeHead(304);return res.end();}
+        return json(res,200,result);
       }
       if(req.method==='POST' && url.pathname==='/api/actions') {
         const value=await body(req); const action=validateAction(value);
@@ -261,7 +266,7 @@ export function createRelay(options: Options) {
             if(session.hostId!==hostId || session.id!==`${hostId}:${session.provider}:${session.nativeId}` || !['codex','claude','api'].includes(session.provider) || typeof session.updatedAt!=='number') throw new Error('Invalid session owner');
             store.session(session);
           }
-          emit('state',{});
+          emit('sessions',{sessions:msg.sessions});emit('state',{incremental:true});
         } else if(msg.type==='event') {
           const e=msg.event as RelayEvent;
           if(e.hostId!==hostId || !e.sessionId?.startsWith(hostId+':') || !store.getSession(e.sessionId) || typeof e.id!=='string') throw new Error('Invalid event owner');

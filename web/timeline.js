@@ -1,3 +1,16 @@
+// Foreground polling is serialized and sleeps completely when the page is hidden.
+export class LivePoller {
+  constructor({run,enabled,interval,setTimer=(fn,ms)=>setTimeout(fn,ms),clearTimer=id=>clearTimeout(id),now=()=>Date.now()}){Object.assign(this,{run,enabled,interval,setTimer,clearTimer,now});this.timer=null;this.running=false;this.paused=true;this.backoff=0;}
+  pause(){this.paused=true;if(this.timer!==null)this.clearTimer(this.timer);this.timer=null;}
+  wake(immediate=true){this.paused=false;if(this.timer!==null)this.clearTimer(this.timer);this.timer=null;if(!this.running&&this.enabled())this.timer=this.setTimer(()=>this.tick(),immediate?0:this.interval());}
+  async tick(){
+    this.timer=null;if(this.paused||!this.enabled()||this.running)return;
+    this.running=true;const start=this.now();
+    try{const ok=await this.run();this.backoff=ok===false?Math.min(10000,(this.backoff||this.interval())*2):0;}
+    catch{this.backoff=Math.min(10000,(this.backoff||this.interval())*2);}
+    finally{this.running=false;if(!this.paused&&this.enabled())this.timer=this.setTimer(()=>this.tick(),Math.max(250,(this.backoff||this.interval())-(this.now()-start)));}
+  }
+}
 // Native transcript timestamps and relay events share one chronological timeline.
 // In particular, replaying an old failure must never overwrite the current session.
 export function orderedMessages(messages){

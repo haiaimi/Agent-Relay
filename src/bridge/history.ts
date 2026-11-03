@@ -6,7 +6,7 @@ import { createInterface } from 'node:readline';
 import { createZstdDecompress } from 'node:zlib';
 import { sessionKey, type Session, type Message, type HistoryPage } from '../shared/protocol.js';
 import {readCodexProjects,type CodexProjects} from './codex-projects.js';
-import {codexStatuses,claudeStatuses} from './native-status.js';
+import {codexStatuses,codexStatusesAsync,claudeStatuses} from './native-status.js';
 import {imageSources,messageImages,imageSafeText,imageSafeJson} from './media.js';
 import type {MediaStore} from '../shared/media.js';
 import {normalizeQuestions,type UserQuestion} from '../shared/questions.js';
@@ -74,9 +74,28 @@ export class NativeHistory {
   private claudeMemo=new Map<string,{mtime:number;session:Session}>();
   private statusAt=0;
   private statuses=new Map<string,Session['status']>();
+  private focusedStatusAt=new Map<string,number>();
+  private focusedProbes=new Set<string>();
+  private statusVersions=new Map<string,number>();
+  private statusRevision=0;
+  private recentPages=new Map<string,{stamp:string;at:number;page:HistoryPage}>();
   private activities=new NativeActivities();
   private settingsReader=new TranscriptSettings();
   constructor(readonly hostId:string, readonly codexHome=process.env.CODEX_HOME ?? join(homedir(),'.codex'), readonly claudeHome=process.env.CLAUDE_CONFIG_DIR ?? join(homedir(),'.claude'),readonly media?:MediaStore) {}
+  refreshFocusedStatus(id:string){
+    const session=this.sessions.get(id),path=this.paths.get(id),now=Date.now();
+    // Claude's live registrations are read by list(). Probe only the viewed
+    // Codex writer, at most every two seconds, between global inventory scans.
+    if(!session||session.provider!=='codex'||!path||this.focusedProbes.has(id)||now-this.statusAt>15000||now-(this.focusedStatusAt.get(id)??0)<2000)return;
+    this.focusedStatusAt.set(id,now);
+    this.focusedProbes.add(id);
+    const version=++this.statusRevision;this.statusVersions.set(session.nativeId,version);
+    void codexStatusesAsync(this.codexHome,new Map([[id,path]]),[session]).then(result=>{
+      if(this.statusVersions.get(session.nativeId)!==version)return;
+      const status=result.get(session.nativeId);if(status)this.statuses.set(session.nativeId,status);else this.statuses.delete(session.nativeId);
+    }).catch(()=>{}).finally(()=>this.focusedProbes.delete(id));
+    if(this.focusedStatusAt.size>100)this.focusedStatusAt.delete(this.focusedStatusAt.keys().next().value!);
+  }
   list(refreshStatus=false): Session[] {
     this.projectIndex=readCodexProjects(this.codexHome);
     const names=codexSessionNames(this.codexHome);
@@ -116,7 +135,12 @@ export class NativeHistory {
       }
       next.set(memo.session.id,{...memo.session,status:'history',statusOrigin:undefined,activity:undefined});paths.set(memo.session.id,file);
     }
-    if(refreshStatus||Date.now()-this.statusAt>15000){this.statusAt=Date.now();this.statuses=codexStatuses(this.codexHome,paths,[...next.values()]);}
+    if(refreshStatus||Date.now()-this.statusAt>15000){
+      const initial=this.statusAt===0;this.statusAt=Date.now();const version=++this.statusRevision,targets=[...next.values()].filter(s=>s.provider==='codex');
+      for(const s of targets)this.statusVersions.set(s.nativeId,version);
+      if(initial||refreshStatus)this.statuses=codexStatuses(this.codexHome,paths,targets);
+      else void codexStatusesAsync(this.codexHome,paths,targets).then(result=>{for(const s of targets){if(this.statusVersions.get(s.nativeId)!==version)continue;const status=result.get(s.nativeId);if(status)this.statuses.set(s.nativeId,status);else this.statuses.delete(s.nativeId);}});
+    }
     const liveStatuses=new Map([...this.statuses,...claudeStatuses(this.claudeHome)]);
     for(const session of next.values()){const status=liveStatuses.get(session.nativeId);if(status){session.status=status;session.statusOrigin='native';}if(['running','waiting'].includes(session.status)){const path=paths.get(session.id);session.activity=session.status==='waiting'?{kind:'waiting',label:'等待你确认'}:path?this.activities.read(session.provider,path):undefined;}else session.activity=undefined;}
     this.sessions=next;this.paths=paths;
@@ -165,6 +189,10 @@ export class NativeHistory {
     }
     let path=this.paths.get(id)!;if(!existsSync(path) && existsSync(path+'.zst'))path+='.zst';
     if(!existsSync(path))throw new Error('Local transcript file is unavailable');
+    const stat=statSync(path),stamp=path+':'+stat.size+':'+stat.mtimeMs,prior=this.recentPages.get(id);
+    // Poll the file's identity each time, but do not parse the same multi-MB
+    // transcript twice per second. New appends invalidate this immediately.
+    if(cursor===undefined&&prior?.stamp===stamp&&Date.now()-prior.at<2000)return prior.page;
     const source=createReadStream(path);const input=path.endsWith('.zst') ? source.pipe(createZstdDecompress()) : source;
     source.on('error',e=>input.destroy(e));
     const lines=createInterface({input,crlfDelay:Infinity});
@@ -177,6 +205,8 @@ export class NativeHistory {
       }
     } finally {lines.close();input.destroy();source.destroy();}
     const more=found.length>50;const visible=found.slice(-50);
-    return {source:path.endsWith('.zst')?'本地压缩日志':'本地会话日志',cursor:more ? visible[0].ordinal : null,messages:visible.map(x=>x.message)};
+    const page={source:path.endsWith('.zst')?'本地压缩日志':'本地会话日志',cursor:more ? visible[0].ordinal : null,messages:visible.map(x=>x.message)};
+    if(cursor===undefined){this.recentPages.set(id,{stamp,at:Date.now(),page});if(this.recentPages.size>30)this.recentPages.delete(this.recentPages.keys().next().value!);}
+    return page;
   }
 }
