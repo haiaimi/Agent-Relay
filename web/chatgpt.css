@@ -130,8 +130,9 @@ button.file-download { border: 0; background: transparent; color: var(--link); t
 #composer textarea:focus-visible { outline: none; outline-offset: 0; }
 .composer-note, .composer-bottom>span { color: var(--muted); }
 .send { color: var(--paper); background: var(--ink); border: 0; border-radius: 50%; box-shadow: none; }
-.send:hover { background: var(--muted); }
-#composer .composer-bottom { flex: 0 0 44px; width: 44px; min-height: 44px; padding: 5px; }
+.send:hover:not(:disabled) { background: var(--muted); }
+#composer .send:disabled { opacity: 1; color: var(--muted); background: var(--line); cursor: not-allowed; }
+#composer .composer-bottom { flex: 0 0 44px; width: 44px; min-height: 44px; padding: 5px; align-self: center; }
 #composer .stop-task, #composer .send { flex: 0 0 34px; width: 34px; height: 34px; margin: 0; padding: 0; display: grid; place-items: center; border-radius: 50%; }
 #composer .stop-task { border: 0; color: var(--paper); background: var(--ink); }
 #composer .stop-task:hover { background: var(--muted); }
@@ -140,10 +141,12 @@ button.file-download { border: 0; background: transparent; color: var(--link); t
 #composer textarea { flex: none; width: 100%; padding: 10px 14px 3px; min-height: 36px; }
 .composer-toolbar { display: flex; align-items: center; gap: 5px; min-width: 0; padding: 0 4px 3px; }
 .composer-spacer { flex: 1; min-width: 0; }
-.composer-toolbar .attach-button { margin: 0; flex: 0 0 30px; width: 30px; height: 32px; }
-.composer-toolbar .settings-toggle { min-width: 0; max-width: 40%; font-size: 12px; padding: 6px; }
+.composer-toolbar .attach-button { margin: 0; flex: 0 0 30px; width: 30px; height: 34px; display: grid; place-items: center; }
+.composer-toolbar .attach-button svg, #composer .send svg { display: block; width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.composer-toolbar .settings-toggle { min-width: 0; max-width: 40%; height: 34px; line-height: 20px; font-size: 12px; padding: 0 6px; }
 .composer-toolbar .settings-toggle>span:last-child { display: none; }
-.permission-toggle { border: 0; border-radius: 8px; background: transparent; color: var(--muted); padding: 5px 7px; display: flex; align-items: center; gap: 5px; font-size: 12px; white-space: nowrap; }
+.permission-toggle { border: 0; border-radius: 8px; background: transparent; color: var(--muted); height: 34px; line-height: 20px; padding: 0 7px; display: flex; align-items: center; gap: 5px; font-size: 12px; white-space: nowrap; }
+.permission-toggle svg { flex: none; width: 10px; height: 10px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .permission-toggle:hover { background: var(--surface-hover); color: var(--ink); }
 .permission-toggle[data-mode="full"] { color: #ff934d; background: #ff934d15; }
 .permission-menu { width: min(360px,calc(100vw - 24px)); padding: 14px; border-radius: 18px; max-height: 75dvh; overflow-y: auto; }

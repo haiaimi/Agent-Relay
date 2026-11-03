@@ -207,3 +207,12 @@
 - 92 项测试、类型检查和构建通过，包含原生分类、历史身份/失败状态、旧缓存呈现、监控失败/到期事件、字面示例保留和英文标签；生产真实历史页返回规范化通知，无原始 XML 用户气泡。
 - 正式站发布 `/opt/agent-relay/releases/20261103-claude-task-notices`，预览发布 `/opt/agent-relay-preview/releases/20261103-demo-claude-task-notices`。八项网页文件散列与源码一致，Windows 连接恢复。确认无托管任务后由既有守护脚本重载连接程序，原生任务保持执行。
 - 通过只读代理检查截图对应的 Claude 会话：默认折叠；展开显示“后台任务 · 已完成”和 Full five-wave autopilot run 摘要，无 XML、内部 ID 或输出路径。截图证据为忽略的 `.data/claude-task-notice-live.png`；测试记录 `.data/claude-task-notice-tests.txt`。
+
+
+## 2026-11-03：空闲发送按钮与输入工具栏对齐
+
+- 输入为空且没有在线任务运行时，发送按钮保持可见并置灰；有文字/附件时启用，运行中空输入仍显示停止按钮。发送快捷键继续遵守禁用状态，空回车不会创建消息。
+- 附件、权限、模型与发送/停止控件统一为 34px 高，按钮容器改为垂直居中。加号、权限箭头、发送箭头使用固定尺寸 SVG，消除字体字形基线差异；模型按钮明确 type=button，避免触发表单提交。
+- 电脑 1280×720 与手机 390×844 的浏览器实测：四个按钮的垂直中心完全一致；空闲按钮可见且 disabled，输入后 enabled，运行中显示停止；空回车前后消息数不变。深浅色禁用样式均检查，既有 3 项键盘回归及 JS 语法通过。本次只有网页改动，没有增加镜像实现的测试。
+- 正式站发布 `/opt/agent-relay/releases/20261103-composer-alignment`，独立预览发布 `/opt/agent-relay-preview/releases/20261103-demo-composer-alignment`。八个网页文件与本机散列一致，健康检查 HTTP 200，Windows 在线，原生任务保持执行；没有重启本地连接程序。
+- 公网预览复核空闲发送按钮 visible=true/enabled=false，四个控件 centerY 同为 680.333px。忽略的截图证据 `.data/composer-alignment-public.png`（公网电脑）及 `.data/composer-alignment-mobile.png`（本机手机尺寸）。
