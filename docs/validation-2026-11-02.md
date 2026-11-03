@@ -238,3 +238,11 @@
 - 独立演示中实测运行中更换模型与强度，下一轮预设正确，当前任务模型不变。1280×720 桌面弹窗初始高约 204px；390×844 手机有下一轮说明时约 233px，宽 360px，没有内部滚动。点击外部关闭成功，浏览器无 JS 错误。手机截图：忽略的 `.data/compact-model-select-mobile.png`。
 - 9 项设置、输入和翻译回归、JS 语法与类型检查通过；没有向真实 Agent 发送消息或更改运行设置。
 - 正式站发布 `/opt/agent-relay/releases/20261103-compact-model-select`，预览发布 `/opt/agent-relay-preview/releases/20261103-demo-compact-model-select`；九项正式站资源散列匹配本机，公网预览确认两个原生下拉框及紧凑布局，证据 `.data/compact-model-select-public.png`。服务器健康接口 200；未重启本机连接程序。
+
+
+## 2026-11-03：统一由侧边栏切换会话
+
+- 移除顶部重复的会话切换下拉框、列表重建和事件处理及相关旧样式。保留设备名，外观/刷新/语言操作靠右排列；桌面和手机统一通过侧边栏选择会话。
+- 桌面 1280×720 点击 Claude 会话能更新正文与状态；手机 390×844 打开侧栏选择 Codex 会话后，正文更新且侧栏自动关闭。顶部没有 select，页面没有横向溢出，浏览器无 JS 错误。翻译回归及 JS 语法检查通过。本次没有向真实 Agent 发消息。
+- 发布正式站 `/opt/agent-relay/releases/20261103-sidebar-navigation` 与独立预览 `/opt/agent-relay-preview/releases/20261103-demo-sidebar-navigation`。
+- 公网九项资源散列匹配，健康接口 HTTP 200、Windows 在线；公网预览截图 `.data/sidebar-only-public.png` 显示顶部已无会话下拉框。未重启本机连接程序，原生任务保持运行。

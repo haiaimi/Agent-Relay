@@ -103,7 +103,6 @@ function renderList(){
   if(!children.length)children.push(node('p','empty-list',state.hosts.length?'没有匹配的会话。试试新建一个？':'等待本地电脑连接。启动连接程序后，会话会出现在这里。'));
   if(list.length>300)children.push(node('p','empty-list',`显示最近 300 条，共 ${list.length} 条。搜索可查找更早的会话。`));
   $('session-list').replaceChildren(...children);
-  const switcher=$('session-switch');switcher.replaceChildren(new Option('切换会话…',''),...list.slice(0,300).map(s=>new Option(`${agentLabel(s)} · ${s.projectName??folder(s.cwd)} · ${s.title.slice(0,45)}`,s.id)));switcher.value=selected?.id??'';
 }
 function renderFilters(){
   const device=$('device-filter').value,project=$('project-filter').value;
@@ -387,7 +386,6 @@ document.addEventListener('keydown',e=>{if(['ArrowUp','PageUp','Home','PageDown'
 if('ResizeObserver' in window){const readingResize=new ResizeObserver(()=>{if(!selected||!historyPager.initialized)return;if(retainedReadingAnchor)restoreReadingAnchor(retainedReadingAnchor);else $('timeline').scrollTop=$('timeline').scrollHeight;});readingResize.observe($('messages'));readingResize.observe($('timeline'));}
 $('search').oninput=renderList;
 $('device-filter').onchange=()=>{renderFilters();renderList();};$('project-filter').onchange=renderList;
-$('session-switch').onchange=()=>{const s=state.sessions.find(s=>s.id===$('session-switch').value);if(s)void select(s);};
 $('session-title').onclick=()=>{const button=$('session-title');const expanded=button.getAttribute('aria-expanded')==='true';button.setAttribute('aria-expanded',String(!expanded));button.setAttribute('aria-label',expanded?'展开完整会话标题':'收起会话标题');};
 $('project-select').onchange=()=>{workspaces();createFiles.render();};$('provider-select').onchange=()=>void createModels();
 $('activity-filter').onchange=renderList;

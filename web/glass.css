@@ -55,7 +55,7 @@ body { position: relative; color: var(--ink); background: #0a101b; }
 .new-session { margin-bottom: 18px; }
 .shortcut { border-color: rgba(255,255,255,.35); color: white; }
 input, textarea, select,
-.workspace-filters select, #session-switch, .search-wrap input,
+.workspace-filters select, .search-wrap input,
 .model-control select, .settings-toggle {
   color: #edf5ff;
   background: rgba(9, 16, 29, .43);
@@ -98,13 +98,6 @@ select option { color: #eaf1fa; background: #152134; }
 .topbar { height: 62px; padding: 0 25px; border: 1px solid rgba(212, 232, 255, .16); border-radius: 21px; background: rgba(12, 21, 37, .35); }
 .breadcrumb { color: #a4b4ca; }
 .breadcrumb>span:last-child { color: #ddeaff; }
-#session-switch {
-  max-width: 32%;
-  appearance: none;
-  -webkit-appearance: none;
-  padding-right: 27px;
-  background: rgba(16, 27, 44, .6) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='m1 1 5 5 5-5' fill='none' stroke='%23b7d6e8' stroke-width='1.5'/%3E%3C/svg%3E") no-repeat right 10px center;
-}
 .welcome {
   width: min(720px, 94%);
   padding: 40px 45px 38px;

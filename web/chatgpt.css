@@ -39,7 +39,7 @@
 body { color: var(--ink); background: var(--paper); }
 button, input, textarea, select { color: var(--ink); }
 button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
-input, textarea, select, .workspace-filters select, #session-switch, .search-wrap input, .model-control select {
+input, textarea, select, .workspace-filters select, .search-wrap input, .model-control select {
   color: var(--ink); background: var(--surface); border: 1px solid var(--line); box-shadow: none;
 }
 input::placeholder, textarea::placeholder { color: var(--muted); }
@@ -75,8 +75,8 @@ select option { color: var(--ink); background: var(--surface); }
 .text-button:hover, .icon:hover { color: var(--ink); }
 .main { background: var(--paper); }
 .topbar { height: 60px; border: 0; padding: 0 24px; gap: 12px; background: var(--paper); }
+.breadcrumb { flex: 1; min-width: 0; }
 .breadcrumb, .breadcrumb>span:last-child { color: var(--muted); }
-#session-switch { width: 230px; max-width: 30%; background: var(--surface); }
 .theme-toggle { flex: 0 0 auto; border: 0; border-radius: 9px; padding: 9px 11px; color: var(--ink); background: transparent; font-size: 12px; white-space: nowrap; }
 .theme-toggle:hover { background: var(--surface); }
 .welcome { width: min(680px, 92%); padding: 40px 20px; }
@@ -293,7 +293,7 @@ dialog::backdrop { background: #0009; backdrop-filter: none; }
   .topbar { height: 54px; padding: 0 14px; gap: 8px; }
   .breadcrumb { min-width: 0; flex: 1; justify-content: center; font-size: 13px; }
   .breadcrumb>span:last-child { max-width: 130px; color: var(--ink); font-weight: 600; }
-  #session-switch, .device-caption, .refresh-caption { display: none; }
+  .device-caption, .refresh-caption { display: none; }
   .topbar>.icon, .topbar>.text-button { width: 34px; flex: 0 0 34px; padding: 5px 0; }
   .theme-toggle { padding: 7px; min-width: 34px; font-size: 0; }
   .theme-toggle::before { content: '☼'; font: 21px Arial, sans-serif; }
