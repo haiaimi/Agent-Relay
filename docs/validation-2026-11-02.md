@@ -246,3 +246,11 @@
 - 桌面 1280×720 点击 Claude 会话能更新正文与状态；手机 390×844 打开侧栏选择 Codex 会话后，正文更新且侧栏自动关闭。顶部没有 select，页面没有横向溢出，浏览器无 JS 错误。翻译回归及 JS 语法检查通过。本次没有向真实 Agent 发消息。
 - 发布正式站 `/opt/agent-relay/releases/20261103-sidebar-navigation` 与独立预览 `/opt/agent-relay-preview/releases/20261103-demo-sidebar-navigation`。
 - 公网九项资源散列匹配，健康接口 HTTP 200、Windows 在线；公网预览截图 `.data/sidebar-only-public.png` 显示顶部已无会话下拉框。未重启本机连接程序，原生任务保持运行。
+
+
+## 2026-11-03：一键回到最新对话
+
+- 在输入区上方居中添加 40px 圆形向下箭头；离开底部超过 40px 时显示，点击立即滚到底部并清除旧阅读锚点，到达底部自动隐藏。悬浮定位不占正文高度，支持深浅主题、中英文标签和键盘操作。
+- 滚动、历史加载、消息尺寸变化和输入区尺寸变化均更新可见性；阅读旧消息时保留既有位置，不因显示按钮主动滚动。
+- 桌面 1280×720 上滚后箭头出现，点击距离底部 0px 并隐藏；手机 390×844 上滚距离底部 60px 时可见，点击后不足 1px 并隐藏，没有横向溢出或浏览器错误。手机检查修正了短页面剩余 60px 时按钮不出现的问题，使显示阈值与阅读锚点一致。截图 `.data/jump-latest-desktop.png`、`.data/jump-latest-mobile.png`；4 项输入/翻译回归和 JS 语法检查通过。
+- 正式站 `/opt/agent-relay/releases/20261103-jump-latest` 与预览 `/opt/agent-relay-preview/releases/20261103-demo-jump-latest` 已发布。九项正式网页散列匹配，健康接口 200，Windows 在线；公网预览上滚显示、点击后底部距离 0 且按钮隐藏，截图 `.data/jump-latest-public.png`。英文提示与 Enter 激活也验证通过；本机连接程序和原生任务未重启。

@@ -1,5 +1,6 @@
 (() => {
   const words={
+    '回到最新对话':'Jump to latest messages',
     '后台任务':'Background task',
     '后台任务 · 通知':'Background task · Notification',
     '工作设备':'Workstation','全部工作设备':'All workstations','全部项目':'All projects','全部状态':'All statuses','Codex 项目':'Codex project','任务状态':'Task status','正在运行 / 等待审批':'Running / awaiting approval','已完成':'Completed','失败 / 已停止':'Failed / stopped','搜索标题或项目…':'Search titles or projects…','搜索会话':'Search conversations','会话类型':'Agent type','全部':'All','其他 Agent':'Other agents','最近会话':'Recent conversations','退出':'Sign out','新建会话':'New conversation','＋ 新建会话':'＋ New conversation','切换会话…':'Switch conversation…','切换会话':'Switch conversation','刷新会话':'Refresh conversations','刷新':'Refresh','正在连接':'Connecting','正在执行':'Running','正在运行':'Running','等待你确认':'Waiting for you','等待审批':'Awaiting approval','待回答':'Answer needed','电脑离线':'Workstation offline','已停止':'Stopped','执行失败':'Failed','已归档':'Archived','历史会话':'History','未归属项目':'Unassigned project','本地执行 · 随处连接':'Run locally · connect anywhere',

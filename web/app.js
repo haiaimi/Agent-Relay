@@ -162,6 +162,7 @@ function resizeComposer(){
   prompt.style.height='0px';const limit=Math.max(64,Math.min(160,(window.visualViewport?.height??window.innerHeight)*.22));
   prompt.style.height=Math.max(44,Math.min(prompt.scrollHeight,limit))+'px';prompt.style.overflowY=prompt.scrollHeight>limit?'auto':'hidden';
   if(atBottom)timeline.scrollTop=timeline.scrollHeight;
+  updateJumpToLatest();
 }
 let lastViewportHeight=0;
 function fitViewport(){
@@ -185,7 +186,8 @@ function restoreReadingAnchor(anchor){
   $('timeline').scrollTop+=message.getBoundingClientRect().top-$('timeline').getBoundingClientRect().top-anchor.offset;return true;
 }
 function readingSelection(){const selection=window.getSelection();return selection&&!selection.isCollapsed&&$('timeline').contains(selection.anchorNode);}
-function rememberReadingPosition(){const t=$('timeline');retainedReadingAnchor=t.scrollHeight-t.scrollTop-t.clientHeight>40||readingSelection()?readingAnchor():null;}
+function updateJumpToLatest(){const t=$('timeline'),hidden=!selected||$('conversation').hidden||t.scrollHeight-t.scrollTop-t.clientHeight<=40;if($('jump-latest').hidden!==hidden)$('jump-latest').hidden=hidden;}
+function rememberReadingPosition(){const t=$('timeline');retainedReadingAnchor=t.scrollHeight-t.scrollTop-t.clientHeight>40||readingSelection()?readingAnchor():null;updateJumpToLatest();}
 function renderMessages(keepPosition=false){
   if(document.activeElement?.closest('.question-card')||readingSelection())keepPosition=true;
   const timeline=$('timeline'),nearBottom=timeline.scrollHeight-timeline.scrollTop-timeline.clientHeight<40;
@@ -374,6 +376,7 @@ async function stopTask(queueOnly=false){
 }
 $('stop').onclick=()=>void stopTask(true);
 $('stop-task').onclick=()=>void stopTask();
+$('jump-latest').onclick=()=>{olderRequested=false;retainedReadingAnchor=null;$('timeline').scrollTop=$('timeline').scrollHeight;rememberReadingPosition();};
 $('refresh').onclick=async()=>{try{await refresh();if(selected)await history();}catch(err){toast(err.message);}};
 let lastHistoryTop=0,historyTouchY,userScrollUntil=0;
 $('timeline').addEventListener('scroll',()=>{const top=$('timeline').scrollTop;if(top<lastHistoryTop&&performance.now()<userScrollUntil)maybeLoadOlder(true);lastHistoryTop=top;rememberReadingPosition();},{passive:true});
@@ -383,7 +386,7 @@ $('timeline').addEventListener('touchend',e=>{if(historyTouchY!==undefined&&e.ch
 $('timeline').addEventListener('pointerdown',()=>{userScrollUntil=performance.now()+3000;},{passive:true});
 $('timeline').addEventListener('touchmove',()=>{userScrollUntil=performance.now()+3000;},{passive:true});
 document.addEventListener('keydown',e=>{if(['ArrowUp','PageUp','Home','PageDown','ArrowDown','End',' '].includes(e.key)&&!e.target.closest('input,textarea,select'))userScrollUntil=performance.now()+2000;});
-if('ResizeObserver' in window){const readingResize=new ResizeObserver(()=>{if(!selected||!historyPager.initialized)return;if(retainedReadingAnchor)restoreReadingAnchor(retainedReadingAnchor);else $('timeline').scrollTop=$('timeline').scrollHeight;});readingResize.observe($('messages'));readingResize.observe($('timeline'));}
+if('ResizeObserver' in window){const readingResize=new ResizeObserver(()=>{if(!selected||!historyPager.initialized)return;if(retainedReadingAnchor)restoreReadingAnchor(retainedReadingAnchor);else $('timeline').scrollTop=$('timeline').scrollHeight;updateJumpToLatest();});readingResize.observe($('messages'));readingResize.observe($('timeline'));}
 $('search').oninput=renderList;
 $('device-filter').onchange=()=>{renderFilters();renderList();};$('project-filter').onchange=renderList;
 $('session-title').onclick=()=>{const button=$('session-title');const expanded=button.getAttribute('aria-expanded')==='true';button.setAttribute('aria-expanded',String(!expanded));button.setAttribute('aria-label',expanded?'展开完整会话标题':'收起会话标题');};

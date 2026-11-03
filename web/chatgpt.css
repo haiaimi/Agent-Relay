@@ -124,6 +124,9 @@ button.file-download { border: 0; background: transparent; color: var(--link); t
 .approval-actions button, .cancel-input, .steer { color: var(--ink); background: var(--surface); border: 1px solid var(--line); }
 .approval-actions button:first-child { color: var(--paper); background: var(--ink); border-color: var(--ink); }
 .composer-wrap { background: var(--paper); border: 0; padding: 10px max(24px, calc((100% - 800px)/2)) max(14px, env(safe-area-inset-bottom)); }
+.jump-latest { position: absolute; top: -44px; left: 50%; transform: translateX(-50%); z-index: 5; display: grid; place-items: center; width: 40px; height: 40px; padding: 0; border: 1px solid var(--line); border-radius: 50%; background: var(--surface); color: var(--ink); box-shadow: 0 2px 8px #0002; cursor: pointer; }
+.jump-latest:hover { background: var(--surface-hover); }
+.jump-latest svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 #composer { color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 27px; box-shadow: none; }
 #composer:focus-within { border-color: var(--focus); }
 #composer textarea { color: var(--ink); background: transparent; }
