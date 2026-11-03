@@ -1,7 +1,7 @@
 import {agentLabel,agentChoice,hostAgents} from './agent-ui.js';
 import {AttachmentInput} from './attachments.js';
 import {setupDrawer,setupSidebarResize} from './drawer.js';
-import {userMessageText} from './message-text.js';
+import {userMessageText,displayMessage} from './message-text.js';
 import {orderedMessages,acceptsStatusEvent,HistoryPager,reconcileChildren,timelineWithQuestions} from './timeline.js';
 import {directAssets} from './direct.js';
 import {QuestionPanel} from './questions.js';
@@ -191,7 +191,7 @@ function rememberReadingPosition(){const t=$('timeline');retainedReadingAnchor=t
 function renderMessages(keepPosition=false){
   if(document.activeElement?.closest('.question-card')||readingSelection())keepPosition=true;
   const timeline=$('timeline'),nearBottom=timeline.scrollHeight-timeline.scrollTop-timeline.clientHeight<40;
-  const anchor=keepPosition||!nearBottom?readingAnchor():null,rows=[],live=new Set(),groups=new Set(),groupCards=new Set(),approvalIds=new Set(),sequence=timelineWithQuestions(messages.values(),questionPanel.cards.values()),placedQuestions=new Set();let group=null,changed=false;
+  const anchor=keepPosition||!nearBottom?readingAnchor():null,rows=[],live=new Set(),groups=new Set(),groupCards=new Set(),approvalIds=new Set(),sequence=timelineWithQuestions([...messages.values()].map(m=>displayMessage(m,selected?.provider)),questionPanel.cards.values()),placedQuestions=new Set();let group=null,changed=false;
   const text=(element,value)=>{if(element.textContent!==value){element.textContent=value;changed=true;}};
   for(const [index,m] of sequence.entries()){
     if(m.role==='question'){

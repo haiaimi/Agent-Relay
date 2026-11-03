@@ -8,5 +8,6 @@ test('operational UI translates compound labels without recursively translating 
   assert.equal(window.relayI18n.translate('正在执行 · 2 条排队中'),'Running · 2 queued');
   assert.equal(window.relayI18n.translate('模型与思考强度'),'Model and reasoning effort');
   assert.equal(window.relayI18n.translate('工具调用与结果 · 3 项'),'Tool calls and results · 3 items');
+  assert.equal(window.relayI18n.translate('后台任务 · 已完成'),'Background task · Completed');
   assert.equal(window.relayI18n.translate('请回答所有问题后提交'),'Answer every question before submitting');
 });

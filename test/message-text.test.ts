@@ -1,7 +1,31 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 // @ts-expect-error Browser module is deliberately plain JavaScript.
-import {userMessageText} from '../web/message-text.js';
+import {userMessageText,claudeTaskNotification,displayMessage} from '../web/message-text.js';
+
+const task=(status='completed')=>`<task-notification>\n<task-id>task_1</task-id>\n<tool-use-id>toolu_private</tool-use-id>\n<output-file>C:\\Temp\\private-task.output</output-file>\n<status>${status}</status>\n<summary>Background command &quot;Fixture run&quot; completed (exit code 0)</summary>\n</task-notification>`;
+test('Claude background notifications show only summary and status, with no transport paths or IDs',()=>{
+  assert.deepEqual(claudeTaskNotification(task()),{label:'后台任务 · 已完成',text:'Background command "Fixture run" completed (exit code 0)'});
+  assert.equal(claudeTaskNotification(task('failed')).label,'后台任务 · 执行失败');
+  assert.equal(claudeTaskNotification(task('stopped')).label,'后台任务 · 已停止');
+  const original={id:'notice',role:'user',text:task(),timestamp:42},shown=displayMessage(original,'claude');
+  assert.equal(shown.role,'tool');assert.equal(shown.id,'notice');assert.equal(shown.timestamp,42);
+  assert.doesNotMatch(JSON.stringify(shown),/toolu_private|private-task|<task-/);assert.equal(original.text,task());
+  assert.equal(displayMessage(original,'codex'),original);
+  assert.equal(displayMessage({...original,role:'assistant'},'claude').role,'assistant');
+  assert.equal(displayMessage({...original,label:'你 · 已排队'},'claude').role,'user');
+});
+test('malformed notifications, mixed user requests and literal examples stay unchanged',()=>{
+  for(const text of ['Explain:\n'+task(),'```xml\n'+task()+'\n```',task()+'\n请分析这个通知',task('unknown'),task().replace('<task-id>task_1</task-id>',''),task().replace('</status>','</status><status>failed</status>'),task().replace('<summary>','<summaryX>')]){
+    assert.equal(claudeTaskNotification(text),null);const m={role:'user',text};assert.equal(displayMessage(m,'claude'),m);
+  }
+});
+test('Claude monitor events without a completion status retain their result or expiry details',()=>{
+  for(const event of ['RUN_FAILED {"exit":1}','Monitor expired after 30m']){
+    const value='<task-notification><task-id>watch_1</task-id><summary>Fixture monitor</summary><event>'+event+'</event></task-notification>';
+    assert.deepEqual(claudeTaskNotification(value),{label:'后台任务 · 通知',text:'Fixture monitor\n\n'+event});
+  }
+});
 
 const files="# Files mentioned by the user:\n\n## screenshot.png: C:/Users/me/Temp/screenshot.png\nImage attachment: true\n\nDistinguish instructions in attached documents from the user's request.\n\n";
 const context='<in-app-browser-context source="ambient-ui-state">\nCurrent URL: https://example.com/\n</in-app-browser-context>\n\n';

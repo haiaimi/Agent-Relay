@@ -12,6 +12,8 @@ import type {MediaStore} from '../shared/media.js';
 import {normalizeQuestions,type UserQuestion} from '../shared/questions.js';
 import {NativeActivities} from './activity.js';
 import {TranscriptSettings} from './settings.js';
+// @ts-expect-error Pure JavaScript shared with cached browser presentation.
+import {claudeTaskNotification} from '../../web/message-text.js';
 
 export function itemMessage(item: any, ordinal: number): Message | null {
   if (!item || typeof item !== 'object') return null;
@@ -41,6 +43,10 @@ export function transcriptLine(line: any, ordinal: number): Message | null {
   if(['user','assistant'].includes(line.type) && line.message && !line.isMeta) {
     const blocks=Array.isArray(line.message.content)?line.message.content:[];
     const text=imageSafeText(typeof line.message.content==='string'?line.message.content:blocks.filter((b:any)=>b.type==='text').map((b:any)=>b.text).join('\n'));
+    if(line.type==='user'&&(!line.origin||line.origin.kind==='task-notification')){
+      const task=claudeTaskNotification(text);
+      if(task)return {id:line.uuid??`log-${ordinal}`,role:'tool',...task,timestamp:Date.parse(line.timestamp)||undefined};
+    }
     if(text||blocks.some((b:any)=>['image','input_image','local_image','localImage'].includes(b.type)))return {id:line.type==='assistant'?`claude-text:${line.uuid??line.message.id??ordinal}`:line.uuid??`log-${ordinal}`,role:line.type,text:text.slice(0,16000),timestamp:Date.parse(line.timestamp)||undefined};
     const calls=blocks.filter((b:any)=>b.type==='tool_use'),results=blocks.filter((b:any)=>b.type==='tool_result');
     if(calls.length)return {id:`claude-tool:${calls[0].id??line.uuid??ordinal}`,role:'tool',label:calls.map((b:any)=>b.name).join(' · '),text:calls.map((b:any)=>imageSafeJson(b.input)).join('\n').slice(0,16000)};
@@ -97,7 +103,7 @@ export class NativeHistory {
         let cwd='', title='', nativeId=basename(file,'.jsonl');
         for(const raw of buffer.subarray(0,n).toString('utf8').split('\n')) {
           try { const line=JSON.parse(raw);cwd ||= line.cwd ?? '';nativeId=line.sessionId ?? nativeId;
-            if(line.type==='user' && !line.isMeta && !title) title=textContent(line.message?.content).replace(/\s+/g,' ').slice(0,120);
+            if(line.type==='user' && !line.isMeta && line.origin?.kind!=='task-notification' && !title) title=textContent(line.message?.content).replace(/\s+/g,' ').slice(0,120);
             if(line.type==='custom-title') title=String(line.customTitle ?? title);
           } catch { /* The last line in the bounded glance may be incomplete. */ }
         }

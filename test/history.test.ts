@@ -7,6 +7,16 @@ import {join} from 'node:path';
 import {zstdCompressSync} from 'node:zlib';
 import {NativeHistory,transcriptLine} from '../src/bridge/history.js';
 
+test('Claude native task notifications are tools, retaining history identity and failure state',()=>{
+  const text='<task-notification><task-id>background_1</task-id><output-file>C:\\Temp\\private.output</output-file><status>failed</status><summary>Fixture command failed (exit code 1)</summary></task-notification>';
+  const line={type:'user',uuid:'native-notice',origin:{kind:'task-notification',producer:'session-task'},timestamp:'2026-11-03T08:00:00Z',message:{content:text}};
+  const message=transcriptLine(line,9)!;
+  assert.deepEqual(message,{id:'native-notice',role:'tool',label:'后台任务 · 执行失败',text:'Fixture command failed (exit code 1)',timestamp:Date.parse(line.timestamp)});
+  assert.equal(transcriptLine({...line,origin:undefined,message:{content:[{type:'text',text}]}},9)?.role,'tool');
+  assert.equal(transcriptLine({...line,origin:{kind:'user',producer:'user'}},9)?.role,'user');
+  assert.equal(transcriptLine({...line,message:{content:'```xml\n'+text+'\n```'}},9)?.role,'user');
+});
+
 test('native asynchronous questions exclude answered cards and questions superseded by later user messages',()=>{
   const root=mkdtempSync(join(tmpdir(),'relay-async-question-')),codex=join(root,'codex');mkdirSync(codex);
   const state=new DatabaseSync(join(codex,'state_5.sqlite'));state.exec('CREATE TABLE threads(id TEXT,title TEXT,cwd TEXT,updated_at INTEGER,archived INTEGER,agent_role TEXT,rollout_path TEXT,model TEXT)');state.prepare('INSERT INTO threads VALUES(?,?,?,?,?,?,?,?)').run('async','question',root,123,0,null,join(root,'missing'),'fixture');state.close();

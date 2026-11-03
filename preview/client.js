@@ -29,6 +29,7 @@
   message(perf,'assistant','示例数据中，平均耗时从 **7.8 ms** 降到 **3.4 ms**。\n\n| 指标 | 优化前 | 优化后 |\n| --- | --- | --- |\n| 平均耗时 | 7.8 ms | 3.4 ms |\n| P95 | 10.6 ms | 4.3 ms |\n\n这张图展示了优化后的稳定性。数值仅用于功能演示。',['chart']);
   const docs=session('documentation','整理组件库使用文档','claude','running','notes','demo-mac');
   message(docs,'user','整理组件库的使用方式，补齐按钮、弹窗和主题切换的示例。');
+  message(docs,'user','<task-notification><task-id>demo-check</task-id><tool-use-id>demo-tool</tool-use-id><output-file>/demo/tasks/check.output</output-file><status>completed</status><summary>组件文档示例检查已完成（演示）</summary></task-notification>');
   message(docs,'assistant','已整理目录结构，正在补齐交互示例与使用说明。你也可以在运行时发送补充要求，再逐条选择引导。');docs.activity={kind:'plan',label:'正在编写文档',detail:'第 2 / 3 步：补齐交互示例'};
   const intro=session('guide','欢迎体验 Agent Relay','claude','idle','notes','demo-mac');
   message(intro,'assistant','这里是 **Agent Relay 功能预览**。\n\n你可以体验：\n1. 在侧栏切换 Codex / Claude 会话。\n2. 浏览已完成的任务和图片，点击图片查看原图。\n3. 查看运行中的步骤，发送补充消息并点击引导。\n4. 回答 Agent 的选择题，切换模型、思考强度与权限。\n5. 手机上从左边缘拖开侧栏，电脑拖动侧栏边缘调宽。\n\n所有设备、会话、模型回复和指标都是示例，不会连接工作电脑。刷新页面即可重置。');

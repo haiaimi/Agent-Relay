@@ -197,3 +197,13 @@
 - 88 项完整测试、TypeScript 检查与构建、浏览器模块语法检查通过；补充模型别名顺序和 3 项键盘行为回归，最终预览改动另过预览测试。隔离预览中实际验证 Enter 发送、Shift+Enter 换行和 `/usage` 执行，未向真实任务发送测试内容。
 - 正式站发布 `/opt/agent-relay/releases/20261103-claude-model-enter`，七项静态文件 SHA-256 与本机一致，新增 composer 模块 HTTP 200；独立预览发布 `/opt/agent-relay-preview/releases/20261103-demo-claude-model-enter`，静态资源匹配，预览服务端写入仍拒绝。
 - 正式会话通过仅允许 GET 的本地验证代理打开，确认模型按钮及弹窗均显示 `Opus 5.5`；截图为忽略的 `.data/claude-model-enter-live.png`。健康检查 HTTP 200，Windows 连接正常，2 条原生任务保持运行；未重启电脑连接程序。
+
+
+## 2026-11-03：Claude 后台任务通知不再作为用户气泡显示
+
+- 对照截图和真实 JSONL，通知具有 `origin.kind=task-notification`，但 `type=user` 且没有 `isMeta`。旧解析仅检查 type/isMeta，因此把完整 XML、任务/工具 ID 和临时输出路径作为用户正文同步。
+- 原生历史与网页缓存共用纯文本通知解析器：完整通知按工具记录呈现，默认跟随现有工具分组折叠；保留任务摘要、完成/失败/停止状态和监控事件内容。隐藏通知外层标签和传输字段，不改变本地原始日志，不读取 output-file 指向的文件。带正文/代码围栏的示例、不完整通知和未知状态保持原文。
+- 原生历史保留消息 ID 与时间戳；网页兼容服务器缓存中旧的 user 记录，不要求清空会话缓存。会话标题提取排除明确的后台通知。完成类与无 status 的监控事件均覆盖，原生样本 6 条全部规范化。
+- 92 项测试、类型检查和构建通过，包含原生分类、历史身份/失败状态、旧缓存呈现、监控失败/到期事件、字面示例保留和英文标签；生产真实历史页返回规范化通知，无原始 XML 用户气泡。
+- 正式站发布 `/opt/agent-relay/releases/20261103-claude-task-notices`，预览发布 `/opt/agent-relay-preview/releases/20261103-demo-claude-task-notices`。八项网页文件散列与源码一致，Windows 连接恢复。确认无托管任务后由既有守护脚本重载连接程序，原生任务保持执行。
+- 通过只读代理检查截图对应的 Claude 会话：默认折叠；展开显示“后台任务 · 已完成”和 Full five-wave autopilot run 摘要，无 XML、内部 ID 或输出路径。截图证据为忽略的 `.data/claude-task-notice-live.png`；测试记录 `.data/claude-task-notice-tests.txt`。
