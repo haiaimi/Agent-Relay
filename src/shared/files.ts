@@ -16,14 +16,20 @@ export class FileStore {
   }
   put(scope:string,file:FileRef,bytes:Buffer):FileRef {
     if(!scope||scope.length>400||!uploadId.test(file?.id??'')||!bytes.length||bytes.length>MAX_UPLOAD_BYTES||file.size!==bytes.length||createHash('sha256').update(bytes).digest('hex')!==file.sha256)throw new Error('附件校验失败或超过 16 MB');
-    if(typeof file.name!=='string'||!file.name||file.name.length>180||/[\\/\x00-\x1f]/.test(file.name)||file.name==='.'||file.name==='..'||/[. ]$/.test(file.name)||/[:<>"|?*]/.test(file.name)||/^(con|prn|aux|nul|com[0-9]|lpt[0-9])(?:\.|$)/i.test(file.name))throw new Error('文件名不受支持');
     const ref:FileRef={id:file.id,name:file.name,size:bytes.length,mime:imageMime(bytes)??'application/octet-stream',sha256:file.sha256};
-    const old=this.db.prepare('SELECT json FROM upload_files WHERE id=? LIMIT 1').get(ref.id);
-    if(old&&JSON.stringify(JSON.parse(String(old.json)))!==JSON.stringify(ref))throw new Error('附件 ID 冲突');
+    this.validate(scope,ref);
     const dir=join(this.root,ref.id);mkdirSync(dir,{recursive:true,mode:0o700});
     const path=join(dir,ref.name);if(!existsSync(path)){const temp=join(dir,randomUUID()+'.part');writeFileSync(temp,bytes,{mode:0o600,flag:'wx'});renameSync(temp,path);}
     this.db.prepare('INSERT OR IGNORE INTO upload_files VALUES(?,?,?)').run(ref.id,scope,JSON.stringify(ref));return ref;
   }
+  private validate(scope:string,file:FileRef){
+    if(!scope||scope.length>400||!uploadId.test(file?.id??'')||!Number.isSafeInteger(file.size)||file.size<1||file.size>MAX_UPLOAD_BYTES||!/^[a-f0-9]{64}$/.test(file.sha256)||!['image/png','image/jpeg','image/gif','image/webp','application/octet-stream'].includes(file.mime))throw new Error('无效附件索引');
+    if(typeof file.name!=='string'||!file.name||file.name.length>180||/[\\/\x00-\x1f]/.test(file.name)||file.name==='.'||file.name==='..'||/[. ]$/.test(file.name)||/[:<>"|?*]/.test(file.name)||/^(con|prn|aux|nul|com[0-9]|lpt[0-9])(?:\.|$)/i.test(file.name))throw new Error('文件名不受支持');
+    const old=this.db.prepare('SELECT json FROM upload_files WHERE id=? LIMIT 1').get(file.id);
+    if(old&&JSON.stringify(JSON.parse(String(old.json)))!==JSON.stringify(file))throw new Error('附件 ID 冲突');
+  }
+  register(scope:string,file:FileRef){this.validate(scope,file);const ref={id:file.id,name:file.name,size:file.size,mime:file.mime,sha256:file.sha256};this.db.prepare('INSERT OR IGNORE INTO upload_files VALUES(?,?,?)').run(ref.id,scope,JSON.stringify(ref));return ref;}
+  refs(scope:string,ids:string[]=[]){const refs=ids.map(id=>this.ref(scope,id));if(refs.length>MAX_ATTACHMENTS||refs.reduce((n,f)=>n+f.size,0)>MAX_UPLOAD_BYTES)throw new Error('最多 5 个附件，总大小不能超过 16 MB');return refs;}
   import(payload:FilePayload){
     if(typeof payload?.data!=='string'||payload.data.length>Math.ceil(MAX_UPLOAD_BYTES/3)*4||!/^[A-Za-z0-9+/]*={0,2}$/.test(payload.data))throw new Error('无效附件');
     return this.put(payload.scope,payload.file,Buffer.from(payload.data,'base64'));

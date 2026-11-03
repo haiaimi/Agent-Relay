@@ -1,0 +1,6 @@
+.demo-banner { display:flex; align-items:center; gap:10px; padding:9px 16px; border-bottom:1px solid var(--line); color:var(--muted); font-size:12px; background:var(--paper); flex:none; }
+.demo-banner strong { color:var(--success); white-space:nowrap; font-size:12px; }
+.demo-banner span { flex:1; }
+.demo-banner button { border:0; background:var(--surface); color:var(--ink); border-radius:8px; padding:5px 9px; white-space:nowrap; font-size:12px; }
+.main { overflow:hidden; }
+@media(max-width:760px){ .demo-banner { font-size:10px; padding:6px 12px; gap:7px; } .demo-banner strong,.demo-banner button{font-size:10px;} }

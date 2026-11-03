@@ -31,3 +31,20 @@ test('request content including code and headings survives unwrapping',()=>{
   const request='请保留代码\n```xml\n<environment_context>示例</environment_context>\n```\n## My request:\n正文标题';
   assert.equal(userMessageText(files+'## My request:\n'+request),request);
 });
+
+const reply=(question:string,answer:string,index=0)=>({questionItemId:JSON.stringify(['request_user_input_async','call_example',index]),question,answer});
+const wrap=(value:unknown)=>'<send_user_message_question_reply>\n'+JSON.stringify(value)+'\n</send_user_message_question_reply>';
+test('native question replies show readable questions and answers without transport identifiers',()=>{
+  const text=wrap([reply('是否接受“优先直连，失败时加密中转”？','允许加密中转，提高外网可用性')]);
+  assert.equal(userMessageText(text),'问题：是否接受“优先直连，失败时加密中转”？\n回答：允许加密中转，提高外网可用性');
+  assert.ok(text.includes('questionItemId'));
+  assert.equal(userMessageText(context+'## My request:\n'+text),userMessageText(text));
+});
+test('multiple replies preserve answer paragraphs, punctuation and code as plain user content',()=>{
+  const answer='保留 A/B\n路径 C:\\work\\file\n```js\nconst x = "ok";\n```';
+  assert.equal(userMessageText(wrap([reply('选择哪个？','A',0),reply('补充说明？',answer,1)])),'问题：选择哪个？\n回答：A\n\n问题：补充说明？\n回答：'+answer);
+});
+test('literal, malformed and unrelated reply examples are not silently rewritten',()=>{
+  const valid=wrap([reply('Q','A')]);
+  for(const text of ['示例：\n'+valid,'```xml\n'+valid+'\n```',wrap([]),wrap([{question:'Q',answer:'A'}]),wrap([{...reply('Q','A'),answer:{value:'A'}}]),'<send_user_message_question_reply>{broken}</send_user_message_question_reply>'])assert.equal(userMessageText(text),text);
+});

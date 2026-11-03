@@ -57,7 +57,7 @@ test('native Codex discovers the desktop owner, targets it and keeps rejected in
   const root=mkdtempSync(join(tmpdir(),'relay-desktop-steer-'));mkdirSync(join(root,'work'));
   const path=process.platform==='win32'?'\\\\.\\pipe\\relay-desktop-test-'+randomUUID():join(root,'test.sock');
   const nativeId=randomUUID(),ownerId=randomUUID(),clientId=randomUUID(),turnId=randomUUID(),frames:any[]=[];let reject=false,disconnect=false;
-  const server=createServer(socket=>{let buffer=Buffer.alloc(0);socket.on('data',chunk=>{buffer=Buffer.concat([buffer,chunk]);while(buffer.length>=4&&buffer.length>=buffer.readUInt32LE()+4){const size=buffer.readUInt32LE(),m=JSON.parse(buffer.subarray(4,4+size).toString());buffer=buffer.subarray(4+size);frames.push(m);let result:any;
+  const server=createServer(socket=>{let buffer=Buffer.alloc(0);socket.on('data',chunk=>{buffer=Buffer.concat([buffer,chunk]);while(buffer.length>=4&&buffer.length>=buffer.readUInt32LE()+4){const size=buffer.readUInt32LE(),m=JSON.parse(buffer.subarray(4,4+size).toString());buffer=buffer.subarray(4+size);frames.push(m);if(m.type!=='request')continue;let result:any;
     if(m.method==='initialize')result={clientId};
     else if(m.method==='thread-owner-discovery'){assert.equal(m.params.conversationId,nativeId);result={supportsUntrustedAppInput:true};}
     else {assert.equal(m.method,'thread-follower-steer-turn');assert.equal(m.version,1);assert.equal(m.targetClientId,ownerId);assert.equal(m.params.conversationId,nativeId);assert.equal(m.params.restoreMessage.context!=null,true);result={result:{turnId}};}

@@ -15,12 +15,15 @@
     "test": "node --import tsx --test test/*.test.ts",
     "keys": "node scripts/keys.mjs",
     "setup": "node scripts/setup.mjs",
+    "questions:install": "node scripts/install-question-hook.mjs",
     "smoke:live": "node --import tsx scripts/smoke-live.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.316",
     "dompurify": "3.4.17",
     "markdown-it": "15.0.3",
+    "sharp": "0.35.5",
+    "werift": "0.26.0",
     "ws": "8.22.1"
   },
   "devDependencies": {

@@ -1,0 +1,31 @@
+# Install coturn from your OS package repository. Replace addresses and secret.
+listening-port=3478
+listening-ip=0.0.0.0
+relay-ip=10.0.0.2
+external-ip=203.0.113.2/10.0.0.2
+min-port=49160
+max-port=49260
+realm=agent-relay
+use-auth-secret
+static-auth-secret=REPLACE_WITH_TURN_SECRET
+fingerprint
+no-cli
+no-tls
+no-dtls
+# TCP to TURN is supported; peer relay endpoints use UDP.
+no-tcp-relay
+no-multicast-peers
+user-quota=8
+total-quota=64
+max-bps=8000000
+max-allocate-lifetime=600
+stale-nonce=600
+no-software-attribute
+log-file=syslog
+denied-peer-ip=0.0.0.0-0.255.255.255
+denied-peer-ip=10.0.0.0-10.255.255.255
+denied-peer-ip=127.0.0.0-127.255.255.255
+denied-peer-ip=169.254.0.0-169.254.255.255
+denied-peer-ip=172.16.0.0-172.31.255.255
+denied-peer-ip=192.168.0.0-192.168.255.255
+denied-peer-ip=224.0.0.0-255.255.255.255

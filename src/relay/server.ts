@@ -6,14 +6,20 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { RelayStore } from './store.js';
 import { equalSecret, requireSecret, makeCookie, validCookie } from '../shared/security.js';
 import { validateAction, type Host, type Session, type RelayEvent, type Action } from '../shared/protocol.js';
-import {MediaStore,BRIDGE_FRAME_BYTES} from '../shared/media.js';
-import {FileStore,MAX_UPLOAD_BYTES} from '../shared/files.js';
+import {BRIDGE_FRAME_BYTES,MediaStore} from '../shared/media.js';
+import {FileStore,MAX_UPLOAD_BYTES,uploadId} from '../shared/files.js';
+import {validDirectSdp} from '../shared/direct.js';
+import {turnCredentials,type TurnConfig} from './turn.js';
+import {ImagePreviews} from './previews.js';
 
-interface Options { dataDir: string; phoneToken: string; bridgeToken: string; publicOrigin?: string }
+interface Options { dataDir: string; phoneToken: string; bridgeToken: string; publicOrigin?: string;turn?:TurnConfig }
 const staticFiles: Record<string,[string,string]> = {
   '/':['index.html','text/html; charset=utf-8'], '/app.js':['app.js','text/javascript; charset=utf-8'],
   '/message-text.js':['message-text.js','text/javascript; charset=utf-8'],
+  '/session-settings.js':['session-settings.js','text/javascript; charset=utf-8'],
   '/timeline.js':['timeline.js','text/javascript; charset=utf-8'],
+  '/direct.js':['direct.js','text/javascript; charset=utf-8'],
+  '/questions.js':['questions.js','text/javascript; charset=utf-8'],
   '/attachments.js':['attachments.js','text/javascript; charset=utf-8'], '/drawer.js':['drawer.js','text/javascript; charset=utf-8'],
   '/style.css':['style.css','text/css; charset=utf-8'], '/chatgpt.css':['chatgpt.css','text/css; charset=utf-8'], '/theme.js':['theme.js','text/javascript; charset=utf-8'], '/glass.css':['glass.css','text/css; charset=utf-8'], '/glass-optics.css':['glass-optics.css','text/css; charset=utf-8'],
   '/glass-gpu.js':['glass-gpu.js','text/javascript; charset=utf-8'], '/glass-renderer.js':['glass-renderer.js','text/javascript; charset=utf-8'], '/glass-init.js':['glass-init.js','text/javascript; charset=utf-8'],
@@ -30,14 +36,26 @@ async function body(req: IncomingMessage): Promise<any> {
   return JSON.parse(text || '{}');
 }
 export function createRelay(options: Options) {
+  if(options.turn)turnCredentials(options.turn);
   requireSecret(options.phoneToken,'PHONE_TOKEN'); requireSecret(options.bridgeToken,'BRIDGE_TOKEN');
   if (equalSecret(options.phoneToken, options.bridgeToken)) throw new Error('Use separate phone and bridge secrets');
   const origin = options.publicOrigin && new URL(options.publicOrigin).origin;
   const secure = origin?.startsWith('https://');
   const store = new RelayStore(options.dataDir);
-  const media=new MediaStore(options.dataDir,store.db);
   const files=new FileStore(options.dataDir,store.db);
-  const mediaRequests=new Map<string,Promise<void>>();
+  const media=new MediaStore(options.dataDir,store.db);
+  const previews=new ImagePreviews(options.dataDir);
+  const assetRequests=new Map<string,Promise<void>>(),assetActive=new Set<Promise<void>>();
+  // Coalesce duplicate cold reads and bound concurrent large frames on the bridge.
+  function assetRequest(key:string,load:()=>Promise<void>){
+    const prior=assetRequests.get(key);if(prior)return prior;
+    if(assetRequests.size>=64)throw new Error('资源请求较多，请稍后重试');
+    const job=(async()=>{
+      while(assetActive.size>=3)await Promise.race(assetActive).catch(()=>{});
+      const active=load();assetActive.add(active);try{await active;}finally{assetActive.delete(active);}
+    })().finally(()=>assetRequests.delete(key));assetRequests.set(key,job);return job;
+  }
+  const negotiations=new Map<string,number>();
   const bridges = new Map<string,WebSocket>();
   const viewers = new Set<ServerResponse>();
   const pending = new Map<string,{resolve:(value:any)=>void; reject:(err:Error)=>void; host:string; timer:NodeJS.Timeout}>();
@@ -89,21 +107,27 @@ export function createRelay(options: Options) {
       if(!auth(req)) return json(res,401,{error:'请先登录'});
       if(req.method==='POST'&&url.pathname==='/api/uploads'){
         if(req.headers['content-type']!=='application/octet-stream')return json(res,415,{error:'请上传原始文件'});
-        const hostId=url.searchParams.get('hostId')??'',sessionId=url.searchParams.get('sessionId'),projectId=url.searchParams.get('projectId'),name=url.searchParams.get('name')??'';
+        const hostId=url.searchParams.get('hostId')??'',sessionId=url.searchParams.get('sessionId'),projectId=url.searchParams.get('projectId'),name=url.searchParams.get('name')??'',id=url.searchParams.get('id')??randomUUID();
+        if(Boolean(sessionId)===Boolean(projectId)||!uploadId.test(id))return json(res,400,{error:'无效附件或目标'});
         const host=store.hosts().find(h=>h.id===hostId),session=sessionId?store.getSession(sessionId):undefined;
         if(!host||(sessionId?session?.hostId!==hostId:!host.projects.some(p=>p.id===projectId)))return json(res,404,{error:'请选择有效会话或项目'});
         if(!bridges.has(hostId))return json(res,409,{error:'电脑离线，请上线后上传'});
         const chunks:Buffer[]=[];let size=0;for await(const chunk of req){size+=chunk.length;if(size>MAX_UPLOAD_BYTES)throw new Error('附件不能超过 16 MB');chunks.push(Buffer.from(chunk));}
-        const bytes=Buffer.concat(chunks),scope=hostId+'|'+(sessionId??'project:'+projectId),file={id:randomUUID(),name,size,mime:'application/octet-stream',sha256:createHash('sha256').update(bytes).digest('hex')};
+        const bytes=Buffer.concat(chunks),scope=hostId+'|'+(sessionId??'project:'+projectId),file={id,name,size,mime:'application/octet-stream',sha256:createHash('sha256').update(bytes).digest('hex')};
         const saved=files.put(scope,file,bytes);
-        await remote(hostId,{id:randomUUID(),type:'upload',upload:{scope,file:saved,data:bytes.toString('base64')}});
+        await assetRequest('upload:'+scope+':'+id,async()=>{const result=await remote(hostId,{id:randomUUID(),type:'upload',upload:{scope,file:saved,data:bytes.toString('base64')}});if(result?.file?.sha256!==saved.sha256)throw new Error('电脑未确认收到附件');});
         return json(res,200,{file:saved});
       }
       if(req.method==='GET'&&url.pathname.startsWith('/api/files/')){
-        const sessionId=url.searchParams.get('sessionId')??'',session=store.getSession(sessionId);if(!session)return json(res,404,{error:'会话不存在'});
-        const {file,bytes}=files.read(session.hostId+'|'+sessionId,url.pathname.slice('/api/files/'.length));
+        const sessionId=url.searchParams.get('sessionId')??'',session=store.getSession(sessionId),id=url.pathname.slice('/api/files/'.length);
+        if(!session||!uploadId.test(id))return json(res,404,{error:'附件不存在'});
+        const scope=session.hostId+'|'+sessionId;files.ref(scope,id);let result;let source='server-cache';
+        try{result=files.read(scope,id);}catch{
+          source='workstation';await assetRequest('file:'+scope+':'+id,async()=>{const payload=await remote(session.hostId,{id:randomUUID(),type:'file',sessionId,fileId:id});if(payload?.scope!==scope||payload?.file?.id!==id)throw new Error('附件范围不匹配');files.import(payload);});result=files.read(scope,id);
+        }
+        const content=url.searchParams.get('preview')==='1'&&result.file.mime.startsWith('image/')?await previews.image(result.bytes,result.file.mime):{bytes:result.bytes,mime:result.file.mime,hash:result.file.sha256};
         res.setHeader('Content-Security-Policy',"default-src 'none'; sandbox");
-        res.writeHead(200,{'Content-Type':file.mime,'Content-Length':bytes.length,'Content-Disposition':(file.mime.startsWith('image/')?'inline':'attachment')+"; filename*=UTF-8''"+encodeURIComponent(file.name)});return res.end(bytes);
+        res.writeHead(200,{'Content-Type':content.mime,'Content-Length':content.bytes.length,'X-Asset-Source':source,'X-Content-Sha256':content.hash,'Content-Disposition':(content.mime.startsWith('image/')?'inline':'attachment')+"; filename*=UTF-8''"+encodeURIComponent(result.file.name)});return res.end(content.bytes);
       }
       if(req.method==='POST' && url.pathname==='/api/logout') {
         res.setHeader('Set-Cookie',`relay_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${secure ? '; Secure' : ''}`); return json(res,200,{ok:true});
@@ -112,16 +136,35 @@ export function createRelay(options: Options) {
       if(req.method==='GET'&&url.pathname.startsWith('/api/images/')){
         const id=url.pathname.slice('/api/images/'.length),sessionId=url.searchParams.get('sessionId')??'',session=store.getSession(sessionId);
         if(!session||!(/^[a-f0-9]{64}$/).test(id))return json(res,404,{error:'图片不存在'});
-        let image=media.read(sessionId,id);
+        let image=media.read(sessionId,id),source='server-cache';
         if(!image){
-          if(!bridges.has(session.hostId))return json(res,404,{error:'图片尚未同步，需本地电脑上线后读取'});
-          const key=sessionId+':'+id;let wait=mediaRequests.get(key);
-          if(!wait){wait=remote(session.hostId,{id:randomUUID(),type:'asset',sessionId,assetId:id}).then(payload=>{if(payload?.id!==id)throw new Error('Image ID mismatch');media.putPayload(sessionId,payload);}).finally(()=>{mediaRequests.delete(key);});mediaRequests.set(key,wait);}
-          await wait;image=media.read(sessionId,id);
+          if(!bridges.has(session.hostId))return json(res,404,{error:'图片尚未缓存，需工作电脑上线后读取'});
+          source='workstation';await assetRequest('image:'+sessionId+':'+id,async()=>{const payload=await remote(session.hostId,{id:randomUUID(),type:'asset',sessionId,assetId:id});if(payload?.id!==id)throw new Error('图片编号不匹配');media.putPayload(sessionId,payload);});image=media.read(sessionId,id);
         }
         if(!image)return json(res,404,{error:'图片已不存在或无法读取'});
+        const content=url.searchParams.get('preview')==='1'?await previews.image(image.bytes,image.mime):{bytes:image.bytes,mime:image.mime,hash:id};
         res.setHeader('Content-Security-Policy',"default-src 'none'; sandbox");
-        res.writeHead(200,{'Content-Type':image.mime,'Content-Length':image.bytes.length,'Cache-Control':'private, max-age=3600','Content-Disposition':"inline; filename*=UTF-8''"+encodeURIComponent(image.name)});return res.end(image.bytes);
+        res.writeHead(200,{'Content-Type':content.mime,'Content-Length':content.bytes.length,'X-Asset-Source':source,'X-Content-Sha256':content.hash,'Content-Disposition':"inline; filename*=UTF-8''"+encodeURIComponent(image.name)});return res.end(content.bytes);
+      }
+      if(req.method==='GET'&&url.pathname==='/api/direct-config'){
+        const sessionId=url.searchParams.get('sessionId'),projectId=url.searchParams.get('projectId');
+        if(Boolean(sessionId)===Boolean(projectId))return json(res,400,{error:'请选择会话或项目'});
+        const hostId=sessionId?store.getSession(sessionId)?.hostId:url.searchParams.get('hostId');
+        const host=store.hosts().find(h=>h.id===hostId);
+        if(!host||!sessionId&&!host.projects.some(p=>p.id===projectId))return json(res,404,{error:'电脑、项目或会话不存在'});
+        if(!bridges.has(host.id))return json(res,409,{error:'工作电脑离线'});
+        return json(res,200,options.turn?turnCredentials(options.turn):{iceServers:[],expiresAt:0});
+      }
+      if(req.method==='POST'&&url.pathname==='/api/direct'){
+        const value=await body(req),action=validateAction({id:randomUUID(),type:'direct',sessionId:value.sessionId,projectId:value.projectId,offer:value.offer,relay:value.relay});
+        if(action.relay){if(!options.turn)return json(res,409,{error:'服务器尚未启用加密中转'});action.iceServers=turnCredentials(options.turn).iceServers;}
+        const hostId=action.sessionId?store.getSession(action.sessionId)?.hostId:value.hostId;
+        const host=store.hosts().find(h=>h.id===hostId);
+        if(!host||!action.sessionId&&!host.projects.some(p=>p.id===action.projectId))return json(res,404,{error:'电脑、项目或会话不存在'});
+        const count=negotiations.get(host.id)??0;if(count>=8)return json(res,429,{error:'正在建立其他直连，请稍后重试'});
+        negotiations.set(host.id,count+1);
+        try{const answer=await remote(host.id,action);if(!validDirectSdp(answer,'answer',action.relay))throw new Error('电脑未返回有效直连协商');return json(res,200,answer);}
+        finally{const remaining=(negotiations.get(host.id)??1)-1;if(remaining)negotiations.set(host.id,remaining);else negotiations.delete(host.id);}
       }
       if(req.method==='GET'&&url.pathname==='/api/models'){
         const hostId=url.searchParams.get('hostId')??'',provider=url.searchParams.get('provider');
@@ -155,12 +198,12 @@ export function createRelay(options: Options) {
       }
       if(req.method==='POST' && url.pathname==='/api/actions') {
         const value=await body(req); const action=validateAction(value);
-        if(action.type==='history'||action.type==='asset'||action.type==='models'||action.type==='commands'||action.type==='upload') return json(res,400,{error:'Use the dedicated endpoint'});
-        const host=action.type==='start' ? value.hostId : store.getSession(action.sessionId!)?.hostId;
+        if(action.type==='history'||action.type==='asset'||action.type==='file'||action.type==='models'||action.type==='commands'||action.type==='upload'||action.type==='direct') return json(res,400,{error:'Use the dedicated endpoint'});
+        const host=['start','create-project'].includes(action.type) ? value.hostId : store.getSession(action.sessionId!)?.hostId;
         if(typeof host!=='string' || !store.hosts().some(h=>h.id===host)) return json(res,404,{error:'电脑或会话不存在'});
         if(!bridges.has(host)) return json(res,409,{error:'本地电脑离线'});
         const scope=host+'|'+(action.type==='start'?'project:'+action.projectId:action.sessionId);
-        files.files(scope,action.attachmentIds);
+        files.refs(scope,action.attachmentIds);
         const prior=store.beginAction(action.id,host,action);
         if(!prior.fresh) return json(res,prior.result ? 200 : 409,prior.result ?? {error:'操作已接受，结果尚未确认；不会重复执行'});
         try { const result=await remote(host,action);if(result.sessionId)for(const id of action.attachmentIds??[])files.link(scope,host+'|'+result.sessionId,id); store.finishAction(action.id,result); return json(res,200,result); }
@@ -186,13 +229,17 @@ export function createRelay(options: Options) {
           if(!/^[a-zA-Z0-9_-]{1,60}$/.test(msg.host?.id ?? '') || typeof msg.host.name!=='string' || msg.host.name.length>100 || !Array.isArray(msg.host.projects) || msg.host.projects.length>100) throw new Error('Invalid host');
           if(bridges.has(msg.host.id)) throw new Error('Host already connected');
           hostId=msg.host.id; clearTimeout(helloTimer);bridges.set(hostId,ws);
-          const host:Host={id:hostId,name:msg.host.name,hostname:typeof msg.host.hostname==='string'?msg.host.hostname.slice(0,100):undefined,platform:typeof msg.host.platform==='string'?msg.host.platform.slice(0,80):undefined,projects:msg.host.projects,online:true,lastSeen:Date.now()}; store.host(host); emit('state',{});
+          const host:Host={id:hostId,name:msg.host.name,hostname:typeof msg.host.hostname==='string'?msg.host.hostname.slice(0,100):undefined,platform:typeof msg.host.platform==='string'?msg.host.platform.slice(0,80):undefined,projects:msg.host.projects,online:true,lastSeen:Date.now(),capabilities:{createProject:msg.host.capabilities?.createProject===true,permissions:msg.host.capabilities?.permissions===true}}; store.host(host); emit('state',{});
           ws.send(JSON.stringify({type:'welcome'}));return;
         }
         if(!hostId) throw new Error('Hello required');
         if(msg.type==='asset.cache'){
-          if(typeof msg.jobId!=='string'||store.getSession(msg.sessionId)?.hostId!==hostId)throw new Error('Invalid image owner');
-          try{media.putPayload(msg.sessionId,msg.asset);ws.send(JSON.stringify({type:'asset.ack',jobId:msg.jobId}));}catch{ws.send(JSON.stringify({type:'asset.ack',jobId:msg.jobId,error:'Image cache rejected or storage unavailable'}));}
+          ws.send(JSON.stringify({type:'asset.ack',jobId:msg.jobId,error:'图片内容仅通过设备直传'}));
+        }else if(msg.type==='file.ref'){
+          const scope=msg.scope as string,owner=typeof scope==='string'&&scope.startsWith(hostId+'|')?scope.slice(hostId.length+1):'';
+          if(!owner||!(owner.startsWith('project:')?store.hosts().find(h=>h.id===hostId)?.projects.some(p=>p.id===owner.slice(8)):store.getSession(owner)?.hostId===hostId))throw new Error('Invalid file scope');
+          try{const f=msg.file;files.register(scope,{id:f.id,name:f.name,size:f.size,mime:f.mime,sha256:f.sha256});ws.send(JSON.stringify({type:'file.ack',jobId:msg.jobId}));}
+          catch{ws.send(JSON.stringify({type:'file.ack',jobId:msg.jobId,error:'附件索引无效'}));}
         }else if(msg.type==='history.cache'){
           if(typeof msg.jobId!=='string'||typeof msg.sessionId!=='string'||store.getSession(msg.sessionId)?.hostId!==hostId||!Array.isArray(msg.page?.messages)||msg.page.messages.length>50)throw new Error('Invalid history cache');
           store.cache(msg.sessionId,msg.cursor,msg.page);ws.send(JSON.stringify({type:'history.ack',jobId:msg.jobId}));

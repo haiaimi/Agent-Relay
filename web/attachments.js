@@ -1,3 +1,4 @@
+import {directAssets} from './direct.js';
 const MAX_BYTES=16*1024*1024;
 export class AttachmentInput {
   drafts=new Map();locked=false;
@@ -40,9 +41,7 @@ export class AttachmentInput {
     this.locked=true;this.render();this.changed('正在把附件传到电脑…');
     try{for(const item of items){
       if(item.ref)continue;
-      const query=new URLSearchParams({...context.target,name:item.file.name});
-      const r=await fetch('/api/uploads?'+query,{method:'POST',headers:{'Content-Type':'application/octet-stream'},body:item.file});const result=await r.json().catch(()=>({error:r.status===413?'附件超过上传大小限制':'附件传送失败，请重试'}));
-      if(!r.ok||result.error)throw new Error(result.error??'附件上传失败');item.ref=result.file;
+      item.uploadId??=crypto.randomUUID();item.ref=await directAssets.upload(context.target,item.file,item.uploadId);
     }return items.map(i=>i.ref.id);}
     finally{this.locked=false;this.render();this.changed();}
   }

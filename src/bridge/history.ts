@@ -7,25 +7,28 @@ import { createZstdDecompress } from 'node:zlib';
 import { sessionKey, type Session, type Message, type HistoryPage } from '../shared/protocol.js';
 import {readCodexProjects,type CodexProjects} from './codex-projects.js';
 import {codexStatuses,claudeStatuses} from './native-status.js';
-import {imageSources,messageImages} from './media.js';
+import {imageSources,messageImages,imageSafeText,imageSafeJson} from './media.js';
 import type {MediaStore} from '../shared/media.js';
+import {normalizeQuestions,type UserQuestion} from '../shared/questions.js';
+import {NativeActivities} from './activity.js';
+import {TranscriptSettings} from './settings.js';
 
 export function itemMessage(item: any, ordinal: number): Message | null {
   if (!item || typeof item !== 'object') return null;
   const id=String((item.type==='userMessage' ? item.clientId : undefined) ?? item.id ?? `native-${ordinal}`);
-  if(item.type==='userMessage') return {id,role:'user',text:(item.content ?? []).filter((x:any)=>x.type==='text'||x.type==='input_text').map((x:any)=>x.text).join('\n')};
-  if(item.type==='agentMessage') return {id,role:'assistant',text:String(item.text ?? '')};
+  if(item.type==='userMessage') return {id,role:'user',text:imageSafeText((item.content ?? []).filter((x:any)=>x.type==='text'||x.type==='input_text').map((x:any)=>x.text).join('\n'))};
+  if(item.type==='agentMessage') return {id,role:'assistant',text:imageSafeText(String(item.text ?? ''))};
   if(item.type==='imageView') return {id,role:'assistant',label:'图片预览',text:''};
   if(item.type==='imageGeneration') return {id,role:'assistant',label:'生成的图片',text:item.status==='failed'?String(item.failure?.message??item.failure??'图片生成失败'):['inProgress','in_progress','generating','queued'].includes(item.status)?'图片生成中…':''};
-  if(item.type==='commandExecution') return {id,role:'tool',label:`命令 · ${item.status ?? ''}`,text:`${item.command ?? ''}\n${item.aggregatedOutput ?? ''}`.slice(0,24000)};
-  if(item.type==='mcpToolCall' || item.type==='dynamicToolCall') return {id,role:'tool',label:String(item.tool ?? '工具'),text:JSON.stringify({arguments:item.arguments,result:item.result,error:item.error}).slice(0,24000)};
-  if(item.type==='fileChange') return {id,role:'tool',label:'文件改动',text:JSON.stringify(item.changes ?? []).slice(0,24000)};
+  if(item.type==='commandExecution') return {id,role:'tool',label:`命令 · ${item.status ?? ''}`,text:imageSafeText(`${item.command ?? ''}\n${item.aggregatedOutput ?? ''}`).slice(0,24000)};
+  if(item.type==='mcpToolCall' || item.type==='dynamicToolCall') return {id,role:'tool',label:String(item.tool ?? '工具'),text:imageSafeJson({arguments:item.arguments,result:item.result,error:item.error}).slice(0,24000)};
+  if(item.type==='fileChange') return {id,role:'tool',label:'文件改动',text:imageSafeJson(item.changes ?? []).slice(0,24000)};
   return null;
 }
 function textContent(value: any): string {
-  if(typeof value==='string') return value;
+  if(typeof value==='string') return imageSafeText(value);
   if(!Array.isArray(value)) return '';
-  return value.map(x=> x.type==='text'||x.type==='input_text'||x.type==='output_text' ? x.text : x.type==='tool_use' ? `[${x.name}] ${JSON.stringify(x.input).slice(0,8000)}` : x.type==='tool_result' ? textContent(x.content) : '').filter(Boolean).join('\n');
+  return value.map(x=> x.type==='text'||x.type==='input_text'||x.type==='output_text' ? imageSafeText(x.text??'') : x.type==='tool_use' ? `[${x.name}] ${imageSafeJson(x.input).slice(0,8000)}` : x.type==='tool_result' ? textContent(x.content) : '').filter(Boolean).join('\n');
 }
 export function transcriptLine(line: any, ordinal: number): Message | null {
   const payload=line.type==='response_item' ? line.payload : null;
@@ -37,10 +40,10 @@ export function transcriptLine(line: any, ordinal: number): Message | null {
   }
   if(['user','assistant'].includes(line.type) && line.message && !line.isMeta) {
     const blocks=Array.isArray(line.message.content)?line.message.content:[];
-    const text=typeof line.message.content==='string'?line.message.content:blocks.filter((b:any)=>b.type==='text').map((b:any)=>b.text).join('\n');
+    const text=imageSafeText(typeof line.message.content==='string'?line.message.content:blocks.filter((b:any)=>b.type==='text').map((b:any)=>b.text).join('\n'));
     if(text||blocks.some((b:any)=>['image','input_image','local_image','localImage'].includes(b.type)))return {id:line.type==='assistant'?`claude-text:${line.uuid??line.message.id??ordinal}`:line.uuid??`log-${ordinal}`,role:line.type,text:text.slice(0,16000),timestamp:Date.parse(line.timestamp)||undefined};
     const calls=blocks.filter((b:any)=>b.type==='tool_use'),results=blocks.filter((b:any)=>b.type==='tool_result');
-    if(calls.length)return {id:`claude-tool:${calls[0].id??line.uuid??ordinal}`,role:'tool',label:calls.map((b:any)=>b.name).join(' · '),text:calls.map((b:any)=>JSON.stringify(b.input)).join('\n').slice(0,16000)};
+    if(calls.length)return {id:`claude-tool:${calls[0].id??line.uuid??ordinal}`,role:'tool',label:calls.map((b:any)=>b.name).join(' · '),text:calls.map((b:any)=>imageSafeJson(b.input)).join('\n').slice(0,16000)};
     if(results.length)return {id:`claude-result:${results[0].tool_use_id??line.uuid??ordinal}`,role:'tool',label:'工具结果',text:results.map((b:any)=>textContent(b.content)).join('\n').slice(0,16000)};
     return null;
   }
@@ -65,6 +68,8 @@ export class NativeHistory {
   private claudeMemo=new Map<string,{mtime:number;session:Session}>();
   private statusAt=0;
   private statuses=new Map<string,Session['status']>();
+  private activities=new NativeActivities();
+  private settingsReader=new TranscriptSettings();
   constructor(readonly hostId:string, readonly codexHome=process.env.CODEX_HOME ?? join(homedir(),'.codex'), readonly claudeHome=process.env.CLAUDE_CONFIG_DIR ?? join(homedir(),'.claude'),readonly media?:MediaStore) {}
   list(refreshStatus=false): Session[] {
     this.projectIndex=readCodexProjects(this.codexHome);
@@ -103,15 +108,30 @@ export class NativeHistory {
         memo={mtime,session:{id,hostId:this.hostId,provider:'claude',nativeId,title:title||'Claude 会话',cwd,updatedAt:mtime,status:'history'}};
         this.claudeMemo.set(file,memo);
       }
-      next.set(memo.session.id,memo.session);paths.set(memo.session.id,file);
+      next.set(memo.session.id,{...memo.session,status:'history',statusOrigin:undefined,activity:undefined});paths.set(memo.session.id,file);
     }
     if(refreshStatus||Date.now()-this.statusAt>15000){this.statusAt=Date.now();this.statuses=codexStatuses(this.codexHome,paths,[...next.values()]);}
     const liveStatuses=new Map([...this.statuses,...claudeStatuses(this.claudeHome)]);
-    for(const session of next.values()){const status=liveStatuses.get(session.nativeId);if(status){session.status=status;session.statusOrigin='native';}}
+    for(const session of next.values()){const status=liveStatuses.get(session.nativeId);if(status){session.status=status;session.statusOrigin='native';}if(['running','waiting'].includes(session.status)){const path=paths.get(session.id);session.activity=session.status==='waiting'?{kind:'waiting',label:'等待你确认'}:path?this.activities.read(session.provider,path):undefined;}else session.activity=undefined;}
     this.sessions=next;this.paths=paths;
     return [...next.values()].sort((a,b)=>b.updatedAt-a.updatedAt);
   }
   get(id:string):Session|undefined{return this.sessions.get(id);}
+  settings(id:string){const s=this.sessions.get(id),path=this.paths.get(id);return s&&path?this.settingsReader.read(s.provider,path):{};}
+  asyncQuestions(id:string):{sourceId:string;questions:UserQuestion[]}[]{
+    const session=this.sessions.get(id),path=join(this.codexHome,'thread_history_1.sqlite');if(session?.provider!=='codex'||!existsSync(path))return [];
+    const db=new DatabaseSync(path,{readOnly:true});
+    try{
+      const prompts=db.prepare("SELECT rollout_ordinal,item_json FROM thread_items WHERE thread_id=? AND json_array_length(item_json,'$.questions')>0 ORDER BY rollout_ordinal DESC LIMIT 20").all(session.nativeId);if(!prompts.length)return [];
+      const users=db.prepare("SELECT rollout_ordinal,item_json FROM thread_items WHERE thread_id=? AND json_extract(item_json,'$.type')='userMessage' ORDER BY rollout_ordinal DESC LIMIT 300").all(session.nativeId);
+      const answered=new Map<string,Set<number>>();let lastOrdinary=-1;
+      for(const row of users){const item=JSON.parse(String(row.item_json)),text=(item.content??[]).filter((c:any)=>c.type==='text').map((c:any)=>c.text).join('\n'),match=/<send_user_message_question_reply>\s*([\s\S]*?)\s*<\/send_user_message_question_reply>/.exec(text);
+        if(match){try{const replies=JSON.parse(match[1]);for(const reply of Array.isArray(replies)?replies:[replies]){const key=JSON.parse(reply.questionItemId);if(key[0]==='request_user_input_async'){const source=String(key[1]),indices=answered.get(source)??new Set<number>();indices.add(Number(key[2]));answered.set(source,indices);}}}catch{}}
+        else lastOrdinary=Math.max(lastOrdinary,Number(row.rollout_ordinal));
+      }
+      return prompts.flatMap(row=>{const item=JSON.parse(String(row.item_json));if(Number(row.rollout_ordinal)<lastOrdinary)return [];try{const questions=normalizeQuestions(item.questions,'async').map((q,index)=>({...q,sourceIndex:index})).filter(q=>!answered.get(item.id)?.has(q.sourceIndex));return questions.length?[{sourceId:item.id,questions}]:[];}catch{return [];}});
+    }catch{return [];}finally{db.close();}
+  }
   claudeLiveStatus(nativeId:string):Session['status']|undefined{return claudeStatuses(this.claudeHome).get(nativeId);}
   claudeIsRunning(nativeId:string):boolean {
     const dir=join(this.claudeHome,'sessions');if(!existsSync(dir))return false;
@@ -126,9 +146,12 @@ export class NativeHistory {
     if(session.provider==='codex' && existsSync(historyDB)) {
       const db=new DatabaseSync(historyDB,{readOnly:true});
       try {
-        const hasTimestamp=db.prepare('PRAGMA table_info(thread_items)').all().some(c=>c.name==='created_at_ms');
-        const rows=db.prepare('SELECT rollout_ordinal,item_json,'+(hasTimestamp?'created_at_ms':'NULL AS created_at_ms')+' FROM thread_items WHERE thread_id=? AND rollout_ordinal<? ORDER BY rollout_ordinal DESC LIMIT 51').all(session.nativeId,cursor ?? Number.MAX_SAFE_INTEGER);
-        if(rows.length) {
+        const columns=db.prepare('PRAGMA table_info(thread_items)').all().map(c=>c.name),hasTimestamp=columns.includes('created_at_ms');
+        const visibleTypes=['userMessage','agentMessage','commandExecution','mcpToolCall','dynamicToolCall','fileChange','imageView','imageGeneration'];
+        const itemType=columns.includes('item_type')?'item_type':"json_extract(item_json,'$.type')";
+        const rows=db.prepare('SELECT rollout_ordinal,item_json,'+(hasTimestamp?'created_at_ms':'NULL AS created_at_ms')+' FROM thread_items WHERE thread_id=? AND rollout_ordinal<? AND '+itemType+' IN ('+visibleTypes.map(()=>'?').join(',')+') ORDER BY rollout_ordinal DESC LIMIT 51').all(session.nativeId,cursor ?? Number.MAX_SAFE_INTEGER,...visibleTypes);
+        // Reaching the beginning of an indexed thread must not switch to raw-log cursors.
+        if(rows.length||db.prepare('SELECT 1 FROM thread_items WHERE thread_id=? LIMIT 1').get(session.nativeId)) {
           const more=rows.length>50; const visible=rows.slice(0,50).reverse();
           return {source:'Codex 本地历史数据库',cursor:more ? Number(visible[0].rollout_ordinal) : null,messages:visible.map(row=>{const raw=JSON.parse(String(row.item_json)),m=itemMessage(raw,Number(row.rollout_ordinal));if(m&&Number(row.created_at_ms)>0)m.timestamp=Number(row.created_at_ms);return m&&this.media?messageImages(this.media,id,session.cwd,m,raw):m;}).filter((x):x is Message=>x!==null).map(m=>({...m,text:m.text.slice(0,16000)+(m.text.length>16000?'\n[长消息显示已截断]':'')}))};
         }

@@ -1,7 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import type { RelayEvent, Session, Action } from '../shared/protocol.js';
+import type { RelayEvent, Session, Action, Project } from '../shared/protocol.js';
 export class BridgeStore {
   db:DatabaseSync;
   constructor(dir:string) {
@@ -13,11 +13,14 @@ export class BridgeStore {
       CREATE TABLE IF NOT EXISTS history_synced(id TEXT PRIMARY KEY,updated_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS input_queue(seq INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT UNIQUE,session_id TEXT NOT NULL,json TEXT NOT NULL,state TEXT NOT NULL);`);
     this.db.exec('CREATE TABLE IF NOT EXISTS bridge_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)');
+    this.db.exec('CREATE TABLE IF NOT EXISTS local_projects(id TEXT PRIMARY KEY,json TEXT NOT NULL)');
     if(this.db.prepare("SELECT value FROM bridge_meta WHERE key='history-format'").get()?.value!=='3'){
       this.db.exec("DELETE FROM history_synced; INSERT OR REPLACE INTO bridge_meta VALUES('history-format','3')");
     }
   }
   sessions():Session[]{return this.db.prepare('SELECT json FROM sessions').all().map(r=>JSON.parse(String(r.json)));}
+  projects():Project[]{return this.db.prepare('SELECT json FROM local_projects ORDER BY rowid').all().map(r=>JSON.parse(String(r.json)));}
+  saveProject(p:Project){this.db.prepare('INSERT OR REPLACE INTO local_projects VALUES(?,?)').run(p.id,JSON.stringify(p));}
   save(s:Session){this.db.prepare('INSERT OR REPLACE INTO sessions VALUES(?,?)').run(s.id,JSON.stringify(s));}
   event(e:RelayEvent){this.db.prepare('INSERT OR IGNORE INTO outbox(id,json) VALUES(?,?)').run(e.id,JSON.stringify(e));}
   outbox(){return this.db.prepare('SELECT json FROM outbox ORDER BY seq LIMIT 500').all().map(r=>JSON.parse(String(r.json)) as RelayEvent);}

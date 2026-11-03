@@ -44,6 +44,7 @@ test('phone → relay → local process: streaming, approval, stop, idempotency,
     const page=await request('/api/history?sessionId='+encodeURIComponent(id));assert.equal(page.status,200);assert.equal(page.value.cached,false);
     assert.equal(page.value.session.status,'idle');assert.equal(page.value.session.id,id);
     const waiting=await request('/api/actions',{id:randomUUID(),type:'send',sessionId:id,text:'wait'});assert.equal(waiting.status,200);await until(()=>relay.store.getSession(id)?.status==='running');
+    await until(()=>relay.store.getSession(id)?.activity?.kind==='reply');assert.equal(relay.store.getSession(id)?.activity?.label,'正在回复');
     const usage={id:randomUUID(),type:'send',sessionId:id,text:'  /usage  '};
     assert.equal((await request('/api/actions',usage)).value.command,true);assert.equal(relay.store.getSession(id)?.status,'running');assert.equal(bridge.store.queued().length,0);
     assert.ok(relay.store.sessionEvents(id).some(e=>e.data.id==='usage:'+usage.id&&e.data.text.includes('剩余 75%')));
@@ -54,6 +55,7 @@ test('phone → relay → local process: streaming, approval, stop, idempotency,
     const queued=await request('/api/actions',{id:randomUUID(),type:'set-model',sessionId:id,model:'fixture-a',effort:'high'});assert.equal(queued.status,200);assert.equal(queued.value.queued,true);
     assert.equal(relay.store.getSession(id)?.status,'running');assert.equal(relay.store.getSession(id)?.model,'fixture-b');assert.equal(relay.store.getSession(id)?.nextEffort,'high');
     assert.equal((await request('/api/actions',{id:randomUUID(),type:'stop',sessionId:id})).status,200);await until(()=>relay.store.getSession(id)?.status==='interrupted');
+    assert.equal(relay.store.getSession(id)?.activity,undefined);
     assert.equal(bridge.store.queued().length,0);
     assert.equal((await request('/api/actions',{id:randomUUID(),type:'send',sessionId:id,text:'verify-queued'})).status,200);await until(()=>relay.store.getSession(id)?.status==='idle');
     assert.equal(relay.store.getSession(id)?.model,'fixture-a');assert.equal(relay.store.getSession(id)?.effort,'high');assert.equal(relay.store.getSession(id)?.nextModel,undefined);

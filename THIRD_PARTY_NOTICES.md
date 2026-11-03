@@ -9,3 +9,7 @@ The web application includes the following locally bundled libraries. Their lice
 | highlight.js | 11.12.0 | web/vendor/highlight.min.js | [BSD-3-Clause license](web/vendor/highlight.LICENSE) |
 
 Other runtime and development dependencies are declared in package.json and pinned in package-lock.json; their respective licenses apply. This notice does not grant a license to Agent Relay's own source code.
+
+The local bridge uses [werift](https://github.com/shinyoshiaki/werift-webrtc) 0.26.0 (MIT) for WebRTC ICE/DTLS/SCTP data channels. Its license and those of its dependencies are distributed by npm in their respective packages.
+
+The relay uses [sharp](https://sharp.pixelplumbing.com/) (Apache-2.0, version pinned in package.json) and its packaged libvips dependencies to generate cached image previews. Their license notices are distributed in the npm packages.

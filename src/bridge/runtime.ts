@@ -10,9 +10,16 @@ import {claudeSteerSessions,steerClaude,SteerDeliveryError} from './claude-steer
 import {codexUsageText,claudeUsageText} from './usage.js';
 import {MediaStore} from '../shared/media.js';
 import {FileStore} from '../shared/files.js';
-import {messageImages,imageSources} from './media.js';
+import {messageImages,imageSources,imageSafeJson} from './media.js';
 import { assertProjectPath } from '../shared/security.js';
 import { sessionKey, type Session, type Action, type Project, type RelayEvent, type Provider, type AgentModel, type AgentCommand } from '../shared/protocol.js';
+import {QuestionBroker} from './questions.js';
+import {normalizeQuestions} from '../shared/questions.js';
+import {codexPermissions,claudePermissions} from './permissions.js';
+import {createLocalProject} from './projects.js';
+import {toolActivity} from './activity.js';
+import {codexSettings,claudeSettings,type SessionSettings} from './settings.js';
+import type {Activity} from '../shared/protocol.js';
 
 const codexWriterConflict=(error:unknown)=>/already has an active writer/i.test((error as Error)?.message??'');
 
@@ -28,14 +35,18 @@ export class AgentRuntime {
   private claude=new Map<string,{query:Query;controller:AbortController}>();
   private claudeRuns=new Map<string,Promise<void>>();
   private steering=new Set<string>();
-  private approvals=new Map<string,{sessionId:string;resolve:(allow:boolean)=>void;timer:NodeJS.Timeout}>();
+  private approvals=new Map<string,{sessionId:string;resolve:(allow:boolean,remember?:boolean)=>void;timer:NodeJS.Timeout}>();
+  private nativeApprovals=new Map<string,string>();
+  private nativeApprovalDelivery=new Map<string,Promise<void>>();
   private deltaBuffer=new Map<string,{sessionId:string;messageId:string;text:string}>();
   private flushTimer:NodeJS.Timeout;
   private closed=false;
   private busy=new Set<string>();
   private nativeStarts=new Map<string,number>();
   private cancelled=new Set<string>();
+  private stopping=new Set<string>();
   private catalogs=new Map<Provider,{at:number;models:AgentModel[]}>();
+  private nativeSettings=new Map<string,SessionSettings>();
   private commandCatalogs=new Map<string,{at:number;commands:AgentCommand[]}>();
   private draining=false;
   private sideQueries=new Set<Query>();
@@ -44,14 +55,46 @@ export class AgentRuntime {
   readonly media:MediaStore;
   readonly files:FileStore;
   readonly codex:CodexRpc;
+  readonly questions:QuestionBroker;
   constructor(readonly config:BridgeConfig,readonly store:BridgeStore,readonly onSessions:(sessions:Session[])=>void,readonly onEvent:(e:RelayEvent)=>void,private readonly claudeQuery:typeof query=query,readonly codexDesktop=new CodexDesktop()){
     this.media=new MediaStore(config.dataDir,store.db);
+    this.questions=new QuestionBroker(card=>{
+      const s=this.managed.get(card.sessionId)??this.history?.get(card.sessionId);if(!s)return;
+      this.event(s,card.status==='pending'?'question':'question.resolved',card);
+      s.questionCount=this.questions.list(s.id).length;
+      if(s.managed&&s.status==='waiting'&&!s.questionCount&&![...this.approvals.values()].some(a=>a.sessionId===s.id))this.status(s,'running');else this.save(s);
+    });
+    this.codexDesktop.onRequests=(threadId,requests)=>{
+      const s=this.managed.get(sessionKey(config.hostId,'codex',threadId))??this.history.get(sessionKey(config.hostId,'codex',threadId));if(!s||s.managed)return;
+      const active=new Set<string>(),pending=new Set<string>();for(const request of requests){
+        if(request.method!=='item/tool/requestUserInput'){
+          const key=s.id+'|'+String(request.id);pending.add(key);
+          if(!this.nativeApprovals.has(key)){
+            const delivery=this.approve(s,request.method,request.params,undefined,key).then(async result=>{
+              const approvalId=this.nativeApprovals.get(key);await this.codexDesktop.decideApproval(threadId,request.id,result.allow,result.remember);
+              if(approvalId)this.event(s,'approval.resolved',{approvalId,allow:result.allow,remember:result.remember});
+            });
+            const id=this.nativeApprovals.get(key)!;this.nativeApprovalDelivery.set(id,delivery);
+            void delivery.catch(error=>{this.event(s,'approval.resolved',{approvalId:id,unconfirmed:true});if(!/关闭/.test(error.message))this.event(s,'error',{message:error.message});});
+          }
+          continue;
+        }
+        try{const source='native:'+String(request.params?.turnId??'')+':'+String(request.id);active.add(source);this.questions.attach(s.id,source,normalizeQuestions(request.params?.questions,'codex'),answers=>this.codexDesktop.answer(threadId,request.id,answers));}catch{}
+      }
+      for(const [key,id] of this.nativeApprovals)if(key.startsWith(s.id+'|')&&!pending.has(key)){this.approvals.get(id)?.resolve(false);this.nativeApprovals.delete(key);this.nativeApprovalDelivery.delete(id);}
+      this.questions.reconcile(s.id,'native:',active);
+    };
+    this.codexDesktop.onSettings=(threadId,settings)=>{
+      const id=sessionKey(config.hostId,'codex',threadId),s=this.managed.get(id)??this.history.get(id);if(!s||s.managed)return;
+      const merged={...this.nativeSettings.get(id),...settings};if(JSON.stringify(merged)===JSON.stringify(this.nativeSettings.get(id)))return;
+      this.nativeSettings.set(id,merged);this.onSessions([{...s,...merged}]);
+    };
     this.files=new FileStore(config.dataDir,store.db);
     this.history=new NativeHistory(config.hostId,config.codexHome,config.claudeHome,this.media);
     for(const s of store.sessions()) {if(['running','waiting'].includes(s.status))s.status='interrupted';this.managed.set(s.id,s);store.save(s);}
     this.codex=new CodexRpc(config.codexCommand ?? 'codex',config.codexArgs);
     this.codex.on('notification',msg=>{void this.codexEvent(msg).catch(e=>console.error('Codex event failed:',(e as Error).message));});
-    this.codex.on('failure',err=>{if(this.closed)return;this.loaded.clear();this.turns.clear();for(const s of this.managed.values())if(s.provider==='codex'&&s.managed&&['running','waiting'].includes(s.status)){this.event(s,'error',{message:err.message});this.status(s,'failed');}});
+    this.codex.on('failure',err=>{if(this.closed)return;this.loaded.clear();this.turns.clear();for(const s of this.managed.values())if(s.provider==='codex'&&s.managed&&['running','waiting'].includes(s.status)){this.questions.cancelSession(s.id);this.event(s,'error',{message:err.message});this.status(s,'failed');}});
     this.flushTimer=setInterval(()=>this.flush(),100);
   }
   list():Session[]{
@@ -67,6 +110,7 @@ export class AgentRuntime {
         if(!awaitingNative)this.nativeStarts.delete(s.id);
         if((!s.managed||externalCodex)&&!awaitingNative){
           s.status=original.status;s.statusOrigin=original.statusOrigin;
+          s.activity=original.activity;
           if(externalCodex)s.managed=false;
           s.updatedAt=Math.max(s.updatedAt,original.updatedAt);
         }
@@ -75,25 +119,31 @@ export class AgentRuntime {
       all.set(s.id,{...original,...s});
     }
     const inputs=this.store.queued(),peers=claudeSteerSessions(this.claudeHome());
-    for(const s of all.values()){s.pendingIds=inputs.filter(a=>a.sessionId===s.id).map(a=>a.id);s.pendingCount=s.pendingIds.length;s.canSteer=this.canSteer(s,peers);}
+    for(const s of all.values()){if(!s.managed)Object.assign(s,this.nativeSettings.get(s.id));s.pendingIds=inputs.filter(a=>a.sessionId===s.id).map(a=>a.id);s.pendingCount=s.pendingIds.length;s.canSteer=this.canSteer(s,peers);s.canStop=this.canStop(s);s.canSetPermissions=s.managed||s.provider==='codex'||!this.history.claudeIsRunning(s.nativeId);s.questionCount=this.questions.list(s.id).length;}
+    for(const s of [...all.values()].filter(s=>s.provider==='codex'&&!s.managed&&['running','waiting'].includes(s.status)).slice(0,20))void this.codexDesktop.watch(s.nativeId).catch(()=>{});
     return [...all.values()];
   }
   private canSteer(s:Session,peers?:Set<string>):boolean{
     if(s.provider==='claude')return s.managed?this.claude.has(s.id)&&['running','waiting'].includes(s.status):(peers??claudeSteerSessions(this.claudeHome())).has(s.nativeId);
     return ['running','waiting'].includes(s.status)&&(s.managed?this.turns.has(s.nativeId):this.codexDesktop.available(s.nativeId));
   }
-  projects():Project[]{return [...this.config.projects.map(p=>({...p,source:p.source??'configured' as const,roots:p.roots??[p.path]})),...(this.config.discoverCodexProjects===false?[]:this.history.projectIndex.projects)];}
+  private canStop(s:Session):boolean{
+    return ['running','waiting'].includes(s.status)&&(s.managed?this.busy.has(s.id)||this.claude.has(s.id)||this.turns.has(s.nativeId):s.provider==='codex'&&this.codexDesktop.available(s.nativeId));
+  }
+  projects():Project[]{return [...this.config.projects.map(p=>({...p,source:p.source??'configured' as const,roots:p.roots??[p.path]})),...this.store.projects(),...(this.config.discoverCodexProjects===false?[]:this.history.projectIndex.projects)];}
   private roots():string[]{return this.projects().flatMap(p=>p.roots??[p.path]).filter(Boolean);}
-  private save(s:Session){if(this.closed)return;s.updatedAt=Date.now();s.pendingIds=this.store.queued().filter(a=>a.sessionId===s.id).map(a=>a.id);s.pendingCount=s.pendingIds.length;s.canSteer=this.canSteer(s);this.managed.set(s.id,s);this.store.save(s);this.onSessions([s]);}
+  private save(s:Session){if(this.closed)return;s.updatedAt=Date.now();s.pendingIds=this.store.queued().filter(a=>a.sessionId===s.id).map(a=>a.id);s.pendingCount=s.pendingIds.length;s.canSteer=this.canSteer(s);s.canStop=this.canStop(s);s.canSetPermissions=s.managed||s.provider==='codex'||!this.history.claudeIsRunning(s.nativeId);this.managed.set(s.id,s);this.store.save(s);this.onSessions([s]);}
   private event(s:Session,type:RelayEvent['type'],data:Record<string,any>){if(this.closed)return;if(type==='message'&&!data.images&&imageSources(data).length)data=messageImages(this.media,s.id,s.cwd,data as any,data);const event:RelayEvent={id:randomUUID(),hostId:this.config.hostId,sessionId:s.id,type,data,at:Date.now()};this.store.event(event);this.onEvent(event);}
-  private status(s:Session,status:Session['status']){s.status=status;this.save(s);this.event(s,'status',{status});}
+  private status(s:Session,status:Session['status']){const prior=s.status;s.status=status;if(status==='waiting')s.activity={kind:'waiting',label:'等待你确认'};else if(status!=='running')s.activity=undefined;else if(!s.activity||prior!=='running')s.activity={kind:'thinking',label:'正在思考'};this.save(s);this.event(s,'status',{status,activity:s.activity??null});}
+  private activity(s:Session,activity:Activity){if(!['running','waiting'].includes(s.status)||JSON.stringify([s.activity?.kind,s.activity?.label,s.activity?.detail])===JSON.stringify([activity.kind,activity.label,activity.detail]))return;s.activity={...activity,at:Date.now()};this.save(s);this.event(s,'activity',s.activity);}
   private delta(s:Session,messageId:string,text:string){const key=s.id+':'+messageId;const old=this.deltaBuffer.get(key);this.deltaBuffer.set(key,{sessionId:s.id,messageId,text:(old?.text ?? '')+text});}
   private flush(){for(const value of this.deltaBuffer.values()){const s=this.managed.get(value.sessionId);if(s)this.event(s,'delta',{messageId:value.messageId,text:value.text});}this.deltaBuffer.clear();}
-  private async approve(s:Session,label:string,details:unknown,signal?:AbortSignal):Promise<boolean>{
+  private async approve(s:Session,label:string,details:unknown,signal?:AbortSignal,nativeKey?:string):Promise<{allow:boolean;remember:boolean}>{
     const id=randomUUID();this.status(s,'waiting');
-    this.event(s,'approval',{approvalId:id,label,details:JSON.stringify(details).slice(0,24000),expiresAt:Date.now()+600_000});
+    if(nativeKey)this.nativeApprovals.set(nativeKey,id);
+    this.event(s,'approval',{approvalId:id,label,details:imageSafeJson(details).slice(0,24000),expiresAt:Date.now()+600_000,rememberLabel:s.provider==='claude'?'本会话允许此工具，不再询问':'本会话不再询问此操作',rememberDescription:s.provider==='claude'?`仅在当前会话内允许 ${label} 工具；其他会话仍单独确认`:'使用 Codex 本机会话批准范围，不写入全局授权'});
     return new Promise(resolve=>{
-      const finish=(allow:boolean)=>{const p=this.approvals.get(id);if(!p)return;clearTimeout(p.timer);this.approvals.delete(id);signal?.removeEventListener('abort',abort);this.event(s,'approval.resolved',{approvalId:id,allow});if(s.status==='waiting')this.status(s,'running');resolve(allow);};
+      const finish=(allow:boolean,remember=false)=>{const p=this.approvals.get(id);if(!p)return;clearTimeout(p.timer);this.approvals.delete(id);signal?.removeEventListener('abort',abort);if(!nativeKey)this.event(s,'approval.resolved',{approvalId:id,allow,remember:allow&&remember});if(s.status==='waiting')this.status(s,'running');resolve({allow,remember:allow&&remember});};
       const abort=()=>finish(false);const timer=setTimeout(abort,600_000);this.approvals.set(id,{sessionId:s.id,resolve:finish,timer});signal?.addEventListener('abort',abort,{once:true});if(signal?.aborted)abort();
     });
   }
@@ -105,7 +155,35 @@ export class AgentRuntime {
     const content:any[]=[{type:'text',text},...files.filter(f=>f.file.mime.startsWith('image/')).map(f=>({type:'image',source:{type:'base64',media_type:f.file.mime,data:f.bytes.toString('base64')}}))];
     return {scope,files,text,input,content};
   }
-  private get(id:string):Session{const s=this.managed.get(id)??this.history.get(id);if(!s)throw new Error('Unknown local session');return s;}
+  private get(id:string):Session{const s=this.managed.get(id)??this.history.get(id);if(!s)throw new Error('Unknown local session');if(!s.managed)Object.assign(s,this.nativeSettings.get(id));return s;}
+  directScope(action:Action){
+    if(action.sessionId){const s=this.get(action.sessionId);assertProjectPath(s.cwd,this.roots());return this.config.hostId+'|'+s.id;}
+    const project=this.projects().find(p=>p.id===action.projectId);if(!project)throw new Error('项目不存在');assertProjectPath(project.path,this.roots());return this.config.hostId+'|project:'+project.id;
+  }
+  private syncAsyncQuestions(s:Session){
+    const active=new Set<string>();
+    for(const request of this.history.asyncQuestions(s.id)){
+      const source='async:'+request.sourceId;active.add(source);
+      this.questions.attach(s.id,source,request.questions,async answers=>{
+        if(!this.history.asyncQuestions(s.id).some(q=>q.sourceId===request.sourceId))throw new Error('问题已在本机回答或失效，请刷新');
+        const replies=request.questions.map((q,index)=>({questionItemId:JSON.stringify(['request_user_input_async',request.sourceId,q.sourceIndex??index]),question:q.question,answer:answers[q.id].join(', ')}));
+        const text='<send_user_message_question_reply>\n'+JSON.stringify(replies)+'\n</send_user_message_question_reply>',id=randomUUID(),input=[{type:'text',text,text_elements:[]}];
+        this.list();const current=this.get(s.id);
+        if(['running','waiting'].includes(current.status))await this.codexDesktop.steer(s.nativeId,id,text,input);else await this.codexDesktop.startTurn(s.nativeId,id,text,input);
+        this.event(s,'message',{id,role:'user',text:replies.map(r=>r.question+'\n'+r.answer).join('\n\n'),timestamp:Date.now()});
+      });
+    }
+    this.questions.reconcile(s.id,'async:',active);
+  }
+  async askClaudeNative(nativeId:string,cwd:string,toolId:string,input:any,signal:AbortSignal){
+    if(!/^[a-f0-9-]{36}$/i.test(nativeId)||typeof cwd!=='string'||typeof toolId!=='string'||toolId.length>200)throw new Error('无效本地提问');
+    assertProjectPath(cwd,this.roots());this.list();const id=sessionKey(this.config.hostId,'claude',nativeId);
+    let s=this.managed.get(id)??this.history.get(id);if(s&&s.cwd.toLowerCase()!==cwd.toLowerCase())throw new Error('会话目录不匹配');
+    if(!s){s={id,hostId:this.config.hostId,provider:'claude',nativeId,cwd,title:'Claude 正在等待回答',status:'waiting',updatedAt:Date.now()};this.save(s);}
+    const questions=normalizeQuestions(input.questions,'claude');this.status(s,'waiting');
+    const answers=await this.questions.ask(s.id,'claude-hook:'+toolId,questions,signal);if(!answers)return undefined;
+    return Object.fromEntries(questions.map(q=>[q.question,answers[q.id].join(', ')]));
+  }
   private claudeExecutable(){return this.config.claudeCommand ?? (process.platform==='win32'?join(homedir(),'.local','bin','claude.exe'):'claude');}
   private claudeHome(){return this.history.claudeHome;}
   async models(provider:Provider):Promise<AgentModel[]>{
@@ -126,7 +204,7 @@ export class AgentRuntime {
   }
   private async checkModel(provider:Provider,model?:string,effort?:string){if(!model&&!effort)return;const list=await this.models(provider),selected=list.find(m=>m.id===model||m.aliases?.includes(model??''))??(!model?list.find(m=>m.isDefault)??list[0]:undefined);if(!selected)throw new Error('该模型不在本机 Agent 返回的列表中，请刷新后重选');if(effort&&effort!=='default'&&!selected.efforts?.includes(effort))throw new Error('该模型不支持此思考强度，请重新选择');}
   async commands(s:Session):Promise<AgentCommand[]>{
-    const base:AgentCommand[]=[{name:'help',description:'查看可用命令',source:'relay'},{name:'usage',description:'查询账号额度与重置时间，不打断任务',source:'relay'},{name:'stop',description:'停止网页管理的任务，或取消排队消息',source:'relay'},{name:'model',description:'设置下一轮模型',argumentHint:'<模型 ID>',source:'relay'},{name:'effort',description:'设置下一轮思考强度',argumentHint:'<low|medium|high|xhigh|max|default>',source:'relay'}];
+    const base:AgentCommand[]=[{name:'help',description:'查看可用命令',source:'relay'},{name:'usage',description:'查询账号额度与重置时间，不打断任务',source:'relay'},{name:'stop',description:'停止当前任务并取消排队；独立 Claude 窗口需在电脑上停止',source:'relay'},{name:'model',description:'设置下一轮模型',argumentHint:'<模型 ID>',source:'relay'},{name:'effort',description:'设置下一轮思考强度',argumentHint:'<low|medium|high|xhigh|max|default>',source:'relay'}];
     if(s.provider!=='claude')return base;
     base.unshift({name:'btw',description:'基于会话上下文单独旁问，不打断主任务',argumentHint:'<问题>',source:'relay'});
     let cached=this.commandCatalogs.get(s.cwd);if(cached&&Date.now()-cached.at<600000)return [...base,...cached.commands.filter(c=>!base.some(b=>b.name===c.name))];
@@ -157,7 +235,7 @@ export class AgentRuntime {
     try{const handled=new Set<string>();for(const a of this.store.queued()){
       if(handled.has(a.sessionId!))continue;handled.add(a.sessionId!);const s=this.get(a.sessionId!);
       if(s.provider==='claude'&&!s.managed){const live=this.history.claudeLiveStatus(s.nativeId);s.status=live??'idle';if(live&&!claudeSteerSessions(this.claudeHome()).has(s.nativeId))continue;}
-      if(this.steering.has(s.id)||this.busy.has(s.id)||['running','waiting'].includes(s.status))continue;
+      if(this.stopping.has(s.id)||this.steering.has(s.id)||this.busy.has(s.id)||['running','waiting'].includes(s.status))continue;
       this.store.inputState(a.id,'dispatching');
       try{await this.handle(a,true);this.store.inputState(a.id,'sent');}catch(e){
         if(e instanceof SteerDeliveryError&&e.uncertain){this.store.inputState(a.id,'unknown');this.event(s,'message',{id:a.id,role:'user',label:'你 · 投递待确认',text:a.text!,files:this.attached(a).files.map(f=>f.file)});this.event(s,'error',{message:'续聊投递结果未知，请查看本地会话，勿重复发送'});}
@@ -181,6 +259,20 @@ export class AgentRuntime {
     }catch(e){this.event(s,'error',{message:'/btw 旁问失败：'+(e as Error).message});}finally{release();active?.close();if(active)this.sideQueries.delete(active);}
   }
   async handle(action:Action,fromQueue=false):Promise<any>{
+    if(action.type==='create-project')return {project:createLocalProject(this.store,action)};
+    if(action.type==='set-permissions'){
+      const s=this.get(action.sessionId!);assertProjectPath(s.cwd,this.roots());const mode=action.permissionMode!;
+      if(!s.managed&&s.provider==='claude'&&this.history.claudeIsRunning(s.nativeId))throw new Error('独立 Claude 窗口的权限需在电脑上修改；网页启动的 Claude 支持切换');
+      if(!s.managed&&s.provider==='codex')await this.codexDesktop.setPermissions(s.nativeId,mode,s.cwd);
+      const active=this.claude.get(s.id),running=['running','waiting'].includes(s.status)||this.busy.has(s.id);
+      if(active){await active.query.setPermissionMode(claudePermissions(mode).permissionMode);s.permissionMode=mode;s.nextPermissionMode=undefined;}
+      else if(running)s.nextPermissionMode=mode;
+      else{s.permissionMode=mode;s.nextPermissionMode=undefined;}
+      if(!s.nextPermissionMode)s.permissionLabel=undefined;
+      this.save(s);return {ok:true,queued:!active&&running,permissionMode:mode};
+    }
+    if(action.sessionId&&this.stopping.has(action.sessionId)&&['send','steer','stop'].includes(action.type))throw new Error('正在停止当前任务，请稍候');
+    if(action.type==='answer'){this.get(action.sessionId!);await this.questions.answer(action.sessionId!,action.questionId!,action.answers);return {ok:true};}
     if(action.type==='upload'){
       const payload=action.upload!,prefix=this.config.hostId+'|';if(!payload.scope.startsWith(prefix))throw new Error('附件设备不匹配');
       const scope=payload.scope.slice(prefix.length);
@@ -191,6 +283,7 @@ export class AgentRuntime {
     if(['start','send'].includes(action.type)&&action.attachmentIds?.length){if(action.text?.trimStart().startsWith('/'))throw new Error('附件请随普通消息发送，不能与 / 命令混用');this.attached(action);}
     if(action.type==='models')return {models:await this.models(action.provider!)};
     if(action.type==='asset'){this.get(action.sessionId!);return this.media.payload(action.sessionId!,action.assetId!);}
+    if(action.type==='file'){const scope=this.directScope(action),{file,bytes}=this.files.read(scope,action.fileId!);return {scope,file,data:bytes.toString('base64')};}
     if(action.type==='commands'){const s=this.get(action.sessionId!);assertProjectPath(s.cwd,this.roots());return {commands:await this.commands(s)};}
     if(action.type==='steer'||action.type==='cancel-input'){
       const s=this.get(action.sessionId!);assertProjectPath(s.cwd,this.roots());
@@ -282,9 +375,10 @@ export class AgentRuntime {
         this.busy.add(s.id);
         try{
           const prepared=this.attached(action),effort=action.effort??s.nextEffort;
+          if(s.nextPermissionMode)await this.codexDesktop.setPermissions(s.nativeId,s.nextPermissionMode,s.cwd);
           await this.codexDesktop.startTurn(s.nativeId,action.id,prepared.text,prepared.input,{model:action.model??s.nextModel,...effort?{effort:effort==='default'?undefined:effort}:{}});
           this.nativeStarts.set(s.id,Date.now());
-          s.nextModel=undefined;s.nextEffort=undefined;s.statusOrigin='native';this.status(s,'running');
+          if(s.nextPermissionMode)s.permissionMode=s.nextPermissionMode;s.nextPermissionMode=undefined;s.nextModel=undefined;s.nextEffort=undefined;s.statusOrigin='native';this.status(s,'running');
           this.event(s,'message',{id:action.id,role:'user',text:action.text!,files:prepared.files.map(f=>f.file)});
           return {ok:true,sessionId:s.id,native:true};
         }catch(error){
@@ -300,24 +394,54 @@ export class AgentRuntime {
       const model=action.model??s.nextModel??s.model;
       await this.checkModel(s.provider,model,action.effort);
       if(this.busy.has(s.id)||['running','waiting'].includes(s.status)){s.nextModel=model;s.nextEffort=action.effort??(action.model&&action.model!==s.model?'default':s.nextEffort??s.effort);this.save(s);return {ok:true,queued:true,model:s.nextModel,effort:s.nextEffort};}
-      const chosenEffort=action.effort??(action.model&&action.model!==s.model?'default':s.nextEffort??s.effort);const updated={...s,model,effort:chosenEffort==='default'?undefined:chosenEffort,nextModel:undefined,nextEffort:undefined};this.save(updated);return {ok:true,model:updated.model,effort:updated.effort};
+      const chosenEffort=action.effort??(action.model&&action.model!==s.model?'default':s.nextEffort??s.effort);
+      if(s.provider==='codex'&&!s.managed){await this.codexDesktop.setModel(s.nativeId,model,chosenEffort);this.nativeSettings.set(s.id,{...this.nativeSettings.get(s.id),model,effort:chosenEffort,settingsSource:'desktop'});}
+      const updated={...s,model,effort:chosenEffort==='default'&&s.managed?undefined:chosenEffort,nextModel:undefined,nextEffort:undefined};this.save(updated);return {ok:true,model:updated.model,effort:updated.effort};
     }
     if(action.type==='history'){
-      this.history.list();
-      if(!this.history.get(action.sessionId!)&&this.managed.has(action.sessionId!))return {messages:[],cursor:null,source:'连接程序管理的实时会话'};
-      return this.history.page(action.sessionId!,action.cursor);
+      this.list();
+      const s=this.get(action.sessionId!);
+      if(!s.managed){
+        let settings={...this.history.settings(s.id)};s.settingsError=undefined;
+        if(s.provider==='codex')try{const live=await this.codexDesktop.readSettings(s.nativeId);if(live)settings={...settings,...live};}catch{s.settingsError='无法读取桌面当前设置';}
+        if(s.provider==='codex'&&settings.effort==='default')try{
+          await this.codex.start();const config=await this.codex.call('config/read',{cwd:s.cwd,includeLayers:false});
+          if(typeof config.config?.model_reasoning_effort==='string')settings.effort=config.config.model_reasoning_effort;
+        }catch{/* Leave unresolved metadata explicit in the UI. */}
+        // Live owner settings always win over the historical thread table.
+        this.nativeSettings.set(s.id,settings);Object.assign(s,settings);
+      }
+      this.onSessions([s]);
+      if(s.provider==='codex'&&!s.managed){void this.codexDesktop.watch(s.nativeId).catch(()=>{});this.syncAsyncQuestions(s);}
+      if(!this.history.get(action.sessionId!)&&this.managed.has(action.sessionId!))return {messages:[],cursor:null,source:'连接程序管理的实时会话',questions:this.questions.list(s.id),questionsAsOf:Date.now()};
+      return {...await this.history.page(action.sessionId!,action.cursor),questions:this.questions.list(s.id),questionsAsOf:Date.now()};
     }
     if(action.type==='approve'){
-      const p=this.approvals.get(action.approvalId!);if(!p||p.sessionId!==action.sessionId)throw new Error('Approval expired or belongs to another session');p.resolve(action.allow!);return {ok:true};
+      const p=this.approvals.get(action.approvalId!);if(!p||p.sessionId!==action.sessionId)throw new Error('Approval expired or belongs to another session');const delivery=this.nativeApprovalDelivery.get(action.approvalId!);p.resolve(action.allow!,action.approvalScope==='session');if(delivery)await delivery;return {ok:true};
     }
     if(action.type==='stop'){
-      const s=this.get(action.sessionId!);for(const a of this.store.queued())if(a.sessionId===s.id){this.store.inputState(a.id,'cancelled');this.event(s,'message',{id:a.id,role:'user',label:'你 · 排队已取消',text:a.text!});}s.pendingCount=0;this.save(s);
-      if(!s.managed)return {ok:true,queueCancelled:true,external:true};
+      const s=this.get(action.sessionId!);assertProjectPath(s.cwd,this.roots());
+      const active=['running','waiting'].includes(s.status)||this.busy.has(s.id);
+      if(!action.queueOnly&&active&&!s.managed&&s.provider==='claude')throw new Error('这个独立 Claude 窗口尚未提供远程停止接口，请在电脑上按 Esc；网页启动的 Claude 任务支持停止');
+      this.stopping.add(s.id);
+      try{
+      // Stop delivery must be acknowledged before changing native state or
+      // cancelling queued input; a failed request must never look successful.
+      if(!action.queueOnly&&!s.managed&&s.provider==='codex'){
+        const result=await this.codexDesktop.interrupt(s.nativeId);
+        this.nativeStarts.delete(s.id);
+        if(result.goalPauseError)this.event(s,'error',{message:'当前任务已停止，但目标暂停失败：'+result.goalPauseError});
+      }
+      for(const a of this.store.queued())if(a.sessionId===s.id){this.store.inputState(a.id,'cancelled');this.event(s,'message',{id:a.id,role:'user',label:'你 · 排队已取消',text:a.text!,files:this.attached(a).files.map(f=>f.file)});}s.pendingCount=0;this.save(s);
+      if(action.queueOnly)return {ok:true,queueCancelled:true};
+      this.questions.cancelSession(s.id);
       this.cancelled.add(s.id);
+      if(!s.managed)return {ok:true,external:true,stopRequested:active};
       for(const p of this.approvals.values())if(p.sessionId===s.id)p.resolve(false);
       const claude=this.claude.get(s.id);if(claude){claude.controller.abort();claude.query.close();}
       const turn=this.turns.get(s.nativeId);if(turn)await this.codex.call('turn/interrupt',{threadId:s.nativeId,turnId:turn});
       this.flush();this.status(s,'interrupted');return {ok:true};
+      }finally{this.stopping.delete(s.id);}
     }
     let session:Session;
     if(action.type==='start'){
@@ -327,15 +451,15 @@ export class AgentRuntime {
       await this.checkModel(action.provider!,action.model,action.effort);if(action.effort==='default')action.effort=undefined;
       let nativeId=randomUUID();
       if(action.provider==='codex') {
-        await this.codex.start();const result=await this.codex.call('thread/start',{cwd,projectId:project.source==='codex'?project.nativeProjectId:undefined,model:action.model,approvalPolicy:'on-request',approvalsReviewer:'user',sandbox:'workspace-write'});nativeId=result.thread.id;this.loaded.add(nativeId);action.model=result.model??action.model;
+        await this.codex.start();const result=await this.codex.call('thread/start',{cwd,projectId:project.source==='codex'?project.nativeProjectId:undefined,model:action.model,...(({approvalPolicy,approvalsReviewer,sandbox})=>({approvalPolicy,approvalsReviewer,sandbox}))(codexPermissions(action.permissionMode,cwd))});nativeId=result.thread.id;this.loaded.add(nativeId);action.model=result.model??action.model;action.effort??=result.reasoningEffort??undefined;
       }
-      session={id:sessionKey(this.config.hostId,action.provider!,nativeId),hostId:this.config.hostId,provider:action.provider!,nativeId,cwd,title:(action.text!.trim()||this.attached(action).files[0]?.file.name||'新会话').replace(/\s+/g,' ').slice(0,100),updatedAt:Date.now(),status:'idle',managed:true,model:action.model,effort:action.effort,projectId:project.id,projectName:project.name,projectSource:project.source,statusOrigin:'relay'};
-      this.save(session);
+      session={id:sessionKey(this.config.hostId,action.provider!,nativeId),hostId:this.config.hostId,provider:action.provider!,nativeId,cwd,title:(action.text!.trim()||this.attached(action).files[0]?.file.name||'新会话').replace(/\s+/g,' ').slice(0,100),updatedAt:Date.now(),status:'idle',managed:true,model:action.model,effort:action.effort,permissionMode:action.permissionMode??'request',projectId:project.id,projectName:project.name,projectSource:project.source,statusOrigin:'relay'};
+      session.settingsSource='agent';this.save(session);
     } else {
       session=this.get(action.sessionId!);assertProjectPath(session.cwd,this.roots());
       if(this.busy.has(session.id)||['running','waiting'].includes(session.status))throw new Error('Session is already running; wait or stop it before sending another turn');
       if(session.provider==='claude'&&!session.managed&&this.history.claudeIsRunning(session.nativeId))throw new Error('This Claude session is open in another local process. End that process before resuming here.');
-      await this.checkModel(session.provider,action.model,action.effort);const pickedEffort=action.effort??session.nextEffort??session.effort;session={...session,managed:true,statusOrigin:'relay',model:action.model??session.nextModel??session.model,effort:pickedEffort==='default'?undefined:pickedEffort,nextModel:undefined,nextEffort:undefined};this.save(session);
+      await this.checkModel(session.provider,action.model,action.effort);const pickedEffort=action.effort??session.nextEffort??session.effort;session={...session,managed:true,statusOrigin:'relay',permissionMode:session.nextPermissionMode??session.permissionMode??'request',nextPermissionMode:undefined,model:action.model??session.nextModel??session.model,effort:pickedEffort==='default'?undefined:pickedEffort,nextModel:undefined,nextEffort:undefined};this.save(session);
     }
     if(this.busy.has(session.id))throw new Error('A turn is already starting');
     this.busy.add(session.id);this.cancelled.delete(session.id);this.status(session,'running');
@@ -344,9 +468,9 @@ export class AgentRuntime {
     if(session.provider==='codex'){
       try {
         await this.codex.start();
-        if(!this.loaded.has(session.nativeId)) {const restored=await this.codex.call('thread/resume',{threadId:session.nativeId,excludeTurns:true,cwd:session.cwd,model:session.model,approvalPolicy:'on-request',approvalsReviewer:'user',sandbox:'workspace-write'});session.model=restored.model??session.model;this.save(session);this.loaded.add(session.nativeId);}
+        if(!this.loaded.has(session.nativeId)) {const restored=await this.codex.call('thread/resume',{threadId:session.nativeId,excludeTurns:true,cwd:session.cwd,model:session.model,...(({approvalPolicy,approvalsReviewer,sandbox})=>({approvalPolicy,approvalsReviewer,sandbox}))(codexPermissions(session.permissionMode,session.cwd))});session.model=restored.model??session.model;this.save(session);this.loaded.add(session.nativeId);}
         if(this.cancelled.has(session.id))return {ok:true,sessionId:session.id,interrupted:true};
-        const result=await this.codex.call('turn/start',{threadId:session.nativeId,model:session.model,effort:session.effort,clientUserMessageId:userId,input:prepared.input});
+        const result=await this.codex.call('turn/start',{threadId:session.nativeId,model:session.model,effort:session.effort,clientUserMessageId:userId,input:prepared.input,...(({approvalPolicy,approvalsReviewer,sandboxPolicy})=>({approvalPolicy,approvalsReviewer,sandboxPolicy}))(codexPermissions(session.permissionMode,session.cwd))});
         this.event(session,'message',{id:userId,role:'user',text:action.text!,files:prepared.files.map(f=>f.file)});
         if(['running','waiting'].includes(session.status))this.turns.set(session.nativeId,result.turn.id);
         if(this.cancelled.has(session.id))await this.codex.call('turn/interrupt',{threadId:session.nativeId,turnId:result.turn.id});
@@ -370,22 +494,34 @@ export class AgentRuntime {
     try {
       const executable=this.claudeExecutable();
       async function* prompt():AsyncGenerator<SDKUserMessage>{yield {type:'user',uuid:userId as `${string}-${string}-${string}-${string}-${string}`,session_id:s.nativeId,parent_tool_use_id:null,message:{role:'user',content:content??text}};}
-      const active=this.claudeQuery({prompt:prompt(),options:{cwd:s.cwd,model:s.model,effort:s.effort as 'low'|'medium'|'high'|'xhigh'|'max'|undefined,pathToClaudeCodeExecutable:executable,abortController:controller,permissionMode:'default',permissionPrompts:'host',includePartialMessages:true,settingSources:['user','project','local'],...(resume?{resume:s.nativeId}:{sessionId:s.nativeId}),canUseTool:async(name,input,context)=>{
-        const allow=await this.approve(s,name,input,context.signal);
-        return allow?{behavior:'allow' as const,updatedInput:input}:{behavior:'deny' as const,message:'Denied by the remote operator or approval timed out'};
+      const active=this.claudeQuery({prompt:prompt(),options:{cwd:s.cwd,model:s.model,effort:s.effort as 'low'|'medium'|'high'|'xhigh'|'max'|undefined,pathToClaudeCodeExecutable:executable,abortController:controller,...claudePermissions(s.permissionMode),allowDangerouslySkipPermissions:true,permissionPrompts:'host',includePartialMessages:true,env:{...process.env,AGENT_RELAY_MANAGED:'1'},settingSources:['user','project','local'],...(resume?{resume:s.nativeId}:{sessionId:s.nativeId}),canUseTool:async(name,input,context)=>{
+        if(name==='AskUserQuestion'){
+          const questions=normalizeQuestions(input.questions,'claude');this.status(s,'waiting');
+          const answers=await this.questions.ask(s.id,'claude:'+context.toolUseID,questions,context.signal);
+          return answers?{behavior:'allow' as const,updatedInput:{...input,answers:Object.fromEntries(questions.map(q=>[q.question,answers[q.id].join(', ')]))}}:{behavior:'deny' as const,message:'用户问题已取消，未自动选择答案'};
+        }
+        if(s.approvedTools?.includes(name))return {behavior:'allow' as const,updatedInput:input};
+        const decision=await this.approve(s,name,input,context.signal);
+        if(decision.allow&&decision.remember){s.approvedTools=[...new Set([...(s.approvedTools??[]),name])];this.save(s);}
+        return decision.allow?{behavior:'allow' as const,updatedInput:input,...decision.remember?{updatedPermissions:[{type:'addRules' as const,rules:[{toolName:name}],behavior:'allow' as const,destination:'session' as const}]}:{}}:{behavior:'deny' as const,message:'Denied by the remote operator or approval timed out'};
       }}});
       this.claude.set(s.id,{query:active,controller});this.save(s);let currentMessage='';
       for await(const msg of active){
+        const progress=msg as any;
+        if(progress.type==='system'&&progress.subtype==='init'){Object.assign(s,claudeSettings(progress),{settingsSource:'agent'});this.save(s);}
+        if(progress.type==='tool_progress')this.activity(s,toolActivity(String(progress.tool_name??'工具')));
+        if(progress.type==='user'&&progress.message?.content?.some?.((b:any)=>b.type==='tool_result'))this.activity(s,{kind:'thinking',label:'正在思考'});
         if(msg.type==='stream_event') {
           const e=msg.event;
+          if(e.type==='content_block_start')this.activity(s,e.content_block.type==='tool_use'?toolActivity(e.content_block.name):e.content_block.type==='thinking'?{kind:'thinking',label:'正在思考'}:{kind:'reply',label:'正在回复'});
           if(e.type==='message_start')currentMessage=e.message.id;
           if(e.type==='content_block_delta'&&e.delta.type==='text_delta')this.delta(s,`claude-stream:${currentMessage||msg.uuid}`,e.delta.text);
         } else if(msg.type==='assistant'){
-          if(msg.message.model&&s.model!==msg.message.model){s.model=msg.message.model;this.save(s);}
+          if(msg.message.model&&s.model!==msg.message.model){s.model=msg.message.model;s.settingsSource='agent';this.save(s);}
           this.flush();const content=msg.message.content;
           const text=content.filter(x=>x.type==='text').map(x=>x.text).join('\n');
           if(text||imageSources(content).length)this.event(s,'message',messageImages(this.media,s.id,s.cwd,{id:`claude-text:${msg.uuid}`,role:'assistant',text,replaces:[`claude-stream:${msg.message.id}`]} as any,msg.message));
-          for(const block of content)if(block.type==='tool_use')this.event(s,'message',{id:`claude-tool:${block.id}`,role:'tool',label:block.name,text:JSON.stringify(block.input).slice(0,24000)});
+          for(const block of content)if(block.type==='tool_use'){this.activity(s,toolActivity(block.name));this.event(s,'message',{id:`claude-tool:${block.id}`,role:'tool',label:block.name,text:imageSafeJson(block.input).slice(0,24000)});}
         } else if(msg.type==='result') {
           this.flush();if(msg.is_error)this.event(s,'error',{message:('errors' in msg?msg.errors.join('\n'):'Agent returned an error').slice(0,24000)});
           finished=s.status==='interrupted'?'interrupted':msg.is_error?'failed':'idle';
@@ -394,27 +530,35 @@ export class AgentRuntime {
       }
       finished??=controller.signal.aborted||s.status==='interrupted'?'interrupted':'idle';
     } catch(err) {if(!finished){if(controller.signal.aborted)finished='interrupted';else {this.event(s,'error',{message:(err as Error).message});finished='failed';}}}
-    finally {this.busy.delete(s.id);this.claude.get(s.id)?.query.close();this.claude.delete(s.id);for(const p of this.approvals.values())if(p.sessionId===s.id)p.resolve(false);this.status(s,finished??'failed');}
+    finally {this.questions.cancelSession(s.id);this.busy.delete(s.id);this.claude.get(s.id)?.query.close();this.claude.delete(s.id);for(const p of this.approvals.values())if(p.sessionId===s.id)p.resolve(false);this.status(s,finished??'failed');}
   }
   private async codexEvent(msg:any){
     const p=msg.params ?? {};const threadId=p.threadId ?? p.thread?.id;
     const s=[...this.managed.values()].find(s=>s.provider==='codex'&&s.nativeId===threadId);
     if(!s||!s.managed) {if(msg.id!==undefined)this.codex.send({id:msg.id,error:{code:-32601,message:'Unsupported request or unmanaged session'}});return;}
     if(msg.id!==undefined){
-      if(['item/commandExecution/requestApproval','item/fileChange/requestApproval'].includes(msg.method)) {
-        const allow=await this.approve(s,msg.method,p);this.codex.send({id:msg.id,result:{decision:allow?'accept':'decline'}});
+      if(['item/tool/requestUserInput','tool/requestUserInput'].includes(msg.method)){
+        try{const questions=normalizeQuestions(p.questions,'codex');this.status(s,'waiting');const answers=await this.questions.ask(s.id,'codex:'+String(p.turnId??'')+':'+String(msg.id),questions,undefined,p.autoResolutionMs??undefined);this.codex.send({id:msg.id,result:{answers:Object.fromEntries(Object.entries(answers??{}).map(([id,values])=>[id,{answers:values}]))}});}
+        catch(error){this.codex.send({id:msg.id,error:{code:-32602,message:(error as Error).message}});}
+      }else if(['item/commandExecution/requestApproval','item/fileChange/requestApproval'].includes(msg.method)) {
+        const decision=await this.approve(s,msg.method,p);this.codex.send({id:msg.id,result:{decision:decision.allow?(decision.remember?'acceptForSession':'accept'):'decline'}});
       } else {this.codex.send({id:msg.id,error:{code:-32601,message:'This input type is not supported by Agent Relay yet; denied'}});this.event(s,'error',{message:`需要本机处理的请求：${msg.method}`});}
       return;
     }
-    if(msg.method==='turn/started'){this.turns.set(threadId,p.turn.id);if(!this.cancelled.has(s.id))this.status(s,'running');}
-    else if(msg.method==='item/agentMessage/delta')this.delta(s,p.itemId,p.delta);
+    if(msg.method==='serverRequest/resolved'){const card=this.questions.list(s.id).find(q=>q.source.startsWith('codex:')&&q.source.endsWith(':'+String(p.requestId)));if(card)this.questions.cancel(card.id);}
+    else if(msg.method==='turn/started'){this.turns.set(threadId,p.turn.id);if(!this.cancelled.has(s.id))this.status(s,'running');}
+    else if(msg.method==='item/started'){const item=p.item??{};this.activity(s,item.type==='agentMessage'?{kind:'reply',label:'正在回复'}:item.type==='reasoning'?{kind:'thinking',label:'正在思考'}:toolActivity(String(item.type==='commandExecution'?'command':item.type==='fileChange'?'fileChange':item.tool??item.type??'工具')));}
+    else if(msg.method==='turn/plan/updated'){const step=p.plan?.find((step:any)=>step.status==='inProgress'||step.status==='in_progress')?.step;if(typeof step==='string')this.activity(s,{kind:'plan',label:'正在执行',detail:step.replace(/\s+/g,' ').slice(0,150)});}
+    else if(msg.method==='item/agentMessage/delta'){this.activity(s,{kind:'reply',label:'正在回复'});this.delta(s,p.itemId,p.delta);}
     else if(msg.method==='item/completed'){
       this.flush();const m=itemMessage(p.item,Date.now());if(m)this.event(s,'message',messageImages(this.media,s.id,s.cwd,m,p.item));
+      if(p.item?.type!=='agentMessage')this.activity(s,{kind:'thinking',label:'正在思考'});
     } else if(msg.method==='turn/completed'){
       this.flush();this.turns.delete(threadId);this.status(s,p.turn.status==='completed'?'idle':p.turn.status==='interrupted'?'interrupted':'failed');
+      this.questions.cancelSession(s.id);
       if(p.turn.error)this.event(s,'error',{message:p.turn.error.message ?? JSON.stringify(p.turn.error)});
       for(const a of this.approvals.values())if(a.sessionId===s.id)a.resolve(false);
     } else if(msg.method==='error')this.event(s,'error',{message:p.error?.message ?? 'Codex error'});
   }
-  async close(){if(this.closed)return;this.closed=true;clearInterval(this.flushTimer);this.flush();for(const p of this.approvals.values())p.resolve(false);for(const v of this.claude.values()){v.controller.abort();v.query.close();}for(const q of this.sideQueries)q.close();for(const q of this.usageQueries)q.close();this.codexDesktop.close();this.codex.close();}
+  async close(){if(this.closed)return;this.closed=true;this.questions.close();clearInterval(this.flushTimer);this.flush();for(const p of this.approvals.values())p.resolve(false);for(const v of this.claude.values()){v.controller.abort();v.query.close();}for(const q of this.sideQueries)q.close();for(const q of this.usageQueries)q.close();this.codexDesktop.close();this.codex.close();}
 }

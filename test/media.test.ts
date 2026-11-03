@@ -1,19 +1,26 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtempSync,mkdirSync,writeFileSync,rmSync} from 'node:fs';
+import {mkdtempSync,mkdirSync,writeFileSync,rmSync,existsSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {DatabaseSync} from 'node:sqlite';
 import {randomUUID,createHash} from 'node:crypto';
 import {once} from 'node:events';
 import {MediaStore,MAX_IMAGE_BYTES} from '../src/shared/media.js';
-import {imageSources,messageImages} from '../src/bridge/media.js';
+import {imageSources,messageImages,imageSafeJson} from '../src/bridge/media.js';
 import {NativeHistory,itemMessage,transcriptLine} from '../src/bridge/history.js';
 import {createRelay} from '../src/relay/server.js';
 import {startBridge} from '../src/bridge/connector.js';
+import {directClient} from './helpers/direct-client.js';
 
 const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a0XcAAAAASUVORK5CYII=','base64');
 const pause=(ms:number)=>new Promise(r=>setTimeout(r,ms));
+test('inline image bytes are removed from tool JSON and message text before truncation without losing local image refs',()=>{
+  const payload=png.toString('base64'),raw={id:'image-tool',type:'mcpToolCall',tool:'preview',result:{content:[{type:'text',text:'image follows'},{type:'image',mimeType:'image/png',data:payload}]}};
+  const message=itemMessage(raw,0)!;assert.ok(!message.text.includes(payload));assert.match(message.text,/image follows/);assert.match(message.text,/仅通过设备直传/);
+  const root=mkdtempSync(join(tmpdir(),'direct-redaction-')),db=new DatabaseSync(':memory:'),media=new MediaStore(root,db);
+  try{const converted=messageImages(media,'pc:codex:a',root,message,raw);assert.equal(converted.images?.[0].size,png.length);assert.equal(itemMessage({type:'agentMessage',text:'![图](data:image/png;base64,'+payload+')'},0)!.text.includes(payload),false);assert.equal(imageSafeJson({source:{type:'base64',media_type:'image/png',data:payload}}).includes(payload),false);}finally{db.close();rmSync(root,{recursive:true,force:true});}
+});
 async function until(fn:()=>boolean){for(let i=0;i<160;i++){if(fn())return;await pause(40);}throw new Error('Media state did not synchronize');}
 
 test('only referenced raster images become scoped content IDs; malformed, network and oversized sources fail clearly',()=>{
@@ -28,6 +35,15 @@ test('only referenced raster images become scoped content IDs; malformed, networ
     assert.throws(()=>media.putPayload('one',{id:ref.id!,mime:'image/png',name:'bad',data:Buffer.concat([png,Buffer.from('tamper')]).toString('base64')}));
     assert.throws(()=>media.payload('other',ref.id!));
   }finally{db.close();assert.ok(root.startsWith(join(tmpdir(),'relay-media-')));rmSync(root,{recursive:true,force:true});}
+});
+
+test('tool source/output is not parsed as image markup and expired referenced paths reuse an unambiguous local copy',()=>{
+  const code='![假图](unrelated.png)\n<image path="\'+\'">\n## 照片 1.png: missing.png';
+  for(const type of ['commandExecution','mcpToolCall','dynamicToolCall','fileChange'])assert.equal(imageSources({type,aggregatedOutput:code,result:{content:[{type:'text',text:code}]},changes:[{diff:code}]}).length,0);
+  assert.equal(imageSources({role:'tool',text:code}).length,0);
+  assert.equal(imageSources({type:'mcpToolCall',result:{content:[{type:'image',mimeType:'image/png',data:png.toString('base64')}]}}).length,1);
+  const root=mkdtempSync(join(tmpdir(),'relay-expired-image-')),db=new DatabaseSync(':memory:'),media=new MediaStore(root,db);
+  try{const ref=media.put('pc:codex:a',png,'expired.png');const m=messageImages(media,'pc:codex:a',root,{id:'a',role:'user',text:''},{type:'localImage',path:join(root,'expired.png')});assert.equal(m.images?.[0].id,ref.id);assert.equal(messageImages(media,'pc:codex:b',root,{id:'b',role:'user',text:''},{type:'localImage',path:join(root,'expired.png')}).images?.[0].id,undefined);}finally{db.close();rmSync(root,{recursive:true,force:true});}
 });
 
 test('generated image results and image-view records survive history conversion, with local image links',()=>{
@@ -62,7 +78,7 @@ test('Claude image-only and large inline records survive normalization and Codex
   }finally{db.close();assert.ok(root.startsWith(join(tmpdir(),'relay-image-history-')));rmSync(root,{recursive:true,force:true});}
 });
 
-test('image sync, authenticated retrieval, on-demand fetch, session isolation and offline persistence through the real relay',async()=>{
+test('authenticated HTTP images coalesce cold reads, cache generated assets and remain available offline',async()=>{
   const root=mkdtempSync(join(tmpdir(),'relay-image-e2e-')),codex=join(root,'codex'),workspace=join(root,'workspace'),relayDir=join(root,'relay'),bridgeDir=join(root,'bridge');mkdirSync(codex);mkdirSync(workspace);
   const nativeId=randomUUID(),otherId=randomUUID(),sessionId='pc:codex:'+nativeId,file=join(workspace,'结果图.png');writeFileSync(file,png);
   const state=new DatabaseSync(join(codex,'state_5.sqlite'));state.exec('CREATE TABLE threads(id TEXT,title TEXT,cwd TEXT,updated_at INTEGER,archived INTEGER,agent_role TEXT,rollout_path TEXT,model TEXT)');
@@ -72,15 +88,26 @@ test('image sync, authenticated retrieval, on-demand fetch, session isolation an
   const request=(path:string,payload?:unknown)=>fetch(base+path,{method:payload?'POST':'GET',headers:{cookie,Origin:base,'Content-Type':'application/json'},body:payload?JSON.stringify(payload):undefined});
   const login=await request('/api/login',{token:phone});cookie=login.headers.get('set-cookie')!.split(';')[0];
   let bridge:ReturnType<typeof startBridge>|undefined=startBridge({relayUrl:base.replace('http','ws')+'/bridge',hostId:'pc',name:'pc',dataDir:bridgeDir,projects:[{id:'work',name:'work',path:workspace}],codexHome:codex,claudeHome:join(root,'empty'),discoverCodexProjects:false},token);
+  const clients:Awaited<ReturnType<typeof directClient>>[]=[];
+  const connect=async(id:string)=>{const client=await directClient(async offer=>{const r=await request('/api/direct',{sessionId:id,offer});const value=await r.json();assert.equal(r.status,200,JSON.stringify(value));return value;});clients.push(client);return client;};
   const hash=createHash('sha256').update(png).digest('hex'),url='/api/images/'+hash+'?sessionId='+encodeURIComponent(sessionId);
   try{
-    await until(()=>!!relay.store.db.prepare('SELECT id FROM media_refs WHERE session_id=? AND id=?').get(sessionId,hash));await until(()=>bridge!.runtime.media.pending(sessionId).length===0);
-    const response=await request(url);assert.equal(response.status,200);assert.equal(response.headers.get('content-type'),'image/png');assert.deepEqual(Buffer.from(await response.arrayBuffer()),png);assert.match(response.headers.get('cache-control')!,/private/);assert.equal(response.headers.get('x-content-type-options'),'nosniff');
-    assert.equal((await fetch(base+url)).status,401);assert.notEqual((await request('/api/images/'+hash+'?sessionId='+encodeURIComponent('pc:codex:'+otherId))).status,200);
+    await until(()=>!!relay.store.getSession(sessionId));
+    const page=await(await request('/api/history?sessionId='+encodeURIComponent(sessionId))).json() as any;
+    assert.equal(page.messages[0].images[0].id,hash);
+    const runtime=bridge.runtime,handle=runtime.handle.bind(runtime);let assetReads=0;
+    runtime.handle=async(action,fromQueue)=>{if(action.type==='asset'){assetReads++;await new Promise(r=>setTimeout(r,30));}return handle(action,fromQueue);};
+    const client=await connect(sessionId),other=await connect('pc:codex:'+otherId);
+    assert.deepEqual((await client.read('image',hash)).bytes,png);
+    const reads=await Promise.all([request(url),request(url),request(url)]);for(const r of reads){assert.equal(r.status,200);assert.deepEqual(Buffer.from(await r.arrayBuffer()),png);}assert.equal(assetReads,1);
+    const cached=await request(url);assert.equal(cached.headers.get('x-asset-source'),'server-cache');assert.equal(assetReads,1);
+    assert.equal((await fetch(base+url)).status,401);
+    assert.equal((await fetch(base+'/api/direct',{method:'POST',headers:{Origin:base,'Content-Type':'application/json'},body:'{}'})).status,401);
+    await assert.rejects(other.read('image',hash),/不存在|不属于/);
     assert.equal((await request('/api/actions',{id:randomUUID(),type:'asset',sessionId,assetId:hash})).status,400);
     const second=Buffer.concat([png,Buffer.from('second image')]),secondFile=join(workspace,'new.png');writeFileSync(secondFile,second);log.prepare('INSERT INTO thread_items VALUES(?,?,?)').run(nativeId,1,JSON.stringify({id:'generated',type:'agentMessage',text:'![新图](<'+secondFile.replaceAll('\\','/')+'>)'}));
     const history=await (await request('/api/history?sessionId='+encodeURIComponent(sessionId))).json() as any;const secondRef=history.messages.find((m:any)=>m.id==='generated').images[0];assert.ok(secondRef.id);
-    const secondUrl='/api/images/'+secondRef.id+'?sessionId='+encodeURIComponent(sessionId);assert.equal((await request(secondUrl)).status,200);
+    const secondUrl='/api/images/'+secondRef.id+'?sessionId='+encodeURIComponent(sessionId);assert.deepEqual((await client.read('image',secondRef.id)).bytes,second);
     const generated=Buffer.concat([png,Buffer.from('native generated result')]),generatedHash=createHash('sha256').update(generated).digest('hex');
     log.prepare('INSERT INTO thread_items VALUES(?,?,?)').run(nativeId,2,JSON.stringify({id:'generated-native',type:'imageGeneration',status:'completed',savedPath:join(workspace,'missing.png'),result:generated.toString('base64')}));
     log.prepare('INSERT INTO thread_items VALUES(?,?,?)').run(nativeId,3,JSON.stringify({id:'agent-view',type:'imageView',path:secondFile}));
@@ -88,9 +115,14 @@ test('image sync, authenticated retrieval, on-demand fetch, session isolation an
     assert.equal(updated.messages.find((m:any)=>m.id==='generated-native').images[0].id,generatedHash);
     assert.equal(updated.messages.find((m:any)=>m.id==='agent-view').images[0].id,secondRef.id);
     const generatedUrl='/api/images/'+generatedHash+'?sessionId='+encodeURIComponent(sessionId);
-    assert.deepEqual(Buffer.from(await(await request(generatedUrl)).arrayBuffer()),generated);
+    assert.deepEqual((await client.read('image',generatedHash)).bytes,generated);
+    assert.deepEqual(Buffer.from(await (await request(generatedUrl)).arrayBuffer()),generated);
     assert.notEqual((await request('/api/images/'+generatedHash+'?sessionId='+encodeURIComponent('pc:codex:'+otherId))).status,200);
-    await bridge.close();bridge=undefined;assert.equal((await request(url)).status,200);assert.equal((await request(secondUrl)).status,200);assert.equal((await request(generatedUrl)).status,200);
-    await relay.close();relay=createRelay(options);relay.server.listen(0,'127.0.0.1');await once(relay.server,'listening');base='http://127.0.0.1:'+(relay.server.address() as {port:number}).port;assert.equal((await request(url)).status,200);
-  }finally{if(bridge)await bridge.close();await relay.close();log.close();assert.ok(root.startsWith(join(tmpdir(),'relay-image-e2e-')));rmSync(root,{recursive:true,force:true});}
+    assert.equal(existsSync(join(relayDir,'images',hash)),true);
+    assert.equal(existsSync(join(relayDir,'images',generatedHash)),true);
+    for(const c of clients)await c.close();
+    await bridge.close();bridge=undefined;
+    assert.deepEqual(Buffer.from(await (await request(url)).arrayBuffer()),png);
+    const offline=await request('/api/direct',{sessionId,offer:{type:'offer',sdp:'invalid'}});assert.notEqual(offline.status,200);
+  }finally{for(const c of clients)await c.close();if(bridge)await bridge.close();await relay.close();log.close();assert.ok(root.startsWith(join(tmpdir(),'relay-image-e2e-')));rmSync(root,{recursive:true,force:true});}
 });

@@ -19,12 +19,15 @@ export function imageSources(raw:unknown):Source[]{
     for(const match of value.matchAll(/^\s*(?:## .+?\.(?:png|jpe?g|gif|webp):|\-\s*\[Image[^\]]*\]:)\s*(.+)$/gim))found.push({path:match[1].trim()});
     for(const match of value.matchAll(/<image\b[^>]*\bpath="([^"]+)"/gi))found.push({path:match[1]});
   };
-  const walk=(value:any,depth=0)=>{
+  const walk=(value:any,depth=0,scanText=true)=>{
     if(depth>10||found.length>=40||value==null)return;
-    if(typeof value==='string'){if(!value.startsWith('data:')&&value.length<1_000_000)text(value);return;}
-    if(Array.isArray(value)){for(const child of value)walk(child,depth+1);return;}
+    if(typeof value==='string'){if(scanText&&!value.startsWith('data:')&&value.length<1_000_000)text(value);return;}
+    if(Array.isArray(value)){for(const child of value)walk(child,depth+1,scanText);return;}
     if(typeof value!=='object')return;
     const type=String(value.type??'');
+    // Tool logs and source patches may quote image markup as code. Only typed
+    // image blocks from those records are assets; conversational text may link images.
+    if(value.role==='tool'||['commandExecution','mcpToolCall','dynamicToolCall','fileChange','tool_result','tool_use'].includes(type))scanText=false;
     if(['imageGeneration','image_generation_call'].includes(type)){
       // The native history contains the actual result, even if savedPath expires.
       const result=value.result;
@@ -42,13 +45,25 @@ export function imageSources(raw:unknown):Source[]{
       if(typeof value.data==='string'&&typeof value.mimeType==='string')found.push({data:`data:${value.mimeType};base64,${value.data}`});
     }
     // Traverse content/results, not opaque base64 strings or raw generated tool code.
-    for(const [key,child] of Object.entries(value))if(!['data','image_url','url','path','savedPath','source','input','arguments','command','revisedPrompt'].includes(key)&&!(key==='result'&&['imageGeneration','image_generation_call'].includes(type)))walk(child,depth+1);
+    for(const [key,child] of Object.entries(value))if(!['data','image_url','url','path','savedPath','source','input','arguments','command','revisedPrompt'].includes(key)&&!(key==='result'&&['imageGeneration','image_generation_call'].includes(type)))walk(child,depth+1,scanText);
   };
   walk(raw);return found.slice(0,40);
 }
 
+export function imageSafeText(text:string):string{return text.replace(/data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/=]+/gi,'[图片内容仅通过设备直传]');}
+export function imageSafeJson(value:unknown):string{
+  return JSON.stringify(value,(_key,item)=>{
+    if(['b64_json','image_base64','imageData','image_data'].includes(_key))return '[图片内容仅通过设备直传]';
+    if(typeof item==='string')return imageSafeText(item);
+    if(item&&typeof item==='object'&&!Array.isArray(item)&&(['image','input_image','output_image'].includes(item.type)||String(item.mimeType??item.mime??item.media_type??'').startsWith('image/'))){
+      return Object.fromEntries(Object.entries(item).map(([key,v])=>[key,['data','b64_json','image_base64'].includes(key)?'[图片内容仅通过设备直传]':v]));
+    }
+    return item;
+  });
+}
 export function messageImages(store:MediaStore,sessionId:string,cwd:string,message:Message,raw:unknown):Message{
-  const sources=imageSources(raw);if(!sources.length)return message;
+  message={...message,text:imageSafeText(message.text)};
+  const sources=imageSources(raw);if(!sources.length)return {...message,images:[]};
   let memo=imported.get(store);if(!memo){memo=new Map();imported.set(store,memo);}
   const images:ImageRef[]=[],seen=new Set<string>();
   for(const source of sources){
@@ -68,6 +83,7 @@ export function messageImages(store:MediaStore,sessionId:string,cwd:string,messa
         if(/^\\\\\?\\[A-Za-z]:\\/.test(path))path=path.slice(4);
         if(/^[a-z][a-z0-9+.-]*:/i.test(path)&&!(/^[a-z]:[\\/]/i).test(path)||/^(?:\\\\|\/\/)/.test(path)||path.includes('\0'))throw new Error('仅支持本地图片文件');
         path=isAbsolute(path)?path:resolve(cwd,path);name=basename(path)||name;
+        try{statSync(path);}catch(error){const cached=store.referenceByName(sessionId,name);if(cached){if(!seen.has(cached.id!)){images.push(cached);seen.add(cached.id!);}continue;}throw error;}
         path=realpathSync.native(path);if(/^(?:\\\\|\/\/)/.test(path)&&!/^\\\\\?\\[A-Za-z]:\\/.test(path))throw new Error('网络共享图片不自动读取');
         const stat=statSync(path);if(!stat.isFile())throw new Error('图片不是普通文件');if(stat.size>MAX_IMAGE_BYTES)throw new Error('图片超过单张 16 MB 上限');
         key=path+':'+stat.mtimeMs+':'+stat.size;const prior=memo.get(key);if(prior){store.link(sessionId,prior);if(!seen.has(prior.id!)){images.push(prior);seen.add(prior.id!);}continue;}bytes=readFileSync(path);

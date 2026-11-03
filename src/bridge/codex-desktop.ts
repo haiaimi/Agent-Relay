@@ -1,12 +1,15 @@
 import {connect,type Socket} from 'node:net';
 import {randomUUID} from 'node:crypto';
 import {SteerDeliveryError} from './claude-steer.js';
+import type {PermissionMode} from '../shared/protocol.js';
+import {codexPermissions} from './permissions.js';
+import {codexSettings,type SessionSettings} from './settings.js';
 
-const MAX_FRAME=2*1024*1024;
+const MAX_FRAME=32*1024*1024;
 const uuid=/^[a-f0-9]{8}-[a-f0-9-]{27}$/i;
 // Each IPC method has its own version; the native router checks it during
 // client discovery, before forwarding. A wrong version looks like no owner.
-const methodVersions:Record<string,number>={initialize:0,'thread-owner-discovery':1,'thread-follower-steer-turn':1,'thread-follower-start-turn':2};
+const methodVersions:Record<string,number>={initialize:0,'thread-owner-discovery':1,'thread-follower-steer-turn':1,'thread-follower-start-turn':2,'thread-follower-submit-user-input':1,'thread-follower-interrupt-turn':3,'thread-follower-update-thread-settings':2,'thread-follower-read-model-settings':1,'thread-follower-command-approval-decision':1,'thread-follower-file-approval-decision':1};
 // Installed desktop's local follower protocol. Never expose
 // arbitrary pipe paths, owner IDs or IPC methods through the phone API.
 export class CodexDesktop {
@@ -17,6 +20,10 @@ export class CodexDesktop {
   private closed=false;
   private pending=new Map<string,{resolve:(r:any)=>void;reject:(e:Error)=>void;timer:NodeJS.Timeout;mutation:boolean;operation:string}>();
   private owners=new Map<string,{at:number;owner?:string;loading?:Promise<string|undefined>}>();
+  private following=new Map<string,{owner:string;at:number;requests:any[];revision?:number;settings?:any}>();
+  private settingsReads=new Map<string,Promise<SessionSettings|undefined>>();
+  onRequests?:(threadId:string,requests:any[])=>void;
+  onSettings?:(threadId:string,settings:SessionSettings)=>void;
   constructor(private readonly pipePath=process.platform==='win32'?'\\\\.\\pipe\\codex-ipc':undefined){}
   available(threadId:string):boolean {
     const cached=this.owners.get(threadId);
@@ -61,6 +68,93 @@ export class CodexDesktop {
     if(typeof result?.turn?.id!=='string')throw new SteerDeliveryError('Codex 续聊结果未确认，请查看本地会话，勿重复发送',true);
     return {turnId:result.turn.id};
   }
+  async watch(threadId:string){
+    const old=this.following.get(threadId);if(old&&Date.now()-old.at<30000)return;
+    const owner=await this.owner(threadId);if(!owner)return;
+    this.following.set(threadId,{owner,at:Date.now(),requests:old?.owner===owner?old.requests:[],revision:old?.owner===owner?old.revision:undefined,settings:old?.owner===owner?old.settings:undefined});
+    this.broadcast('thread-stream-following-changed',{hostId:'local',conversationId:threadId,following:true},[owner]);
+  }
+  readSettings(threadId:string):Promise<SessionSettings|undefined>{
+    const prior=this.settingsReads.get(threadId);if(prior)return prior;
+    const read=(async()=>{
+      const owner=await this.owner(threadId);if(!owner)return undefined;
+      await this.watch(threadId);
+      const reply=await this.request('thread-follower-read-model-settings',{conversationId:threadId},owner);
+      const settings=(reply.result?.result??reply.result)?.settings;
+      if(!settings||typeof settings.model!=='string')throw new Error('本机会话设置尚未就绪');
+      // Reading the owner's metadata never starts or resumes another writer.
+      for(let i=0;i<20&&this.following.get(threadId)?.revision===undefined;i++)await new Promise(r=>setTimeout(r,25));
+      const current=this.following.get(threadId)?.settings??{};
+      const latest=current.latestThreadSettings;
+      // The model-settings response can report null while the owner snapshot
+      // has an explicit collaboration/turn setting. Null must not erase it.
+      const effort=latest?.effort??latest?.collaborationMode?.settings?.reasoning_effort??settings.reasoningEffort;
+      return {...codexSettings({...current.currentPermissions,...latest}),...codexSettings({...settings,reasoningEffort:effort}),settingsSource:'desktop' as const};
+    })().finally(()=>this.settingsReads.delete(threadId));this.settingsReads.set(threadId,read);return read;
+  }
+  async interrupt(threadId:string):Promise<{ok:true;interruptedTurnId:string|null;goalPauseError?:string}>{
+    const owner=await this.owner(threadId);
+    if(!owner)throw new Error('未找到可停止的本地 Codex 窗口，请在电脑上停止任务');
+    // The desktop accepts v3 when expectedTurnId is omitted: stop the current
+    // turn through its existing owner, without opening another transcript writer.
+    const reply=await this.request('thread-follower-interrupt-turn',{conversationId:threadId,mode:'user-stop'},owner,true);
+    const result=reply.result?.result??reply.result;
+    if(result?.ok!==true||!(result.interruptedTurnId===null||typeof result.interruptedTurnId==='string'))throw new SteerDeliveryError('Codex 停止结果未确认，请查看本地会话，勿重复点击',true);
+    return result;
+  }
+  async setPermissions(threadId:string,mode:PermissionMode,cwd:string){
+    const owner=await this.owner(threadId);if(!owner)throw new Error('本地 Codex 窗口不可用，请在电脑上选择权限');
+    const {approvalPolicy,approvalsReviewer,sandboxPolicy}=codexPermissions(mode,cwd);
+    const reply=await this.request('thread-follower-update-thread-settings',{conversationId:threadId,threadSettings:{approvalPolicy,approvalsReviewer,sandboxPolicy}},owner,true);
+    if((reply.result?.result??reply.result)?.applied!==true)throw new SteerDeliveryError('本地 Codex 未确认权限更新，请查看电脑窗口',true);
+  }
+  async setModel(threadId:string,model:string|undefined,effort:string|undefined){
+    const owner=await this.owner(threadId);if(!owner)throw new Error('本地 Codex 窗口不可用，请在电脑上选择模型');
+    const reply=await this.request('thread-follower-update-thread-settings',{conversationId:threadId,threadSettings:{...model&&{model},...effort!==undefined&&{effort:effort==='default'?null:effort}}},owner,true);
+    if((reply.result?.result??reply.result)?.applied!==true)throw new SteerDeliveryError('本地 Codex 未确认模型更新，请查看电脑窗口',true);
+  }
+  async decideApproval(threadId:string,requestId:string|number,allow:boolean,remember:boolean){
+    const owner=await this.owner(threadId);if(!owner)throw new Error('本地 Codex 窗口不可用');
+    const request=this.following.get(threadId)?.requests.find(r=>r.id===requestId);
+    const method=request?.method==='item/commandExecution/requestApproval'?'thread-follower-command-approval-decision':request?.method==='item/fileChange/requestApproval'?'thread-follower-file-approval-decision':undefined;
+    if(!method)throw new Error('确认已在本机关闭，请刷新');
+    const reply=await this.request(method,{conversationId:threadId,requestId,decision:allow?(remember?'acceptForSession':'accept'):'decline'},owner,true);
+    if((reply.result?.result??reply.result)?.ok!==true)throw new SteerDeliveryError('批准结果未确认，请查看本机，勿重复提交',true);
+  }
+  async answer(threadId:string,requestId:string|number,answers:Record<string,string[]>){
+    const owner=await this.owner(threadId);if(!owner)throw new Error('本地 Codex 窗口不可用，请刷新');
+    if(this.following.get(threadId)?.owner!==owner){this.following.delete(threadId);await this.watch(threadId);throw new Error('本地窗口已切换，正在刷新问题，请稍后再试');}
+    const pending=this.following.get(threadId)?.requests.find(r=>r.id===requestId&&r.method==='item/tool/requestUserInput');if(!pending)throw new Error('问题已在本机关闭，请刷新');
+    const response={answers:Object.fromEntries(Object.entries(answers).map(([id,values])=>[id,{answers:values}]))};
+    const reply=await this.request('thread-follower-submit-user-input',{conversationId:threadId,requestId,response},owner,true);
+    if(reply.result?.ok!==true)throw new SteerDeliveryError('问题回答结果未确认，请查看本机，勿重复提交',true);
+  }
+  private broadcast(method:string,params:unknown,targetClientIds?:string[]){
+    const payload=Buffer.from(JSON.stringify({type:'broadcast',method,params,targetClientIds,sourceClientId:this.clientId,version:1}));const frame=Buffer.alloc(4+payload.length);frame.writeUInt32LE(payload.length);payload.copy(frame,4);this.socket?.write(frame);
+  }
+  private broadcastReceived(message:any){
+    const p=message.params,follow=p&&this.following.get(p.conversationId);if(!follow||p.hostId!=='local')return;
+    if(message.method==='thread-stream-following-status-requested'){this.broadcast('thread-stream-following-changed',{hostId:'local',conversationId:p.conversationId,following:true},[message.sourceClientId]);return;}
+    if(message.method!=='thread-stream-state-changed'||message.sourceClientId!==follow.owner)return;
+    const change=p.change;
+    if(change?.type==='snapshot'){follow.requests=Array.isArray(change.conversationState?.requests)?change.conversationState.requests.slice(0,100):[];follow.revision=change.revision;follow.settings={currentPermissions:change.conversationState?.currentPermissions,latestThreadSettings:change.conversationState?.latestThreadSettings};}
+    else if(change?.type==='patches'){
+      if(change.baseRevision!==follow.revision){follow.requests=[];this.broadcast('thread-stream-following-changed',{hostId:'local',conversationId:p.conversationId,following:true},[follow.owner]);return;}
+      for(const patch of change.patches??[]){const path=patch.path;if(!Array.isArray(path)||!['requests','currentPermissions','latestThreadSettings'].includes(path[0])||path.length>12||path.some((v:unknown)=>['__proto__','constructor','prototype'].includes(String(v))))continue;
+        if(path[0]!=='requests'){
+          follow.settings??={};let target=follow.settings;for(const key of path.slice(0,-1)){if(!target[key]||typeof target[key]!=='object')target[key]={};target=target[key];}
+          const key=path.at(-1);if(patch.op==='remove')delete target[key];else target[key]=patch.value;continue;
+        }
+        if(path.length===1){follow.requests=Array.isArray(patch.value)?patch.value.slice(0,100):[];continue;}
+        let target:any=follow.requests;for(const key of path.slice(1,-1)){target=target?.[key];if(!target)break;}if(!target)continue;const key=path.at(-1);
+        if(patch.op==='remove'){if(Array.isArray(target))target.splice(Number(key),1);else delete target[key];}else if(Array.isArray(target)&&patch.op==='add')target.splice(Number(key),0,patch.value);else target[key]=patch.value;
+      }
+      follow.revision=change.revision;
+    }else return;
+    const settings=codexSettings({...follow.settings?.currentPermissions,...follow.settings?.latestThreadSettings});
+    if(Object.keys(settings).length)this.onSettings?.(p.conversationId,{...settings,settingsSource:'desktop'});
+    this.onRequests?.(p.conversationId,follow.requests.filter((r:any)=>['item/tool/requestUserInput','item/commandExecution/requestApproval','item/fileChange/requestApproval'].includes(r?.method)));
+  }
   private async start(){
     if(this.closed||!this.pipePath)throw new Error('本地 Codex 桌面连接不可用');
     if(this.connecting)return this.connecting;
@@ -78,7 +172,7 @@ export class CodexDesktop {
   private request(method:string,params:unknown,targetClientId?:string,mutation=false):Promise<any>{
     const socket=this.socket;
     if(!socket?.writable)return Promise.reject(new Error('本地 Codex 连接已断开'));
-    const version=methodVersions[method],operation=method==='thread-follower-start-turn'?'续聊':'引导';
+    const version=methodVersions[method],operation=method==='thread-follower-start-turn'?'续聊':method==='thread-follower-submit-user-input'?'回答':method==='thread-follower-interrupt-turn'?'停止':method==='thread-follower-update-thread-settings'?'更新权限':method.endsWith('approval-decision')?'批准':'引导';
     if(version===undefined)return Promise.reject(new Error('不支持的本地 Codex 方法'));
     const requestId=randomUUID();
     const payload=Buffer.from(JSON.stringify({type:'request',requestId,sourceClientId:this.clientId,version,method,params,targetClientId,timeoutMs:mutation?15000:4000}));
@@ -100,6 +194,7 @@ export class CodexDesktop {
         const data=Buffer.from(JSON.stringify({type:'client-discovery-response',requestId:r.requestId,response:{canHandle:false}}));
         const frame=Buffer.alloc(4+data.length);frame.writeUInt32LE(data.length);data.copy(frame,4);this.socket?.write(frame);continue;
       }
+      if(r.type==='broadcast'){this.broadcastReceived(r);continue;}
       if(r.type!=='response')continue;
       const p=this.pending.get(r.requestId);if(!p)continue;clearTimeout(p.timer);this.pending.delete(r.requestId);
       if(r.resultType==='success')p.resolve(r);
@@ -108,6 +203,7 @@ export class CodexDesktop {
   }
   private disconnect(socket:Socket){
     if(this.socket!==socket)return;this.socket=undefined;this.connecting=undefined;this.clientId='initializing-client';this.buffer=Buffer.alloc(0);this.owners.clear();
+    for(const id of this.following.keys())this.onRequests?.(id,[]);this.following.clear();
     for(const p of this.pending.values()){clearTimeout(p.timer);p.reject(new SteerDeliveryError('本地 Codex 连接已断开，请先查看会话状态',p.mutation));}this.pending.clear();socket.destroy();
   }
   close(){this.closed=true;const socket=this.socket;if(socket)this.disconnect(socket);}

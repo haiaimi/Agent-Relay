@@ -45,6 +45,11 @@ export class MediaStore {
     const data=this.read(sessionId,id);if(!data)throw new Error('图片尚未缓存或不属于此会话');return {id,name:data.name,mime:data.mime,data:data.bytes.toString('base64')};
   }
   pending(sessionId:string):string[]{return this.db.prepare('SELECT id FROM media_refs WHERE session_id=? AND acked=0').all(sessionId).map(r=>String(r.id));}
+  referenceByName(sessionId:string,name:string):ImageRef|undefined{
+    const rows=this.db.prepare('SELECT m.id,m.mime,m.size,r.name FROM media m JOIN media_refs r ON r.id=m.id WHERE r.session_id=? AND r.name=? LIMIT 2').all(sessionId,name);
+    if(rows.length!==1)return;const row=rows[0];if(!this.read(sessionId,String(row.id)))return;
+    return {id:String(row.id),name:String(row.name),mime:String(row.mime),size:Number(row.size)};
+  }
   pendingSessions():string[]{return this.db.prepare('SELECT DISTINCT session_id FROM media_refs WHERE acked=0').all().map(r=>String(r.session_id));}
   link(sessionId:string,ref:ImageRef){if(ref.id)this.db.prepare('INSERT OR IGNORE INTO media_refs(session_id,id,name) VALUES(?,?,?)').run(sessionId,ref.id,ref.name);}
   ack(sessionId:string,id:string){this.db.prepare('UPDATE media_refs SET acked=1 WHERE session_id=? AND id=?').run(sessionId,id);}
