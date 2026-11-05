@@ -262,7 +262,7 @@ function renderTask(){
   publishStudioSidebar();
   const r=state.runs.find(x=>x.id===activeRun),t=r&&allTasks(r).find(t=>t.id===activeTask);if(!r||!t)return;const s=relay.sessions.find(s=>s.id===t.sessionId),finished=['accepted','cancelled'].includes(r.status),g=guidanceFor(r,t,s);
   const taskKey=JSON.stringify([r.id,r.status,t,r.directions,s?.status,s?.questionCount,g,studioRunActivity(r,relay),t.id==='studio-delivery'?r.tasks.map(x=>[x.id,x.sessionId,x.artifacts]):null]);if(taskKey===renderedTaskKey)return;renderedTaskKey=taskKey;$('task-title').textContent=t.title;detailProgress('task-dialog',r);$('task-dialog').querySelector('.studio-live-summary').textContent=g.label;
-  const focusedGuide=document.activeElement?.closest('.stage-guide')?document.activeElement:null,selection=focusedGuide?[focusedGuide.selectionStart,focusedGuide.selectionEnd]:null;const root=$('task-content');disposeMedia(root);root.replaceChildren();
+  const focusedGuide=document.activeElement?.matches('.stage-guide textarea')?document.activeElement:null,selection=focusedGuide?[focusedGuide.selectionStart,focusedGuide.selectionEnd]:null;const root=$('task-content');disposeMedia(root);root.replaceChildren();
   const meta=node('div','task-info');meta.append(node('span','',roleName(t.role)),node('span','',t.startedAt?date(t.startedAt):''));root.append(meta);
   if(t.kind){if(t.status!=='awaiting-review')root.append(t.kind==='visual-review'?scenePanel(r,{command,openTask,feedbackFor,notify}):producerReview(r,t));else root.append(node('p','fine','查看上方本轮成果，确认或填写修改意见即可继续。'));}
   else root.append(taskDecision(r,t,s,g));
