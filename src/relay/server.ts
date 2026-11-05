@@ -1,3 +1,4 @@
+import {QuestionState} from './question-state.js';
 import {streamStudioVideo} from './studio-video.js';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { readFile } from 'node:fs/promises';
@@ -86,6 +87,7 @@ export function createRelay(options: Options) {
   const secure = origin?.startsWith('https://');
   const store = new RelayStore(options.dataDir);
   const files=new FileStore(options.dataDir,store.db);
+  const questionState=new QuestionState(store);
   const media=new MediaStore(options.dataDir,store.db);
   const previews=new ImagePreviews(options.dataDir);
   const studioPreviews=new StudioPreviews(store.db,media);
@@ -111,6 +113,7 @@ export function createRelay(options: Options) {
     for(const res of viewers) { if(res.writableLength>1024*1024) res.destroy(); else res.write(message); }
   }
   function remote(host: string, action: Action,timeoutMs=90_000): Promise<any> {
+    const questionRevision=action.sessionId?questionState.revision(action.sessionId):0;
     const projectId=action.projectId??(action.sessionId?store.getSession(action.sessionId)?.projectId:undefined),uploadScope=action.upload?.scope.slice(host.length+1)??'';
     const brain=action.type==='prepare-brainstorm'||projectId?.startsWith('brainstorm-')||uploadScope.startsWith('project:brainstorm-')||store.getSession(uploadScope)?.projectId?.startsWith('brainstorm-');
     const socket=brain?(brainstormBridges.get(host)??bridges.get(host)):bridges.get(host);
@@ -119,7 +122,7 @@ export function createRelay(options: Options) {
       const timer=setTimeout(()=>{pending.delete(action.id);reject(new Error('电脑响应超时；操作不会自动重发，请检查会话状态'));},timeoutMs);
       pending.set(action.id,{resolve,reject,host,timer,socket});
       socket.send(JSON.stringify({type:'action',action}));
-    });
+    }).then(result=>action.type==='history'?questionState.snapshot(action.sessionId!,result,questionRevision):result);
   }
   const inspectVisual=async(hostId:string,sessionId:string,path:string)=>{
     if(!store.hosts().find(h=>h.id===hostId)?.capabilities?.studioArtifacts)throw Error('请升级工作电脑连接程序以读取本轮原画');
@@ -129,7 +132,7 @@ export function createRelay(options: Options) {
     const bytes=imageBytes(payload);await previews.image(bytes,payload.mime);media.putPayload(sessionId,payload);return {payload,sha256:payload.id};
   };
   const studio=new Studio(store,remote,host=>bridges.get(host)?.readyState===WebSocket.OPEN,()=>emit('studio',{}),files,inspectVisual);
-  const questionAnswers=new QuestionAnswers(store,studio,remote,event=>emit('event',event,store.latestSeq()));
+  const questionAnswers=new QuestionAnswers(store,studio,remote,event=>{const session=questionState.refresh(event.sessionId!);if(session)emit('sessions',{sessions:[session]});emit('event',event,store.latestSeq());});
   const repairs=new RelayRepairs(store,studio,remote,host=>bridges.get(host)?.readyState===WebSocket.OPEN,()=>emit('studio',{}),options.publicOrigin,uiRevision);
   const attention=new StudioAttention(store,studio,remote,event=>emit('event',event,store.latestSeq()),host=>bridges.has(host),id=>repairs.sessionsFor(id));
   const brains=new Brainstorms(store,studio,remote,host=>bridges.get(host)?.readyState===WebSocket.OPEN,()=>emit('studio',{}),files,media);
@@ -239,7 +242,7 @@ export function createRelay(options: Options) {
       if(req.method==='POST' && url.pathname==='/api/logout') {
         res.setHeader('Set-Cookie',`relay_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${secure ? '; Secure' : ''}`); return json(res,200,{ok:true});
       }
-      if(req.method==='GET' && url.pathname==='/api/state') return json(res,200,{hosts:store.hosts().map(h=>({...h,online:bridges.has(h.id)})),sessions:store.sessions()});
+      if(req.method==='GET' && url.pathname==='/api/state') return json(res,200,{hosts:store.hosts().map(h=>({...h,online:bridges.has(h.id)})),sessions:store.sessions().map(s=>questionState.project(s))});
       if(req.method==='GET'&&url.pathname.startsWith('/api/images/')){
         const id=url.pathname.slice('/api/images/'.length),sessionId=url.searchParams.get('sessionId')??'',session=store.getSession(sessionId);
         if(!session||!(/^[a-f0-9]{64}$/).test(id))return json(res,404,{error:'图片不存在'});
@@ -372,13 +375,13 @@ export function createRelay(options: Options) {
             if(session.hostId!==hostId || session.id!==`${hostId}:${session.provider}:${session.nativeId}` || !['codex','claude','api'].includes(session.provider) || typeof session.updatedAt!=='number') throw new Error('Invalid session owner');
             if(service&&(!session.managed||!session.projectId?.startsWith('brainstorm-')))throw Error('Invalid brainstorming session');
             const prior=store.getSession(session.id);if(!service&&brainstormBridges.has(hostId)&&prior?.managed&&prior.projectId?.startsWith('brainstorm-'))continue;
-            store.session(session);accepted.push(session);
+            const projected=questionState.project(session);store.session(projected);accepted.push(projected);
           }
           emit('sessions',{sessions:accepted});emit('state',{incremental:true});
         } else if(msg.type==='event') {
           const e=msg.event as RelayEvent;
           if(e.hostId!==hostId || !e.sessionId?.startsWith(hostId+':') || !store.getSession(e.sessionId) || typeof e.id!=='string') throw new Error('Invalid event owner');
-          const seq=store.event(e);if(seq) emit('event',e,seq);
+          questionState.observe(e);const seq=store.event(e);if(seq) emit('event',e,seq);
           ws.send(JSON.stringify({type:'ack',id:e.id}));
         } else if(msg.type==='result') {
           const wait=pending.get(msg.id);

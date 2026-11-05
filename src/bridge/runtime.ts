@@ -135,7 +135,7 @@ export class AgentRuntime {
       all.set(s.id,{...original,...s});
     }
     const inputs=this.store.queued(),peers=claudeSteerSessions(this.claudeHome());
-    for(const s of all.values()){if(!s.managed)Object.assign(s,this.nativeSettings.get(s.id));s.pendingIds=inputs.filter(a=>a.sessionId===s.id).map(a=>a.id);s.pendingCount=s.pendingIds.length;s.canSteer=this.canSteer(s,peers);s.canStop=this.canStop(s);s.canSetPermissions=s.managed||s.provider==='codex'||!this.history.claudeIsRunning(s.nativeId);s.questionCount=this.questions.list(s.id).length;}
+    for(const s of all.values()){if(!s.managed)Object.assign(s,this.nativeSettings.get(s.id));s.pendingIds=inputs.filter(a=>a.sessionId===s.id).map(a=>a.id);s.pendingCount=s.pendingIds.length;s.canSteer=this.canSteer(s,peers);s.canStop=this.canStop(s);s.canSetPermissions=s.managed||s.provider==='codex'||!this.history.claudeIsRunning(s.nativeId);if(s.provider==='codex'&&s.managed&&this.questions.list(s.id).some(q=>q.source.startsWith('async:')))this.questions.reconcile(s.id,'async:',new Set(this.history.asyncQuestions(s.id).map(q=>'async:'+q.sourceId)));s.questionCount=this.questions.list(s.id).length;}
     for(const s of [...all.values()].filter(s=>s.provider==='codex'&&!s.managed&&['running','waiting'].includes(s.status)).slice(0,20))void this.codexDesktop.watch(s.nativeId).catch(()=>{});
     return [...all.values()];
   }

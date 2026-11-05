@@ -20,6 +20,17 @@ test('answers are explicit, scoped, consumed once, and cancellation never choose
   const controller=new AbortController(),pending=broker.ask('one','cancel',questions,controller.signal);controller.abort();assert.equal(await pending,undefined);assert.equal(events.at(-1).status,'cancelled');broker.close();
 });
 
+test('managed resume reconciles an async card answered through the relay without clearing native questions',async()=>{
+ const f=fixture();try{
+  const nativeId=randomUUID(),sid='test:codex:'+nativeId,session={id:sid,hostId:'test',nativeId,provider:'codex',managed:true,cwd:f.work,projectId:'work',title:'Resumed task',status:'running',updatedAt:Date.now()};
+  (f.runtime as any).managed.set(sid,session);f.store.save(session as any);
+  const questions=normalizeQuestions([{title:'选哪个？',options:['A','B']}],'async');
+  f.runtime.questions.attach(sid,'async:old',questions,async()=>{});f.runtime.questions.attach(sid,'codex:turn:request',questions,async()=>{});
+  (f.runtime.history as any).asyncQuestions=()=>[];
+  const current=f.runtime.list().find(s=>s.id===sid)!;assert.equal(current.questionCount,1);assert.equal(f.runtime.questions.list(sid)[0].source,'codex:turn:request');assert.equal(current.status,'running');
+ }finally{await f.close();}
+});
+
 test('managed Codex waits for the web answer and receives the exact request response without queueing',async()=>{
   const f=fixture();try{
     const {sessionId}=await f.runtime.handle({id:randomUUID(),type:'start',provider:'codex',projectId:'work',text:'question'});await until(()=>f.runtime.questions.list(sessionId).length===1);
