@@ -515,6 +515,16 @@ test('a checkpoint with pending producer questions must be answered before any r
   }finally{await f.close();}
 });
 
+test('confirmed question-card answers restore checkpoint tracking without sending another producer message',async()=>{
+ const f=await fixture();try{
+  f.studio.createRun({workflow:'general',projectId:f.project.id,title:'问题卡恢复',brief:'保留原任务'});await f.settle();f.finish(f.run().planner,'已有分析','failed');await f.settle();
+  const t=f.run().planner,sid=t.sessionId!,id=randomUUID(),at=t.checkpoint!.at+1,count=f.actions.length;
+  f.store.beginAction(id,'workstation',{id,type:'answer',sessionId:sid,questionId:randomUUID(),answers:{q0:['A']}});f.store.finishAction(id,{ok:true});f.store.session({...f.store.getSession(sid)!,status:'running'});
+  f.studio.noteQuestionAnswer(id,sid,'采用 A',at);const pending=f.run();pending.guidance![0].at=at;f.store.db.prepare('UPDATE studio_runs SET json=? WHERE id=?').run(JSON.stringify(pending),pending.id);
+  await f.settle();assert.equal(f.run().planner.status,'running');assert.equal(f.run().planner.checkpoint,undefined);assert.equal(f.run().planner.actionId,id);assert.equal(f.actions.length,count);
+ }finally{await f.close();}
+});
+
 test('producer replies hold a checkpoint task in starting until delivery is confirmed, then clear stale recovery',async()=>{
  const f=await fixture();try{
   f.studio.createRun({workflow:'general',projectId:f.project.id,title:'回答后续做',brief:'保留原会话'});await f.settle();f.finish(f.run().planner,'已有分析','failed');await f.settle();

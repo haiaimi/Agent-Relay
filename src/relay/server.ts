@@ -16,6 +16,7 @@ import {ImagePreviews} from './previews.js';
 import {StudioPreviews} from './studio-previews.js';
 import {Brainstorms} from './brainstorm.js';
 import {Studio} from './studio.js';
+import {QuestionAnswers} from './question-answers.js';
 
 interface Options { dataDir: string; phoneToken: string; bridgeToken: string; publicOrigin?: string;turn?:TurnConfig }
 function publicAgents(value:any){if(value===undefined)return undefined;if(!Array.isArray(value)||value.length>32)throw Error('Invalid agent catalog');return value.map(a=>{if(!/^[a-zA-Z0-9_-]{1,60}$/.test(a.id)||!['codex','claude','api'].includes(a.provider)||typeof a.name!=='string'||a.name.length>80)throw Error('Invalid agent');return {id:a.id,provider:a.provider,name:a.name,configured:a.configured!==false,tools:a.tools===true,revision:typeof a.revision==='string'?a.revision.slice(0,64):undefined};});}
@@ -118,6 +119,7 @@ export function createRelay(options: Options) {
     const bytes=imageBytes(payload);await previews.image(bytes,payload.mime);media.putPayload(sessionId,payload);return {payload,sha256:payload.id};
   };
   const studio=new Studio(store,remote,host=>bridges.get(host)?.readyState===WebSocket.OPEN,()=>emit('studio',{}),files,inspectVisual);
+  const questionAnswers=new QuestionAnswers(store,studio,remote,event=>emit('event',event,store.latestSeq()));
   const brains=new Brainstorms(store,studio,remote,host=>bridges.get(host)?.readyState===WebSocket.OPEN,()=>emit('studio',{}),files,media);
   const server=createServer(async(req,res)=>{
     res.setHeader('Cache-Control','no-store'); res.setHeader('X-Content-Type-Options','nosniff');
@@ -295,7 +297,7 @@ export function createRelay(options: Options) {
         files.refs(scope,action.attachmentIds);
         const prior=store.beginAction(action.id,host,action);
         if(!prior.fresh) return json(res,prior.result ? 200 : 409,prior.result ?? {error:'操作已接受，结果尚未确认；不会重复执行'});
-        try { const result=await remote(host,action);if(result.sessionId)for(const id of action.attachmentIds??[])files.link(scope,host+'|'+result.sessionId,id); store.finishAction(action.id,result); return json(res,200,result); }
+        try { const card=questionAnswers.card(action),startedAt=Date.now();let result:any;try{result=await remote(host,action);}catch(error){result=await questionAnswers.fallback(host,action,error);}if(result.sessionId)for(const id of action.attachmentIds??[])files.link(scope,host+'|'+result.sessionId,id);questionAnswers.confirmed(host,action,card,result,startedAt);store.finishAction(action.id,result);return json(res,200,result); }
         catch(err) { const result={error:(err as Error).message}; store.finishAction(action.id,result); return json(res,409,result); }
       }
       json(res,404,{error:'Not found'});

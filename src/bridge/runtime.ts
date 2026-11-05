@@ -17,6 +17,7 @@ import { assertProjectPath } from '../shared/security.js';
 import { sessionKey, type Session, type Action, type Project, type RelayEvent, type Provider, type AgentModel, type AgentCommand } from '../shared/protocol.js';
 import {QuestionBroker} from './questions.js';
 import {normalizeQuestions} from '../shared/questions.js';
+import {missingDesktopOwner,questionReplyId} from '../shared/async-answers.js';
 import {codexPermissions,claudePermissions} from './permissions.js';
 import {prepareBrainstorm,brainProject,brainstormTools,brainstormInstructions} from './brainstorm.js';
 import {studioArtifact} from './studio-artifact.js';
@@ -202,10 +203,18 @@ export class AgentRuntime {
       this.questions.attach(s.id,source,request.questions,async answers=>{
         if(!this.history.asyncQuestions(s.id).some(q=>q.sourceId===request.sourceId))throw new Error('问题已在本机回答或失效，请刷新');
         const replies=request.questions.map((q,index)=>({questionItemId:JSON.stringify(['request_user_input_async',request.sourceId,q.sourceIndex??index]),question:q.question,answer:answers[q.id].join(', ')}));
-        const text='<send_user_message_question_reply>\n'+JSON.stringify(replies)+'\n</send_user_message_question_reply>',id=randomUUID(),input=[{type:'text',text,text_elements:[]}];
+        const text='<send_user_message_question_reply>\n'+JSON.stringify(replies)+'\n</send_user_message_question_reply>',id=questionReplyId(s.id,source),input=[{type:'text',text,text_elements:[]}];
         this.list();const current=this.get(s.id);
-        if(['running','waiting'].includes(current.status))await this.codexDesktop.steer(s.nativeId,id,text,input);else await this.codexDesktop.startTurn(s.nativeId,id,text,input);
-        this.event(s,'message',{id,role:'user',text:replies.map(r=>r.question+'\n'+r.answer).join('\n\n'),timestamp:Date.now()});
+        if(['running','waiting'].includes(current.status)){
+          try{await this.codexDesktop.steer(s.nativeId,id,text,input);this.event(s,'message',{id,role:'user',text:replies.map(r=>r.question+'\n'+r.answer).join('\n\n'),timestamp:Date.now()});return {sessionId:s.id};}
+          catch(error){if(!missingDesktopOwner(error))throw error;}
+        }
+        // Normal send owns native resume, queueing and writer-conflict checks.
+        // It can continue this exact thread through app-server without a GUI.
+        const send:Action={id,type:'send',sessionId:s.id,text},prior=this.store.begin(id,send);
+        if(!prior.fresh){if(prior.result?.error)throw new SteerDeliveryError('回答投递记录待核对：'+prior.result.error,true);return {sessionId:s.id,queued:prior.result?.queued===true};}
+        try{const result=await this.handle(send);this.store.finish(id,result);return {sessionId:s.id,queued:result.queued===true};}
+        catch(error){throw new SteerDeliveryError('回答投递结果尚未确认，请核对原会话，不要重复发送：'+(error as Error).message,true);}
       });
     }
     this.questions.reconcile(s.id,'async:',active);
@@ -316,7 +325,7 @@ export class AgentRuntime {
       this.save(s);return {ok:true,queued:!active&&running,permissionMode:mode};
     }
     if(action.sessionId&&this.stopping.has(action.sessionId)&&['send','steer','stop'].includes(action.type))throw new Error('正在停止当前任务，请稍候');
-    if(action.type==='answer'){this.get(action.sessionId!);await this.questions.answer(action.sessionId!,action.questionId!,action.answers);return {ok:true};}
+    if(action.type==='answer'){this.get(action.sessionId!);const result=await this.questions.answer(action.sessionId!,action.questionId!,action.answers);return {ok:true,...result??{}};}
     if(action.type==='upload'){
       const payload=action.upload!,prefix=this.config.hostId+'|';if(!payload.scope.startsWith(prefix))throw new Error('附件设备不匹配');
       const scope=payload.scope.slice(prefix.length);

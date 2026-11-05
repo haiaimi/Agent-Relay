@@ -2,10 +2,10 @@ export class QuestionPanel {
   cards=new Map();rendered=new Map();submitting=new Set();drafts=new Map();generation=0;
   constructor(root,submit,online,notify){Object.assign(this,{root,submit,online,notify});}
   reset(clearDrafts=false){this.generation++;this.cards.clear();for(const entry of this.rendered.values())entry.element.remove();this.rendered.clear();this.root.replaceChildren();if(clearDrafts)this.drafts.clear();}
-  event(card,capture=false){if(card?.id&&Array.isArray(card.questions)){const old=this.cards.get(card.id);if(old&&old.status!=='pending'&&card.status==='pending')return;const anchorId=old?.anchorId??card.anchorId??(capture?this.anchor?.():undefined);this.cards.set(card.id,{...card,...anchorId?{anchorId}:{}});}}
+  event(card,capture=false){if(card?.id&&Array.isArray(card.questions)){const old=this.cards.get(card.id);if(old&&old.status!=='pending'&&card.status==='pending'||old?.status==='answered'&&['cancelled','expired'].includes(card.status))return;const anchorId=old?.anchorId??card.anchorId??(capture?this.anchor?.():undefined);this.cards.set(card.id,{...card,...card.status==='answered'&&old?.status==='answered'?{answers:card.answers??old.answers,delivery:card.delivery??old.delivery}:{},...anchorId?{anchorId}:{}});}}
   replaceAnchors(ids,replacement){for(const [id,card] of this.cards)if(ids.includes(card.anchorId))this.cards.set(id,{...card,anchorId:replacement});}
   reconcile(active,asOf=Infinity){const ids=new Set(active.map(c=>c.id));for(const [id,c] of this.cards)if(c.status==='pending'&&c.createdAt<=asOf&&!ids.has(id))this.cards.set(id,{...c,status:'cancelled'});for(const c of active)this.event(c);}
-  render(){let changed=false,snapshot;for(const [id,card] of this.cards){const version=JSON.stringify([card.status,card.answers,card.questions,this.online()]);if(this.rendered.get(id)?.version===version)continue;if(!changed)snapshot=this.beforeRender?.();changed=true;const old=this.rendered.get(id)?.element,element=this.build(card);if(old)old.replaceWith(element);else if(!this.afterRender)this.root.append(element);this.rendered.set(id,{version,element});}if(changed)this.afterRender?.(snapshot);}
+  render(){let changed=false,snapshot;for(const [id,card] of this.cards){const version=JSON.stringify([card.status,card.answers,card.questions,card.delivery,this.online()]);if(this.rendered.get(id)?.version===version)continue;if(!changed)snapshot=this.beforeRender?.();changed=true;const old=this.rendered.get(id)?.element,element=this.build(card);if(old)old.replaceWith(element);else if(!this.afterRender)this.root.append(element);this.rendered.set(id,{version,element});}if(changed)this.afterRender?.(snapshot);}
   build(card){
     const generation=this.generation;
     const form=document.createElement(card.status==='pending'?'form':'details');form.className='question-card';form.dataset.messageId='question:'+card.id;form.setAttribute('aria-label','Agent 提问');
@@ -27,9 +27,9 @@ export class QuestionPanel {
         event.preventDefault();if(this.submitting.has(card.id))return;const answers={};
         for(const {q,choices,free} of groups){const custom=free?.value.trim(),values=custom?[custom]:choices.filter(c=>c.checked).map(c=>c.value);if(!values.length){note.textContent='请回答所有问题后提交';return;}answers[q.id]=values;}
         this.submitting.add(card.id);button.disabled=true;note.textContent='正在把回答送回原任务…';
-        try{await this.submit(card,answers);this.drafts.delete(card.id);if(this.generation===generation){this.cards.set(card.id,{...card,status:'answered',answers});this.render();}}catch(error){if(this.generation===generation){note.textContent=error.message;this.notify(error.message);button.disabled=!this.online();}}finally{this.submitting.delete(card.id);}
+        try{const receipt=await this.submit(card,answers);this.drafts.delete(card.id);if(this.generation===generation){this.cards.set(card.id,{...card,status:'answered',answers,delivery:receipt?.queued?'queued':'sent'});this.render();}}catch(error){if(this.generation===generation){note.textContent=error.message;this.notify(error.message);button.disabled=!this.online();}}finally{this.submitting.delete(card.id);}
       };
-    }else note.textContent=card.status==='answered'?'已回答':card.status==='unknown'?'提交结果待本机确认，请勿重复发送':card.status==='expired'?'问题已过期':'问题已在本机关闭或任务已结束';
+    }else note.textContent=card.status==='answered'?(card.delivery==='queued'?'回答已排队，可在原会话查看执行进度；无需重复提交。':'已回答'):card.status==='unknown'?'提交结果待本机确认，请勿重复发送':card.status==='expired'?'问题已过期':'问题已在本机关闭或任务已结束';
     form.append(note);return form;
   }
 }

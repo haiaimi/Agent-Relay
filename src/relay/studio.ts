@@ -152,23 +152,33 @@ export class Studio {
     if(t.recovery)t.recovery.nextAt=undefined;
   }
   private reconcileProducerResume(r:StudioRun,t:Task){
-    if(t.status!=='blocked'||!t.checkpoint||!t.sessionId||!this.dependenciesReady(r,t))return false;
+    if(t.status!=='blocked'||!t.sessionId||!this.dependenciesReady(r,t))return false;
     // Older releases checked the stale idle session while a producer reply was
     // still in flight. Adopt only a matching, acknowledged send already recorded
     // as guidance; never resend it or infer delivery from native activity alone.
-    const guidance=(r.guidance??[]).filter(g=>g.sessionId===t.sessionId&&g.at>t.checkpoint!.at).at(-1);
+    const after=t.checkpoint?.at??t.finishedAt??Infinity;
+    const guidance=(r.guidance??[]).filter(g=>g.sessionId===t.sessionId&&g.at>after).at(-1);
     if(!guidance)return false;
     const row=this.store.db.prepare('SELECT host_id,request,result FROM actions WHERE id=?').get(guidance.id);
     if(!row?.result)return false;
     try{
       const request=JSON.parse(String(row.request)),result=JSON.parse(String(row.result)),s=this.store.getSession(t.sessionId);
-      if(request.type!=='send'||request.sessionId!==t.sessionId||row.host_id!==this.project(r.projectId).hostId||result.error||!(result.ok===true||result.sessionId===t.sessionId)||!s||s.hostId!==row.host_id||s.projectId!==this.execution(r).id)return false;
+      if(!['send','answer'].includes(request.type)||request.sessionId!==t.sessionId||row.host_id!==this.project(r.projectId).hostId||result.error||!(result.ok===true||result.sessionId===t.sessionId)||!s||s.hostId!==row.host_id||s.projectId!==this.execution(r).id)return false;
     }catch{return false;}
     t.status='running';t.actionId=guidance.id;t.checkpoint=undefined;t.recovery=undefined;t.error=undefined;t.finishedAt=undefined;
     this.saveRun(r,'已确认制作人回复送达原会话，恢复任务跟踪；未重复投递',t);return true;
   }
   private recovering=new Set<string>();
   private recoverConnection(r:StudioRun,t:Task,p:StudioProject){
+  noteQuestionAnswer(id:string,sessionId:string,text:string,startedAt:number){
+    for(const r of this.runs()){
+      if(['accepted','cancelled'].includes(r.status)||(r.guidance??[]).some(g=>g.id===id))continue;
+      const t=this.allTasks(r).find(t=>t.sessionId===sessionId);if(!t)continue;
+      if(t.status==='blocked')t.startedAt=startedAt;
+      r.guidance??=[];r.guidance.push({id,sessionId,role:t.role,text:text.slice(0,12000),files:[],at:Date.now()});r.guidance=r.guidance.slice(-100);
+      this.saveRun(r,'制作人回答已送回原任务，按投递收据跟踪继续执行',t);
+    }
+  }
     if(!t.checkpoint||t.status!=='blocked'||r.paused||r.workflow?.error||!modelConnectionFailure(t.checkpoint.reason)||!this.dependenciesReady(r,t))return;
     const key=r.id+':'+t.id;if(this.recovering.has(key)||t.recovery?.phase==='stopped')return;
     const s=this.store.getSession(t.sessionId!);if(!s)return;

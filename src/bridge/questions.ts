@@ -1,6 +1,6 @@
 import {randomUUID} from 'node:crypto';
 import {validateAnswers,type QuestionCard,type UserQuestion} from '../shared/questions.js';
-interface Pending {card:QuestionCard;submit:(answers:Record<string,string[]>)=>Promise<void>;cancel:()=>void;busy:boolean}
+interface Pending {card:QuestionCard;submit:(answers:Record<string,string[]>)=>Promise<void|{sessionId?:string;queued?:boolean}>;cancel:()=>void;busy:boolean}
 export class QuestionBroker {
   private pending=new Map<string,Pending>();private sources=new Map<string,string>();private settled=new Map<string,QuestionCard>();private asking=new Map<string,Promise<Record<string,string[]>|undefined>>();
   constructor(private changed:(card:QuestionCard)=>void){}
@@ -26,7 +26,7 @@ export class QuestionBroker {
     const pending=this.pending.get(id);if(!pending||pending.card.sessionId!==sessionId)throw new Error('问题已回答、失效或不属于此会话，请刷新');
     if(pending.busy)throw new Error('回答正在提交，请勿重复操作');
     const answers=validateAnswers(pending.card.questions,value);pending.busy=true;
-    try{await pending.submit(answers);this.pending.delete(id);this.sources.delete(sessionId+'|'+pending.card.source);pending.cancel();this.finish({...pending.card,status:'answered',answers});}
+    try{const result=await pending.submit(answers);this.pending.delete(id);this.sources.delete(sessionId+'|'+pending.card.source);pending.cancel();this.finish({...pending.card,status:'answered',answers,...result?{delivery:result.queued?'queued' as const:'sent' as const}:{}});return result;}
     catch(error){if((error as {uncertain?:boolean}).uncertain){this.pending.delete(id);pending.cancel();this.finish({...pending.card,status:'unknown'});}else pending.busy=false;throw error;}
   }
   list(sessionId:string){return [...this.pending.values()].filter(p=>p.card.sessionId===sessionId).map(p=>p.card);}
