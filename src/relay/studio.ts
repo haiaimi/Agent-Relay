@@ -115,7 +115,7 @@ export class Studio {
   }
   projects():StudioProject[]{return this.store.db.prepare('SELECT json FROM studio_projects ORDER BY rowid DESC').all().map(r=>JSON.parse(String(r.json)));}
   runs():StudioRun[]{return this.store.db.prepare('SELECT json FROM studio_runs ORDER BY rowid DESC').all().map(r=>JSON.parse(String(r.json)));}
-  state(){return {roles:STUDIO_ROLES.map(([id,name,description])=>({id,name,description})),projects:this.projects(),runs:this.runs()};}
+  state(){return {features:{continuation:true},roles:STUDIO_ROLES.map(([id,name,description])=>({id,name,description})),projects:this.projects(),runs:this.runs()};}
   private project(id:string){const p=this.projects().find(p=>p.id===id);if(!p)throw Error('团队项目不存在');return p;}
   private run(id:string){const r=this.runs().find(r=>r.id===id);if(!r)throw Error('制作需求不存在');return r;}
   private receipt(id?:string){const row=id?this.store.db.prepare('SELECT result FROM actions WHERE id=?').get(id):undefined;return row?.result?JSON.parse(String(row.result)):undefined;}

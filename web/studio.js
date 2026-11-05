@@ -245,10 +245,12 @@ $('brief-form').onsubmit=async e=>{
   e.preventDefault();$('brief-submit').disabled=true;$('brief-error').textContent='';
   try{
     const p=current(),context=briefContext(),draftKey=briefDraftKey();
+    if(briefParent&&!(await api('studio')).features?.continuation)throw Error('服务器尚未支持继续制作，请刷新或等待更新完成后再提交；本次尚未创建需求。');
     const attachmentIds=briefProposal?[]:await briefAttachments.upload(context);
     const payload={projectId:p.id,title:$('brief-title').value,brief:$('brief-text').value,workflow:$('brief-workflow').value,reuseReason:$('brief-reuse').value,flowConfig:readBriefFlow(),recordVideo:$('brief-record-video').checked,attachmentIds};
     if(briefParent){payload.parentRunId=briefParent.id;const key=JSON.stringify(payload);if(briefRequest?.key!==key)briefRequest={key,id:crypto.randomUUID()};payload.requestId=briefRequest.id;saveBrief();}
     const result=briefProposal?await api('studio/brainstorm/launch',{topicId:briefProposal.topicId,proposalId:briefProposal.proposalId,workflow:payload.workflow,reuseReason:payload.reuseReason,flowConfig:payload.flowConfig,recordVideo:payload.recordVideo}).then(r=>({run:{id:r.runId}})):await api('studio/run',payload);
+    if(briefParent&&(result.run.id!==briefRequest.id||result.run.continuation?.parentRunId!==briefParent.id))throw Error('服务器未确认继承上游，请先核对需求 '+result.run.id+'，不要重新提交；续做草稿已保留。');
     // Clear only after a confirmed creation receipt. An uncertain retry reuses requestId.
     if(!briefProposal)briefAttachments.clear(context.key);localStorage.removeItem(draftKey);briefProposal=null;briefParent=null;briefRequest=null;
     activeRun=result.run.id;$('brief-dialog').close();await refresh(true).catch(e=>notify('需求已创建；刷新状态失败，请稍后重试：'+e.message));renderRun();show('run-dialog');

@@ -276,6 +276,7 @@ test('new post-delivery conversations inherit an explicitly configured team perm
 
 test('continuation inherits the delivered project, isolates the new flow, preserves parent and deduplicates uncertain creation retries',async()=>{
  const f=await acceptedDiscussionFixture();try{
+  assert.equal(f.studio.state().features.continuation,true);
   const parent=f.run(),before=JSON.stringify(parent),prepare:Action[]=[],remote=(f.studio as any).remote;
   (f.studio as any).remote=async(host:string,a:Action)=>{if(a.type==='prepare-workspace'){prepare.push(a);return {workspace:{...workspace(a.workspaceId!,f.dir+'-child'),sourcePath:parent.workspace!.value!.project.path,sourceBranch:parent.workspace!.value!.branch}};}return remote(host,a);};
   const bytes=Buffer.from('followup attachment'),file={id:randomUUID(),name:'notes.txt',size:bytes.length,mime:'application/octet-stream',sha256:createHash('sha256').update(bytes).digest('hex')};f.files.put('workstation|project:game',file,bytes);
