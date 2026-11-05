@@ -21,7 +21,7 @@ export function studioAttention({root,getRuns,visible,api,refresh,roleName,revie
         if(!row){const element=el('section','attention-session'),label=el('h3'),questionsRoot=el('div'),approvalRoot=el('div');element.append(label,questionsRoot,approvalRoot);row={element,label,approvalRoot,questionRoot:questionsRoot,entry,approvalVersion:''};
           row.panel=new QuestionPanel(questionsRoot,(card,answers)=>submit(row.entry,'answer:'+card.id+':'+JSON.stringify(answers),{type:'answer',questionId:card.id,answers}),()=>online(row.entry),message=>{status.textContent=message;});rows.set(key,row);body.insertBefore(element,body.firstChild);
         }
-        row.entry=entry;row.label.textContent=r.title+' · '+roleName(entry.role)+(entry.taskId?' · '+entry.taskId+' '+entry.title:'');
+        row.entry=entry;row.element.dataset.taskId=entry.taskId||'';row.element.dataset.runId=r.id;row.label.textContent=r.title+' · '+roleName(entry.role)+(entry.taskId?' · '+entry.taskId+' '+entry.title:'');
         if(!row.waiting){row.waiting=el('p','fine');row.element.append(row.waiting);}row.waiting.hidden=!!(entry.questions.length||entry.approvals.length);row.waiting.textContent=entry.online?(entry.syncFailures?'具体确认内容暂未同步；已保留原任务，连接失败按一分钟间隔尝试五次。':'正在从执行器同步具体确认内容…'):'工作电脑离线，待确认内容保留，连接恢复后可处理。';
         for(const card of entry.questions)row.panel.event(card);row.panel.reconcile(entry.questions,snapshots.get(r.id).checkedAt);row.panel.render();
         const version=JSON.stringify([entry.approvals,online(entry),entry.approvals.map(a=>writes.get('approve:'+a.approvalId))]);
@@ -38,7 +38,7 @@ export function studioAttention({root,getRuns,visible,api,refresh,roleName,revie
         const gates=r.tasks.filter(t=>t.status==='awaiting-review');
         const items=[...gates,...r.status==='plan-review'?[{id:'plan',mode:'plan'}]:[],...r.status==='review'?[{id:'final',mode:'final'}]:[]];
         for(const gate of items){const key=r.id+':'+gate.id;wantedReviews.add(key);const upstream=r.tasks.filter(t=>gate.dependencies?.includes(t.id)),version=JSON.stringify([gate,upstream.map(t=>[t.id,t.summary,t.artifacts]),gate.mode==='final'?r.delivery:null]);let row=reviews.get(key);
-          if(row?.version!==version){const element=el('section','attention-review');element.append(el('h3','',r.title+' · '+(gate.title||gate.mode==='plan'&&'确认制作计划'||'验收交付')));const content=review(r,gate);if(content)element.append(content);if(row){disposeMedia(row.element);row.element.replaceWith(element);}else body.append(element);row={element,version};reviews.set(key,row);}count++;
+          if(row?.version!==version){const element=el('section','attention-review');element.dataset.taskId=gate.id;element.dataset.runId=r.id;element.append(el('h3','',r.title+' · '+(gate.title||gate.mode==='plan'&&'确认制作计划'||'验收交付')));const content=review(r,gate);if(content)element.append(content);if(row){disposeMedia(row.element);row.element.replaceWith(element);}else body.append(element);row={element,version};reviews.set(key,row);}count++;
         }
       }
     }

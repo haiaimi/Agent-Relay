@@ -30,6 +30,7 @@ const staticFiles: Record<string,[string,string]> = {
   '/studio-attention.js':['studio-attention.js','text/javascript; charset=utf-8'],
   '/studio-api.js':['studio-api.js','text/javascript; charset=utf-8'],
   '/studio-repairs.js':['studio-repairs.js','text/javascript; charset=utf-8'],
+  '/studio-task-focus.js':['studio-task-focus.js','text/javascript; charset=utf-8'],
   '/workspace-shell.js':['workspace-shell.js','text/javascript; charset=utf-8'],
   '/workspace-shell.css':['workspace-shell.css','text/css; charset=utf-8'],
   '/studio':['index.html','text/html; charset=utf-8'],
@@ -75,7 +76,7 @@ async function body(req: IncomingMessage,limit=64_000): Promise<any> {
   return JSON.parse(text || '{}');
 }
 export function createRelay(options: Options) {
-  const uiRevision=createHash('sha256').update(['studio.js','studio-repairs.js','studio-attention.js','studio.css','studio.html','workspace-shell.js','app.js'].map(file=>readFileSync(fileURLToPath(new URL(`../../web/${file}`,import.meta.url)))).reduce((all,part)=>Buffer.concat([all,part]),Buffer.alloc(0))).digest('hex');
+  const uiRevision=createHash('sha256').update(['studio.js','studio-task-focus.js','studio-repairs.js','studio-attention.js','studio.css','studio.html','workspace-shell.js','app.js'].map(file=>readFileSync(fileURLToPath(new URL(`../../web/${file}`,import.meta.url)))).reduce((all,part)=>Buffer.concat([all,part]),Buffer.alloc(0))).digest('hex');
   if(options.turn)turnCredentials(options.turn);
   requireSecret(options.phoneToken,'PHONE_TOKEN'); requireSecret(options.bridgeToken,'BRIDGE_TOKEN');
   if (equalSecret(options.phoneToken, options.bridgeToken)) throw new Error('Use separate phone and bridge secrets');
