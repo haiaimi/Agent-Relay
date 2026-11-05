@@ -1,7 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 // @ts-ignore Browser keyboard controller is exercised as shipped.
-import {setupComposerKeys} from '../web/composer.js';
+import {setupComposerKeys,setupReplyKeys} from '../web/composer.js';
 
 function fixture(){
   const handlers=new Map<string,Function>();let time=1000,submitted=0,completed=0,hidden=0,moves:number[]=[],open=false;
@@ -28,4 +28,21 @@ test('command menu completes first, sends exact standalone commands and keeps na
   f.input.value='/btw';f.menu({name:'btw',argumentHint:'<question>'});f.key();assert.equal(f.result().completed,2);assert.equal(f.result().submitted,1);
   assert.equal(f.key({shiftKey:true}),false);f.key({key:'Escape'});assert.equal(f.result().hidden,2);
   f.menu({name:'usage'});f.key({key:'Tab'});assert.equal(f.result().completed,3);
+});
+
+test('studio PC replies submit the existing form once and respect IME, newlines and disabled send buttons',()=>{
+ const handlers=new Map<string,Function>(),button={disabled:false},submitted:unknown[]=[];
+ const input={addEventListener:(name:string,fn:Function)=>handlers.set(name,fn),form:{requestSubmit:(b:unknown)=>submitted.push(b)}};
+ setupReplyKeys(input,button,()=>true);
+ const key=(extra:any={})=>{let prevented=false;handlers.get('keydown')!({key:'Enter',preventDefault:()=>prevented=true,...extra});return prevented;};
+ assert.equal(key({shiftKey:true}),false);assert.equal(key({isComposing:true}),false);assert.equal(key({keyCode:229}),false);assert.equal(submitted.length,0);
+ assert.equal(key(),true);assert.deepEqual(submitted,[button]);key({repeat:true});assert.equal(submitted.length,1);
+ button.disabled=true;key();assert.equal(submitted.length,1);button.disabled=false;key();assert.equal(submitted.length,2);
+});
+
+test('studio touch keyboards retain Enter newlines, including key repeats',()=>{
+ const handlers=new Map<string,Function>();let submitted=0;
+ setupReplyKeys({addEventListener:(name:string,fn:Function)=>handlers.set(name,fn),form:{requestSubmit:()=>submitted++}},{disabled:false},()=>false);
+ for(const repeat of [false,true]){let prevented=false;handlers.get('keydown')!({key:'Enter',repeat,preventDefault:()=>prevented=true});assert.equal(prevented,false);}
+ assert.equal(submitted,0);
 });

@@ -1,4 +1,5 @@
 import {displayUserMessage} from './message-text.js';
+import {setupReplyKeys} from './composer.js';
 import {enhanceDiagrams} from './diagrams.js';
 import {pagedConversationCache} from './conversation-cache.js';
 import {AttachmentInput} from './attachments.js';
@@ -142,6 +143,7 @@ export function studioChat({snapshot,api,refresh,roleName,notify}){
     try{const ids=await files.upload(target),result=await api(targetRole==='team'?'studio/group':'studio/chat',{id:messageId,runId:targetRun,...targetRole==='team'?{roles:mentionedRoles(content,p.roles,roleName,$('chat-recipient').value)}:{role:targetRole,sessionId:targetSession||undefined},text:content,attachmentIds:ids});files.clear(target.key);$('chat-text').value='';saveDraft();messageId=null;newConversation=false;sessionId=result.sessionId||'';await refresh(true);renderHeader();signature='';await load();notify(targetRole==='team'?(result.post.deliveries.some(d=>d.status!=='sent')?'群消息已保存，请核对各角色的投递状态':'群消息已保存'+(result.post.roles.length?'，已请指定角色回应':'')):result.queued?'消息已排队，可在消息旁点“立即引导”':'消息已发送');}
     catch(e){$('chat-error').textContent=e.message;}finally{sending=false;renderHeader();}
   };
+  setupReplyKeys($('chat-text'),$('chat-submit'));
   $('chat-dialog').addEventListener('close',()=>{cache.save();saveDraft();generation++;});
   return {open(id,targetRole='director',targetSession=''){cache.save();if($('chat-dialog').open)saveDraft();runId=id;role=targetRole;newConversation=false;sessionId=targetSession;mobileDetail=!!targetSession;listScroll=0;channelData.clear();lastChannelsAt=0;rolesSignature='';reset();renderHeader();restore();if(!$('chat-dialog').open)$('chat-dialog').showModal();void loadChannels(true);void load();},update(){if($('chat-dialog').open){void loadChannels();const before=sessionId;renderHeader();if(before!==sessionId){reset();renderHeader();}if(Date.now()-lastLoadAt>1200)void load();}}};
 }

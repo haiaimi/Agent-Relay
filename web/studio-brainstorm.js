@@ -1,4 +1,5 @@
 import {displayUserMessage} from './message-text.js';
+import {setupReplyKeys} from './composer.js';
 import {AttachmentInput} from './attachments.js';
 import {mediaCard,disposeMedia,clipboardFiles} from './studio-media.js';
 import {QuestionPanel} from './questions.js';
@@ -111,6 +112,7 @@ export function studioBrainstorm({snapshot,api,refresh,current,notify,openRun,co
   $('brainstorm-model').onchange=()=>changeSettings(true);$('brainstorm-effort').onchange=()=>changeSettings(false);
   $('brainstorm-new-form').onsubmit=async e=>{e.preventDefault();const projectId=current()?.id;$('brainstorm-create').disabled=true;try{const result=await api('studio/brainstorm',{projectId,title:$('brainstorm-new-title').value,model:$('brainstorm-new-model').value,effort:$('brainstorm-new-effort').value});await refresh(true);$('brainstorm-new-dialog').close();open(result.topic.id);}catch(e){$('brainstorm-new-error').textContent=e.message;}finally{$('brainstorm-create').disabled=false;}};
   $('brainstorm-text').addEventListener('input',()=>{requestId=null;save();});$('brainstorm-form').onsubmit=e=>{e.preventDefault();void send();};
+  setupReplyKeys($('brainstorm-text'),$('brainstorm-send'));
   $('brainstorm-propose').onclick=()=>void send('请把我们已讨论并认可的方向整理为可执行制作提案，调用 propose_task，明确目标、范围、验收标准与参考图；如果关键方向尚不明确，先问我。');
   $('brainstorm-stop').onclick=async()=>{try{await action({type:'stop'});await refresh(true);await load();}catch(e){error(e.message);}};
   $('brainstorm-earlier').onclick=()=>void load(cursor);$('brainstorm-dialog').addEventListener('close',()=>{cache.save();save();generation++;loading=false;});
