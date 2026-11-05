@@ -133,3 +133,11 @@ main{max-width:1160px}.workspace-bar{background:transparent}.stat{background:tra
 .delivery-media-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr));gap:16px}.delivery-media-grid figure{margin:0;padding:12px;background:var(--surface,#171717);border:1px solid var(--line,#333);border-radius:12px}.delivery-media-grid figcaption{margin-bottom:10px;text-align:left}.delivery-media-grid img,.delivery-media-grid video{display:block;width:100%;height:auto;max-height:480px;object-fit:contain}.delivery-media-grid img[hidden]{display:none}
 
 .chat-compose-actions .permission-toggle{min-height:34px;padding:0 7px;font-size:12px}.chat-compose-actions .permission-toggle[hidden]{display:none}.chat-compose-actions #chat-permission-toggle[data-mode="full"]{color:#ff934d;background:#ff934d15}#chat-permission-menu{max-width:360px;height:auto;text-align:left}#chat-permission-menu .dialog-heading{margin-bottom:10px}#chat-permission-menu .permission-option{justify-content:flex-start;min-height:0}#chat-permission-menu::backdrop{background:transparent;backdrop-filter:none}@media(max-width:800px){.chat-compose-actions .permission-toggle{font-size:11px;padding:0 5px;min-height:36px}}
+
+/* Keep detail window controls visible; only the delivery content scrolls. */
+:is(#run-dialog,#task-dialog){--detail-space:28px;padding:0;overflow:hidden}
+:is(#run-dialog,#task-dialog)[open]{display:flex;flex-direction:column}
+:is(#run-dialog,#task-dialog)>.dialog-heading{flex:none;gap:16px;margin:0;padding:var(--detail-space);border-bottom:1px solid var(--line)}
+:is(#run-dialog,#task-dialog)>.dialog-heading>div{min-width:0;flex:1;overflow-wrap:anywhere}
+:is(#run-content,#task-content){min-height:0;overflow:auto;overscroll-behavior:contain;padding:20px var(--detail-space) var(--detail-space);scrollbar-gutter:stable}
+@media(max-width:800px){:is(#run-dialog,#task-dialog){--detail-space:20px}:is(#run-dialog,#task-dialog)>.dialog-heading{padding-block:16px}}
