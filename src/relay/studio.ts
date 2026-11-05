@@ -521,6 +521,8 @@ export class Studio {
     if(r.workspace?.status!=='ready')throw Error('工作副本尚未就绪');
     const session=t.sessionId?this.store.getSession(t.sessionId):undefined;
     if(t.sessionId&&(!session||session.hostId!==p.hostId||session.projectId!==this.execution(r).id))throw Error('执行会话不属于当前工作副本');
+    const priorReceipt=t.actionId?this.store.db.prepare('SELECT result FROM actions WHERE id=?').get(t.actionId):undefined;
+    if(t.sessionId&&(priorReceipt&&!priorReceipt.result||session?.status==='history'||t.status==='blocked'&&!['idle','failed','interrupted','waiting'].includes(session?.status??'')))throw Error('上次任务投递或执行状态尚未确认，请先核对原会话，不会重复启动');
     if(session?.questionCount||session?.status==='waiting')throw Error('请先在本页回答待确认问题或批准操作；指引不能代替审批');
     if(t.sessionId&&!this.online(p.hostId))throw Error('工作电脑离线，请上线后投递指引');
     if(t.sessionId&&!this.dependenciesReady(r,t))throw Error('前置步骤或制作人审批未完成');

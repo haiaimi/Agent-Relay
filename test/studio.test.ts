@@ -49,6 +49,14 @@ test('running stage guidance steers its acknowledged queued input without anothe
     const s=f.store.getSession(t.sessionId!)!;f.store.session({...s,status:'waiting',questionCount:1});await assert.rejects(f.studio.guideTask({...request,id:randomUUID()}),/待确认问题/);assert.equal(f.actions.length,count);
   }finally{await f.close();}
 });
+
+test('stage guidance cannot dispatch over an unconfirmed task receipt',async()=>{
+  const f=await fixture();try{
+    f.studio.saveProject({...f.project,reviewPlan:false});f.studio.createRun({workflow:'general',projectId:f.project.id,title:'未知回执',brief:'不能启动第二个 writer'});await f.settle();f.finish(f.run().planner,plan([task('a')]));await f.settle();
+    const t=f.run().tasks[0],count=f.actions.length;f.store.db.prepare('UPDATE actions SET result=NULL WHERE id=?').run(t.actionId!);
+    await assert.rejects(f.studio.guideTask({id:randomUUID(),runId:f.run().id,taskId:t.id,expectedSessionId:t.sessionId,text:'保留当前任务'}),/尚未确认/);assert.equal(f.actions.length,count);assert.equal(f.run().directions,undefined);
+  }finally{await f.close();}
+});
 const skipRequest=(run:any,t:any,reason='保留角度问题，先交给独立 QA 检查')=>({op:'skip-task',runId:run.id,taskId:t.id,feedback:reason,expectedActionId:t.actionId??null,expectedFinishedAt:t.finishedAt??null});
 const selectedFlow=(stages:string[],approvals={})=>({template:'custom',stages,approvals:{plan:false,design:false,visual:false,scene:false,final:false,...approvals}});
 async function fixture(prepareFailure=false,inspectVisual:()=>Promise<{sha256:string}>=async()=>({sha256:'a'.repeat(64)})){
