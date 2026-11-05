@@ -214,7 +214,7 @@ test('accepted task replies start separate followups with scoped attachments and
   const r=f.run(),before=productionSnapshot(r),source=r.tasks[0].sessionId!,bytes=Buffer.from('review notes'),id=randomUUID();
   const file=f.files.put('workstation|'+source,{id,name:'review.txt',size:bytes.length,mime:'text/plain',sha256:createHash('sha256').update(bytes).digest('hex')},bytes);
   const request={id:randomUUID(),runId:r.id,role:'engineering',sessionId:source,text:'我怎样在本机验收？',attachmentIds:[file.id]},receipt=await f.studio.chat(request),action=f.actions.at(-1)!;
-  assert.equal(action.type,'start');assert.notEqual(receipt.sessionId,source);assert.equal(action.projectId,'studio-'+r.id);assert.equal(action.permissionMode,'request');assert.match(action.text!,/已交付需求的只读后续讨论/);assert.match(action.text!,/没有可运行新房间/);
+  assert.equal(action.type,'start');assert.notEqual(receipt.sessionId,source);assert.equal(action.projectId,'studio-'+r.id);assert.equal(action.permissionMode,'request');assert.match(action.text!,/已交付需求的后续讨论与本机试玩/);assert.match(action.text!,/没有可运行新房间/);
   const upload=f.actions.find(a=>a.type==='upload'&&a.upload?.file.id===file.id)!;assert.equal(upload.upload!.scope,'workstation|project:studio-'+r.id);assert.equal(Buffer.from(upload.upload!.data,'base64').toString(),bytes.toString());
   assert.equal(f.files.refs('workstation|project:studio-'+r.id,[file.id])[0].id,file.id);assert.equal(f.run().chats?.at(-1)?.sourceSessionId,source);assert.equal(f.run().chats?.at(-1)?.afterDelivery,true);assert.equal(productionSnapshot(f.run()),before);
   const count=f.actions.length;assert.equal((await f.studio.chat(request)).sessionId,receipt.sessionId);assert.equal(f.actions.length,count);
@@ -239,6 +239,16 @@ test('uncertain followup starts on accepted deliveries do not retry or permit a 
   (f.studio as any).remote=async()=>{attempts++;throw Error('connection dropped after dispatch');};
   await assert.rejects(f.studio.chat(request),/connection dropped/);await assert.rejects(f.studio.chat(request),/结果未确认/);await assert.rejects(f.studio.chat({...request,id:randomUUID()}),/启动结果未确认/);assert.equal(attempts,1);assert.equal(productionSnapshot(f.run()),before);
   await f.studio.command({op:'resolve-chat',runId:r.id,actionId:request.id,confirmedNotStarted:true});assert.equal(f.run().chats?.at(-1)?.resolved,true);assert.equal(productionSnapshot(f.run()),before);
+ }finally{await f.close();}
+});
+
+test('chat playtest requests carry the actual worktree and verified-launch rules through direct, continued and group replies',async()=>{
+ const f=await acceptedDiscussionFixture();try{
+  const r=f.run(),before=productionSnapshot(r),reply=await f.studio.chat({id:randomUUID(),runId:r.id,role:'director',sessionId:r.delivery!.sessionId,text:'启动这个场景'});
+  const assertLaunchContext=(action:Action)=>{validateAction(action);assert.match(action.text!,/当前需求 worktree 绝对路径/);assert.ok(action.text!.includes(f.dir));assert.ok(action.text!.includes(r.workspace!.value!.branch));assert.match(action.text!,/可复制的 Windows PowerShell 启动命令/);assert.match(action.text!,/可以直接调用本机工具启动已经存在的本需求场景或程序/);assert.match(action.text!,/不编造启动命令、不自动补做场景/);assert.match(action.text!,/启动结果未知时先查 PID 和日志，不重复拉起/);assert.match(action.text!,/PID、日志路径和实际就绪\/失败证据/);};
+  assertLaunchContext(f.actions.at(-1)!);assert.equal(f.actions.at(-1)!.type,'start');
+  await f.studio.chat({id:randomUUID(),runId:r.id,role:'director',sessionId:reply.sessionId,text:'也把对应的 worktree 路径和启动方式告诉我'});assertLaunchContext(f.actions.at(-1)!);assert.equal(f.actions.at(-1)!.type,'send');
+  const group=await f.studio.groupChat({id:randomUUID(),runId:r.id,roles:['engineering'],text:'请启动本需求的游戏场景'});assert.equal(group.post.deliveries[0].status,'sent');assertLaunchContext(f.actions.at(-1)!);assert.equal(productionSnapshot(f.run()),before);
  }finally{await f.close();}
 });
 test('studio routes independent role sessions through plan confirmation, dependencies, QA, delivery and acceptance',async()=>{
