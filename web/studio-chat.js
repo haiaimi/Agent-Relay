@@ -5,12 +5,12 @@ import {enhanceDiagrams} from './diagrams.js';
 import {pagedConversationCache} from './conversation-cache.js';
 import {AttachmentInput} from './attachments.js';
 import {mediaCard,disposeMedia,clipboardFiles} from './studio-media.js';
-import {QuestionPanel} from './questions.js';
+import {studioAttention} from './studio-attention.js';
 import {roleAvatar} from './studio-avatar.js';
 import {runTasks,roleSessions,reviewMessages,roleRecords,taskStatus,groupMessages,mentionedRoles} from './studio-review.js';
 const $=id=>document.getElementById(id),el=(tag,cls,text)=>{const n=document.createElement(tag);n.className=cls||'';if(text!==undefined)n.textContent=text;return n;};
-export function studioChat({snapshot,api,refresh,roleName,notify}){
-  let lastLoadAt=0,lastChannelsAt=0,channelsJob,mobileDetail=false,listScroll=0;
+export function studioChat({snapshot,api,refresh,roleName,notify,review}){
+  let channelFailures=0,channelRetryAt=0,readFailures=0,readRetryAt=0,lastLoadAt=0,lastChannelsAt=0,channelsJob,mobileDetail=false,listScroll=0;
   const mobile=window.matchMedia('(max-width: 800px)'),channelData=new Map();
   let runId,role='director',sessionId='',generation=0,loading=false,sending=false,signature='',lastTarget='',messageId=null,newConversation=false;
   const drafts=new Map(),pages=new Map(),rows=new Map(),seen=new Set(),expanded=new Set();
@@ -52,10 +52,10 @@ export function studioChat({snapshot,api,refresh,roleName,notify}){
   let outsidePress=false;const outside=e=>{const r=permissionMenu.getBoundingClientRect();return e.target===permissionMenu&&(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom);};
   permissionMenu.addEventListener('pointerdown',e=>{outsidePress=e.isPrimary&&e.button===0&&outside(e);});permissionMenu.addEventListener('pointercancel',()=>{outsidePress=false;});permissionMenu.addEventListener('click',e=>{if(outsidePress&&outside(e)){e.preventDefault();e.stopPropagation();permissionMenu.close();}outsidePress=false;});
   for(const option of permissionMenu.querySelectorAll('[data-permission]'))option.onclick=async()=>{if(option.disabled)return;const mode=option.dataset.permission,key=permissionKey();permissionErrors.delete(key);$('chat-error').textContent='';try{await permissionWrites.set(key,{permissionMode:mode});if(permissionMenu.dataset.target===key)permissionMenu.close();}catch{};};
-  const questions=new QuestionPanel($('chat-questions'),(card,answers)=>action({type:'answer',questionId:card.id,answers}),()=>snapshot().relay.hosts.some(h=>h.id===team()?.hostId&&h.online),notify);
+  const attention=studioAttention({root:$('chat-attention'),getRuns:()=>run()?[run()]:[],visible:()=>$('chat-dialog').open&&!document.hidden,api,refresh,roleName,review});
   function saveDraft(){drafts.set(key(),$('chat-text').value);localStorage.setItem('studio-chat-draft:'+key(),$('chat-text').value);}
   $('chat-text').oninput=()=>{saveDraft();messageId=null;};
-  function reset(){generation++;loading=false;loadJob=null;lastLoadAt=0;signature='';contextSignature='';lastTarget='';historyCursor=null;pages.clear();rows.clear();seen.clear();expanded.clear();disposeMedia($('chat-timeline'));$('chat-timeline').replaceChildren();$('chat-approvals').replaceChildren();$('chat-cache-note').textContent='';$('chat-earlier').hidden=true;questions.reset();}
+  function reset(){generation++;loading=false;loadJob=null;lastLoadAt=0;signature='';contextSignature='';lastTarget='';historyCursor=null;pages.clear();rows.clear();seen.clear();expanded.clear();disposeMedia($('chat-timeline'));$('chat-timeline').replaceChildren();$('chat-approvals').replaceChildren();$('chat-cache-note').textContent='';$('chat-earlier').hidden=true;readFailures=0;readRetryAt=0;}
   function syncView(){
     const detail=!mobile.matches||mobileDetail;$('chat-dialog').dataset.chatView=detail?'conversation':'list';$('chat-back').hidden=!mobile.matches||!mobileDetail;
     if(!detail&&run()){$('chat-title').textContent=run().title+' · 职能会话';$('chat-branch').textContent='团队群聊与 '+team().roles.filter(a=>a.enabled).length+' 位角色';}
@@ -75,8 +75,8 @@ export function studioChat({snapshot,api,refresh,roleName,notify}){
     }));list.scrollTop=scroll;
   }
   async function loadChannels(force=false){
-    if(!$('chat-dialog').open||channelsJob||!force&&Date.now()-lastChannelsAt<4000)return;lastChannelsAt=Date.now();const target=runId,job={};channelsJob=job;
-    try{const value=await api('studio/channels?'+new URLSearchParams({runId:target}));if(target!==runId)return;channelData.clear();for(const c of value.channels)channelData.set(c.role,c);renderChannels(run(),team());}catch(e){if(target===runId&&mobile.matches&&!mobileDetail)$('chat-branch').textContent='消息摘要暂不可用 · 点击职能查看已同步记录';}finally{if(channelsJob===job)channelsJob=null;}
+    if(!$('chat-dialog').open||channelsJob||!force&&(Date.now()-lastChannelsAt<4000||Date.now()<channelRetryAt||channelFailures>=5))return;if(force){channelFailures=0;channelRetryAt=0;}lastChannelsAt=Date.now();const target=runId,job={};channelsJob=job;
+    try{const value=await api('studio/channels?'+new URLSearchParams({runId:target}));if(target!==runId)return;channelFailures=0;channelRetryAt=0;channelData.clear();for(const c of value.channels)channelData.set(c.role,c);renderChannels(run(),team());}catch(e){channelFailures++;channelRetryAt=Date.now()+60000;if(target===runId&&mobile.matches&&!mobileDetail)$('chat-branch').textContent='消息摘要暂不可用 · 点击职能查看已同步记录';}finally{if(channelsJob===job)channelsJob=null;}
   }
   $('chat-back').onclick=()=>{saveDraft();if($('chat-form').contains(document.activeElement))document.activeElement.blur();mobileDetail=false;syncView();$('chat-roles').scrollTop=listScroll;void loadChannels(true);};
   mobile.addEventListener('change',()=>{if($('chat-dialog').open){renderHeader();void load();}});
@@ -149,9 +149,9 @@ export function studioChat({snapshot,api,refresh,roleName,notify}){
     if(older||!bottom&&seen.size){if(anchor?.isConnected)timeline.scrollTop+=anchor.getBoundingClientRect().top-offset;else if(older)timeline.scrollTop+=timeline.scrollHeight-oldHeight;}else timeline.scrollTop=timeline.scrollHeight;
     if(order.length)seen.add(sessionId||role);
   }
-  function approvals(page){const map=new Map();for(const e of page.events??[]){const d=e.data;if(e.type==='approval')map.set(d.approvalId,d);if(e.type==='approval.resolved')map.delete(d.approvalId);}const root=$('chat-approvals');root.replaceChildren();for(const [id,a]of map){if(a.expiresAt<Date.now())continue;const box=el('div','approval-card');box.append(el('strong','','需要工具批准'),el('pre','',a.description||a.command||JSON.stringify(a)));for(const [label,allow]of [['允许这一次',true],['拒绝',false]]){const b=el('button','quiet',label);b.onclick=async()=>{b.disabled=true;try{await action({type:'approve',approvalId:id,allow});signature='';await load();}catch(e){notify(e.message);b.disabled=false;}};box.append(b);}root.append(box);}}
   async function load(cursor){
     if(mobile.matches&&!mobileDetail)return;
+    if(cursor===undefined&&(Date.now()<readRetryAt||readFailures>=5))return;
     cache.load();
     if(role==='team')return loadGroup(cursor);
     if(loading||!$('chat-dialog').open||!sessionId)return;loading=true;lastLoadAt=Date.now();const job={};loadJob=job;const stamp=generation,target=sessionId;try{
@@ -159,23 +159,23 @@ export function studioChat({snapshot,api,refresh,roleName,notify}){
       pages.set(cursor===undefined?'latest':String(cursor),page);renderTimeline(cursor!==undefined);
       if(cursor!==undefined||pages.size===1)historyCursor=page.cursor??null;$('chat-earlier').hidden=historyCursor===null;$('chat-earlier').dataset.cursor=String(historyCursor??'');
       $('chat-cache-note').textContent=page.cached?'电脑暂不可达，正在显示已同步的记录。':'';
-      if(cursor===undefined){approvals(page);for(const event of page.events??[])if(['question','question.resolved'].includes(event.type))questions.event(event.data);if(!page.cached)questions.reconcile(page.questions??[],page.questionsAsOf??Infinity);questions.render();}
+      readFailures=0;readRetryAt=0;attention.update();
       cache.save();
-    }catch(e){if(stamp===generation)$('chat-error').textContent=e.message;}finally{if(loadJob===job)loading=false;}
+    }catch(e){if(stamp===generation){readFailures++;readRetryAt=Date.now()+60000;$('chat-cache-note').textContent=e.message+(readFailures<5?' 一分钟后重试（'+readFailures+'/5）。':' 已尝试五次，请重新打开对话刷新。');}}finally{if(loadJob===job)loading=false;}
   }
   async function loadGroup(cursor){
     if(loading||!$('chat-dialog').open)return;loading=true;lastLoadAt=Date.now();const job={},stamp=generation;loadJob=job;
-    try{const page=await api('studio/group?'+new URLSearchParams({runId,...cursor?{before:String(cursor)}:{}}));if(stamp!==generation||role!=='team')return;pages.set(cursor?'before:'+cursor:'latest',page);renderTimeline(!!cursor);if(cursor||pages.size===1)historyCursor=page.cursor;$('chat-earlier').hidden=!historyCursor;$('chat-earlier').dataset.cursor=historyCursor||'';$('chat-cache-note').textContent='';cache.save();}catch(e){if(stamp===generation)$('chat-error').textContent=e.message;}finally{if(loadJob===job)loading=false;}
+    try{const page=await api('studio/group?'+new URLSearchParams({runId,...cursor?{before:String(cursor)}:{}}));if(stamp!==generation||role!=='team')return;pages.set(cursor?'before:'+cursor:'latest',page);renderTimeline(!!cursor);if(cursor||pages.size===1)historyCursor=page.cursor;$('chat-earlier').hidden=!historyCursor;$('chat-earlier').dataset.cursor=historyCursor||'';$('chat-cache-note').textContent='';readFailures=0;readRetryAt=0;cache.save();}catch(e){if(stamp===generation){readFailures++;readRetryAt=Date.now()+60000;$('chat-cache-note').textContent=e.message+(readFailures<5?' 一分钟后重试（'+readFailures+'/5）。':' 已尝试五次，请重新打开对话刷新。');}}finally{if(loadJob===job)loading=false;}
   }
   $('chat-session').onchange=()=>{cache.save();saveDraft();newConversation=false;sessionId=$('chat-session').value;reset();renderHeader();void load();};
   $('chat-earlier').onclick=()=>void load(role==='team'?$('chat-earlier').dataset.cursor:Number($('chat-earlier').dataset.cursor));
   $('chat-new').onclick=()=>{if(sending)return;cache.save();saveDraft();newConversation=true;sessionId='';reset();renderHeader();sessionId='';$('chat-session').value='';$('chat-status').textContent='下一条消息将开启新的角色对话';};
   $('chat-stop').onclick=async()=>{try{await action({type:'stop'});await refresh(true);renderHeader();}catch(e){notify(e.message);}};
-  $('chat-form').onsubmit=async e=>{e.preventDefault();if(sending)return;const r=run(),p=team(),content=$('chat-text').value;if(selection()?.archived)return;if(!content.trim()&&!files.count)return;const target=context(),targetRole=role,targetRun=runId,targetSession=sessionId;messageId??=crypto.randomUUID();sending=true;renderHeader();$('chat-error').textContent='';
-    try{const key=JSON.stringify([targetRun,targetRole,targetSession||'']);await permissionWrites.wait(key);if(permissionErrors.has(key))throw Error('权限设置未确认，请先核对权限');const ids=await files.upload(target),result=await api(targetRole==='team'?'studio/group':'studio/chat',{id:messageId,runId:targetRun,...targetRole==='team'?{roles:mentionedRoles(content,p.roles,roleName,$('chat-recipient').value)}:{role:targetRole,sessionId:targetSession||undefined},text:content,attachmentIds:ids});files.clear(target.key);$('chat-text').value='';saveDraft();messageId=null;newConversation=false;sessionId=result.sessionId||'';await refresh(true);renderHeader();signature='';await load();notify(targetRole==='team'?(result.post.deliveries.some(d=>d.status!=='sent')?'群消息已保存，请核对各角色的投递状态':'群消息已保存'+(result.post.roles.length?'，已请指定角色回应':'')):result.queued?'消息已排队，可在消息旁点“立即引导”':'消息已发送');}
-    catch(e){$('chat-error').textContent=e.message;}finally{sending=false;renderHeader();}
+  $('chat-form').onsubmit=async e=>{e.preventDefault();if(sending)return;const r=run(),p=team(),content=$('chat-text').value;if(selection()?.archived)return;if(!content.trim()&&!files.count)return;const target=context(),targetRole=role,targetRun=runId,targetSession=sessionId;messageId??=crypto.randomUUID();sending=true;let confirmed=false;renderHeader();$('chat-error').textContent='';
+    try{const key=JSON.stringify([targetRun,targetRole,targetSession||'']);await permissionWrites.wait(key);if(permissionErrors.has(key))throw Error('权限设置未确认，请先核对权限');const ids=await files.upload(target),result=await api(targetRole==='team'?'studio/group':'studio/chat',{id:messageId,runId:targetRun,...targetRole==='team'?{roles:mentionedRoles(content,p.roles,roleName,$('chat-recipient').value)}:{role:targetRole,sessionId:targetSession||undefined},text:content,attachmentIds:ids});confirmed=true;files.clear(target.key);$('chat-text').value='';saveDraft();messageId=null;newConversation=false;sessionId=result.sessionId||'';await refresh(true);renderHeader();signature='';await load();notify(targetRole==='team'?(result.post.deliveries.some(d=>d.status!=='sent')?'群消息已保存，请核对各角色的投递状态':'群消息已保存'+(result.post.roles.length?'，已请指定角色回应':'')):result.queued?'消息已排队，可在消息旁点“立即引导”':'消息已发送');}
+    catch(e){if(confirmed){$('chat-cache-note').textContent='消息已送达，进度暂未同步；请勿重复发送。';notify('消息已送达，正在恢复状态同步');}else $('chat-error').textContent=e.message;}finally{sending=false;renderHeader();}
   };
   setupReplyKeys($('chat-text'),$('chat-submit'));
   $('chat-dialog').addEventListener('close',()=>{cache.save();saveDraft();generation++;});
-  return {open(id,targetRole='director',targetSession=''){cache.save();if($('chat-dialog').open)saveDraft();runId=id;role=targetRole;newConversation=false;sessionId=targetSession;mobileDetail=!!targetSession;listScroll=0;channelData.clear();lastChannelsAt=0;rolesSignature='';reset();renderHeader();restore();if(!$('chat-dialog').open)$('chat-dialog').showModal();void loadChannels(true);void load();},update(){if($('chat-dialog').open){void loadChannels();const before=sessionId;renderHeader();if(before!==sessionId){reset();renderHeader();}if(Date.now()-lastLoadAt>1200)void load();}}};
+  return {resetAttention:()=>attention.reset(),updateAttention:()=>attention.update(),open(id,targetRole='director',targetSession=''){cache.save();if($('chat-dialog').open)saveDraft();runId=id;role=targetRole;newConversation=false;sessionId=targetSession;mobileDetail=!!targetSession;listScroll=0;channelData.clear();lastChannelsAt=0;rolesSignature='';reset();renderHeader();restore();if(!$('chat-dialog').open)$('chat-dialog').showModal();attention.update();void loadChannels(true);void load();},update(){if($('chat-dialog').open){attention.update();void loadChannels();const before=sessionId;renderHeader();if(before!==sessionId){reset();renderHeader();}if(Date.now()-lastLoadAt>1200)void load();}}};
 }

@@ -17,6 +17,7 @@ import {StudioPreviews} from './studio-previews.js';
 import {Brainstorms} from './brainstorm.js';
 import {Studio} from './studio.js';
 import {QuestionAnswers} from './question-answers.js';
+import {StudioAttention} from './studio-attention.js';
 
 interface Options { dataDir: string; phoneToken: string; bridgeToken: string; publicOrigin?: string;turn?:TurnConfig }
 function publicAgents(value:any){if(value===undefined)return undefined;if(!Array.isArray(value)||value.length>32)throw Error('Invalid agent catalog');return value.map(a=>{if(!/^[a-zA-Z0-9_-]{1,60}$/.test(a.id)||!['codex','claude','api'].includes(a.provider)||typeof a.name!=='string'||a.name.length>80)throw Error('Invalid agent');return {id:a.id,provider:a.provider,name:a.name,configured:a.configured!==false,tools:a.tools===true,revision:typeof a.revision==='string'?a.revision.slice(0,64):undefined};});}
@@ -24,6 +25,8 @@ const staticFiles: Record<string,[string,string]> = {
   '/studio-delivery-media.js':['studio-delivery-media.js','text/javascript; charset=utf-8'],
   '/conversation-cache.js':['conversation-cache.js','text/javascript; charset=utf-8'],
   '/studio-sidebar.js':['studio-sidebar.js','text/javascript; charset=utf-8'],
+  '/studio-attention.js':['studio-attention.js','text/javascript; charset=utf-8'],
+  '/studio-api.js':['studio-api.js','text/javascript; charset=utf-8'],
   '/workspace-shell.js':['workspace-shell.js','text/javascript; charset=utf-8'],
   '/workspace-shell.css':['workspace-shell.css','text/css; charset=utf-8'],
   '/studio':['index.html','text/html; charset=utf-8'],
@@ -120,6 +123,7 @@ export function createRelay(options: Options) {
   };
   const studio=new Studio(store,remote,host=>bridges.get(host)?.readyState===WebSocket.OPEN,()=>emit('studio',{}),files,inspectVisual);
   const questionAnswers=new QuestionAnswers(store,studio,remote,event=>emit('event',event,store.latestSeq()));
+  const attention=new StudioAttention(store,studio,remote,event=>emit('event',event,store.latestSeq()),host=>bridges.has(host));
   const brains=new Brainstorms(store,studio,remote,host=>bridges.get(host)?.readyState===WebSocket.OPEN,()=>emit('studio',{}),files,media);
   const server=createServer(async(req,res)=>{
     res.setHeader('Cache-Control','no-store'); res.setHeader('X-Content-Type-Options','nosniff');
@@ -154,7 +158,12 @@ export function createRelay(options: Options) {
         return json(res,200,{ok:true});
       }
       if(!auth(req)) return json(res,401,{error:'请先登录'});
-      if(req.method==='GET'&&url.pathname==='/api/studio')return json(res,200,{...studio.state(),brainstorms:brains.list()});
+      if(req.method==='GET'&&url.pathname==='/api/studio'){
+        const text=JSON.stringify({...studio.state(),brainstorms:brains.list()}),etag='"'+createHash('sha256').update(text).digest('hex')+'"';res.setHeader('ETag',etag);
+        if(req.headers['if-none-match']?.split(',').some(value=>value.trim()==='*'||value.trim().replace(/^W\//,'')===etag)){res.writeHead(304);return res.end();}
+        res.writeHead(200,{'Content-Type':'application/json; charset=utf-8'});return res.end(text);
+      }
+      if(req.method==='GET'&&url.pathname==='/api/studio/attention')return json(res,200,attention.read(url.searchParams.get('runId')??'',url.searchParams.get('refresh')==='1'));
       if(req.method==='GET'&&url.pathname==='/api/studio/channels')return json(res,200,studio.channels(url.searchParams.get('runId')??''));
       if(req.method==='GET'&&url.pathname==='/api/studio/skip-state')return json(res,200,studio.skipState(url.searchParams.get('runId')??'',url.searchParams.get('taskId')??''));
       if(req.method==='POST'&&url.pathname==='/api/studio/chat/settings')return json(res,200,await studio.chatSettings(await body(req)));
@@ -371,5 +380,5 @@ export function createRelay(options: Options) {
     });
     ws.on('error',()=>{});
   });
-  return {server,store,studio,brains, async close(){for(const p of pending.values()){clearTimeout(p.timer);p.reject(new Error('Relay stopping'));}pending.clear();await studio.close();for(const res of viewers)res.end();for(const ws of wss.clients)ws.terminate();wss.close();await new Promise<void>(resolve=>server.close(()=>resolve()));store.close();}};
+  return {server,store,studio,brains, async close(){for(const p of pending.values()){clearTimeout(p.timer);p.reject(new Error('Relay stopping'));}pending.clear();await studio.close();await attention.close();for(const res of viewers)res.end();for(const ws of wss.clients)ws.terminate();wss.close();await new Promise<void>(resolve=>server.close(()=>resolve()));store.close();}};
 }
