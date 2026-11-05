@@ -11,6 +11,7 @@
 | 一键启动 Codex 诊断 Relay、修复与提交 | [Relay 自修复](relay-self-repair.md) |
 | 换机安装 Blender / Python、资产制作、导出与项目管线 | [资产管线与换机](asset-pipeline.md) |
 | 本地 Agent、模型和原生会话控制 | [本地 Agent](local-agents.md) |
+| 服务器空间、缓存与旧部署维护 | [服务器维护](server-maintenance.md) |
 | 模块职责、状态与媒体传输约定 | [架构](architecture.md) |
 | 历史、附件与浏览器缓存 | [同步机制](synchronization.md) |
 | 当前阶段直接指引、Voxel / UV2 适用性 | [阶段指引与渲染验收](studio-stage-guidance.md) |
