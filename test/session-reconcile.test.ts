@@ -128,3 +128,12 @@ test('idle native Claude without a control peer reports unavailable instead of q
  try{runtime.list();await assert.rejects(runtime.handle({id:randomUUID(),type:'send',sessionId:session.id,text:'continue'}),/消息未加入排队/);assert.equal(store.queued().length,0);}
  finally{await runtime.close();store.close();rmSync(root,{recursive:true,force:true});}
 });
+
+test('native owner status keeps an active Mac-style session running even when history only reports cached content',async()=>{
+ const root=mkdtempSync(join(tmpdir(),'relay-native-stream-')),store=new BridgeStore(join(root,'data')),desktop=new CodexDesktop('');
+ const session:Session={id:'pc:codex:native',hostId:'pc',provider:'codex',nativeId:'native',cwd:root,title:'native',updatedAt:1,status:'idle',statusOrigin:'native',managed:false};store.save(session);
+ const runtime=new AgentRuntime({relayUrl:'ws://localhost',hostId:'pc',name:'PC',dataDir:join(root,'data'),projects:[{id:'p',name:'P',path:root}],codexHome:join(root,'empty'),claudeHome:join(root,'empty')},store,()=>{},()=>{},undefined,desktop);
+ let live:Session['status']='running';runtime.history.list=()=>[{...session,status:'history',statusOrigin:undefined}];desktop.status=()=>({status:live,at:Date.now()});
+ try{assert.equal(runtime.list()[0].status,'running');live='waiting';assert.equal(runtime.list()[0].status,'waiting');live='idle';assert.equal(runtime.list()[0].status,'idle');}
+ finally{await runtime.close();store.close();rmSync(root,{recursive:true,force:true});}
+});

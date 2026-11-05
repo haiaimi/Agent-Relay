@@ -5,12 +5,20 @@ import {homedir,tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {lstatSync,realpathSync} from 'node:fs';
 import {SteerDeliveryError} from './claude-steer.js';
-import type {PermissionMode} from '../shared/protocol.js';
+import type {PermissionMode,Session} from '../shared/protocol.js';
 import {codexPermissions} from './permissions.js';
 import {codexSettings,type SessionSettings} from './settings.js';
 
 const MAX_FRAME=32*1024*1024;
 const uuid=/^[a-f0-9]{8}-[a-f0-9-]{27}$/i;
+type NativeState={threadRuntimeStatus?:{type?:string};turns?:{status?:string}[];requests?:unknown[]};
+export function desktopThreadStatus(state:NativeState):Session['status']|undefined{
+  if(state.requests?.length)return 'waiting';
+  const runtime=state.threadRuntimeStatus?.type;
+  if(runtime==='active')return 'running';if(runtime==='idle')return 'idle';if(runtime==='systemError')return 'failed';
+  const last=state.turns?.at(-1)?.status;
+  return last==='inProgress'?'running':last==='completed'?'idle':last==='interrupted'?'interrupted':last==='failed'?'failed':undefined;
+}
 export function codexIpcPath(home=process.env.CODEX_HOME??join(homedir(),'.codex')){
   if(process.platform==='win32')return '\\\\.\\pipe\\codex-ipc';
   const dir=join(home,'ipc'),primary=join(dir,'ipc.sock'),uid=process.getuid?.();
@@ -33,11 +41,16 @@ export class CodexDesktop {
   private closed=false;
   private pending=new Map<string,{resolve:(r:any)=>void;reject:(e:Error)=>void;timer:NodeJS.Timeout;mutation:boolean;operation:string}>();
   private owners=new Map<string,{at:number;owner?:string;loading?:Promise<string|undefined>}>();
-  private following=new Map<string,{owner:string;at:number;requests:any[];revision?:number;settings?:any}>();
+  private following=new Map<string,{owner:string;at:number;requests:any[];revision?:number;settings?:any;state?:NativeState;stateAt?:number}>();
   private settingsReads=new Map<string,Promise<SessionSettings|undefined>>();
   onRequests?:(threadId:string,requests:any[])=>void;
   onSettings?:(threadId:string,settings:SessionSettings)=>void;
   constructor(private readonly pipePath=codexIpcPath()){}
+  status(threadId:string):{status:Session['status'];at:number}|undefined{
+    const follow=this.following.get(threadId),owner=this.owners.get(threadId);
+    if(!this.socket?.writable||!follow?.state||!owner?.owner||owner.owner!==follow.owner||Date.now()-owner.at>30000)return undefined;
+    const status=desktopThreadStatus({...follow.state,requests:follow.requests});return status?{status,at:follow.stateAt!}:undefined;
+  }
   available(threadId:string):boolean {
     const cached=this.owners.get(threadId);
     if(!cached||Date.now()-cached.at>15000)void this.owner(threadId).catch(()=>{});
@@ -73,6 +86,7 @@ export class CodexDesktop {
   async startTurn(threadId:string,id:string,text:string,input:any[],settings:{model?:string;effort?:string|null}={}):Promise<{turnId:string}>{
     const owner=await this.owner(threadId);
     if(!owner)throw new Error('未找到本地 Codex 窗口；消息尚未投递');
+    await this.watch(threadId);
     const reply=await this.request('thread-follower-start-turn',{
       conversationId:threadId,
       turnStart:{request:{threadId,input,clientUserMessageId:id,...settings},context:{inheritThreadSettings:true,restoreMessage:{id,text,context:{},images:[],localImages:[],attachments:[],responsesapiClientMetadata:{}}}}
@@ -84,7 +98,7 @@ export class CodexDesktop {
   async watch(threadId:string){
     const old=this.following.get(threadId);if(old&&Date.now()-old.at<30000)return;
     const owner=await this.owner(threadId);if(!owner)return;
-    this.following.set(threadId,{owner,at:Date.now(),requests:old?.owner===owner?old.requests:[],revision:old?.owner===owner?old.revision:undefined,settings:old?.owner===owner?old.settings:undefined});
+    this.following.set(threadId,{owner,at:Date.now(),requests:old?.owner===owner?old.requests:[],revision:old?.owner===owner?old.revision:undefined,settings:old?.owner===owner?old.settings:undefined,state:old?.owner===owner?old.state:undefined,stateAt:old?.owner===owner?old.stateAt:undefined});
     this.broadcast('thread-stream-following-changed',{hostId:'local',conversationId:threadId,following:true},[owner]);
   }
   readSettings(threadId:string):Promise<SessionSettings|undefined>{
@@ -150,10 +164,19 @@ export class CodexDesktop {
     if(message.method==='thread-stream-following-status-requested'){this.broadcast('thread-stream-following-changed',{hostId:'local',conversationId:p.conversationId,following:true},[message.sourceClientId]);return;}
     if(message.method!=='thread-stream-state-changed'||message.sourceClientId!==follow.owner)return;
     const change=p.change;
-    if(change?.type==='snapshot'){follow.requests=Array.isArray(change.conversationState?.requests)?change.conversationState.requests.slice(0,100):[];follow.revision=change.revision;follow.settings={currentPermissions:change.conversationState?.currentPermissions,latestThreadSettings:change.conversationState?.latestThreadSettings};}
+    if(change?.type==='snapshot'){follow.requests=Array.isArray(change.conversationState?.requests)?change.conversationState.requests.slice(0,100):[];follow.revision=change.revision;follow.settings={currentPermissions:change.conversationState?.currentPermissions,latestThreadSettings:change.conversationState?.latestThreadSettings};const s=change.conversationState;follow.state={threadRuntimeStatus:{type:s?.threadRuntimeStatus?.type},turns:Array.isArray(s?.turns)&&s.turns.length<=50000?s.turns.map((t:any)=>({status:t?.status})):undefined};follow.stateAt=Date.now();}
     else if(change?.type==='patches'){
-      if(change.baseRevision!==follow.revision){follow.requests=[];this.broadcast('thread-stream-following-changed',{hostId:'local',conversationId:p.conversationId,following:true},[follow.owner]);return;}
-      for(const patch of change.patches??[]){const path=patch.path;if(!Array.isArray(path)||!['requests','currentPermissions','latestThreadSettings'].includes(path[0])||path.length>12||path.some((v:unknown)=>['__proto__','constructor','prototype'].includes(String(v))))continue;
+      if(change.baseRevision!==follow.revision){follow.requests=[];follow.state=undefined;this.broadcast('thread-stream-following-changed',{hostId:'local',conversationId:p.conversationId,following:true},[follow.owner]);return;}
+      for(const patch of change.patches??[]){const path=patch.path;if(!Array.isArray(path)||!['requests','currentPermissions','latestThreadSettings','threadRuntimeStatus','turns'].includes(path[0])||path.length>12||path.some((v:unknown)=>['__proto__','constructor','prototype'].includes(String(v))))continue;
+        if(path[0]==='threadRuntimeStatus'){
+          follow.state??={};if(path.length===1)follow.state.threadRuntimeStatus=patch.op==='remove'?undefined:{type:patch.value?.type};else if(path.length===2&&path[1]==='type')follow.state.threadRuntimeStatus={type:patch.op==='remove'?undefined:patch.value};follow.stateAt=Date.now();continue;
+        }
+        if(path[0]==='turns'){
+          follow.state??={};
+          if(path.length===1)follow.state.turns=Array.isArray(patch.value)&&patch.value.length<=50000?patch.value.map((t:any)=>({status:t?.status})):undefined;
+          else if(follow.state.turns){const turns=follow.state.turns,index=path[1]==='-'?turns.length:Number(path[1]);if(Number.isSafeInteger(index)&&index>=0&&index<=turns.length&&index<50000){if(path.length===2){if(patch.op==='remove')turns.splice(index,1);else if(patch.op==='add')turns.splice(index,0,{status:patch.value?.status});else if(index<turns.length)turns[index]={status:patch.value?.status};}else if(path.length===3&&path[2]==='status'&&index<turns.length)turns[index]={status:patch.op==='remove'?undefined:patch.value};}}
+          follow.stateAt=Date.now();continue;
+        }
         if(path[0]!=='requests'){
           follow.settings??={};let target=follow.settings;for(const key of path.slice(0,-1)){if(!target[key]||typeof target[key]!=='object')target[key]={};target=target[key];}
           const key=path.at(-1);if(patch.op==='remove')delete target[key];else target[key]=patch.value;continue;

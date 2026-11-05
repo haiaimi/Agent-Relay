@@ -113,6 +113,7 @@ export class AgentRuntime {
   }
   list():Session[]{
     const native=this.history.list(),all=new Map(native.map(s=>[s.id,s]));
+    for(const s of native){if(s.provider!=='codex')continue;const live=this.codexDesktop.status(s.nativeId),submitted=this.nativeStarts.get(s.id);if(live&&!(submitted&&live.at<submitted&&Date.now()-submitted<15000)){s.status=live.status;s.statusOrigin='native';s.updatedAt=Math.max(s.updatedAt,live.at);}}
     for(const s of this.managed.values()){
       const original=all.get(s.id);
       if(original){

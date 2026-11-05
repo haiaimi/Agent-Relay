@@ -17,7 +17,7 @@ test('foreground polls serialize slow requests, pause in background and back off
 
 test('fast native history returns messages before desktop metadata and deduplicates metadata reads',async()=>{
   const root=mkdtempSync(join(tmpdir(),'relay-fast-history-')),work=join(root,'work');mkdirSync(work);const store=new BridgeStore(join(root,'bridge'));let release!:(r:any)=>void,calls=0,focused=0;const published:any[]=[];
-  const desktop:any={available:()=>false,watch:async()=>{},close:()=>{},readSettings:()=>{calls++;return new Promise(r=>release=r);}};
+  const desktop:any={status:()=>undefined,available:()=>false,watch:async()=>{},close:()=>{},readSettings:()=>{calls++;return new Promise(r=>release=r);}};
   const runtime=new AgentRuntime({hostId:'pc',name:'pc',relayUrl:'ws://unused',dataDir:join(root,'bridge'),projects:[{id:'p',name:'p',path:work}],codexHome:join(root,'none'),claudeHome:join(root,'empty')},store,s=>published.push(...s),()=>{},undefined,desktop);
   const s={id:'pc:codex:'+randomUUID(),hostId:'pc',provider:'codex' as const,nativeId:randomUUID(),cwd:work,title:'test',status:'running' as const,updatedAt:1};
   runtime.history.list=()=>[{...s}];runtime.history.get=()=>({...s});runtime.history.settings=()=>({model:'transcript',settingsSource:'transcript'});runtime.history.page=async()=>({messages:[{id:'latest',role:'assistant',text:'current output'}],cursor:null,source:'fixture'});runtime.history.asyncQuestions=()=>[];runtime.history.refreshFocusedStatus=()=>{focused++;};
