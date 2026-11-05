@@ -3,6 +3,7 @@ import {normalizeProductionFlow,productionFlowInstructions,productionRoleIds,Pro
 import {validateToolchain,validateBlockers,toolchainInstructions,type StudioToolchain,type StudioBlocker} from './studio-tools.js';
 import {createHash,randomUUID} from 'node:crypto';
 import {continuationSnapshot,continuationInstructions,type StudioContinuation} from './studio-continuation.js';
+import {modelConnectionFailure,pendingProducerInput,handoffContext,MODEL_RETRIES,MODEL_RETRY_MS,type StudioRecovery} from './studio-recovery.js';
 import {MAX_TEXT,type Action,type Host,type Provider,type PermissionMode} from '../shared/protocol.js';
 import type {RelayStore} from './store.js';
 import {FileStore,type FileRef,uploadId,MAX_UPLOAD_BYTES} from '../shared/files.js';
@@ -31,6 +32,7 @@ interface TaskSkip {at:number;reason:string;previousStatus:'blocked';summary?:st
 // A producer waiver releases dependencies; it never changes the recorded verification result.
 const released=(t:Task)=>t.status==='done'||t.status==='skipped'&&!!t.skip;
 export interface Task {skip?:TaskSkip;planRepairs?:number;showcase?:boolean}
+export interface Task {recovery?:StudioRecovery}
 export interface Task {blockers?:StudioBlocker[];checkpoint?:{at:number;sessionId:string;reason:string}}
 interface Assignment {role:string;enabled:boolean;provider:Provider;agentId?:string;model?:string;effort?:string;instructions:string;tools:string}
 export interface StudioProject {toolchain?:StudioToolchain;includeCaptures?:boolean;id:string;name:string;hostId:string;projectId:string;workspaceIndex:number;roles:Assignment[];permissionMode:PermissionMode;concurrency:number;reviewPlan:boolean;createdAt:number;updatedAt:number}
@@ -119,10 +121,16 @@ export class Studio {
   private project(id:string){const p=this.projects().find(p=>p.id===id);if(!p)throw Error('团队项目不存在');return p;}
   private run(id:string){const r=this.runs().find(r=>r.id===id);if(!r)throw Error('制作需求不存在');return r;}
   private receipt(id?:string){const row=id?this.store.db.prepare('SELECT result FROM actions WHERE id=?').get(id):undefined;return row?.result?JSON.parse(String(row.result)):undefined;}
-  private canCheckpoint(r:StudioRun,t:Task){
+  private canCheckpoint(r:StudioRun,t:Task,allowSavedIdle=false){
     if(t.kind||!t.sessionId||!['running','blocked'].includes(t.status)||r.workspace?.status!=='ready')return false;
     const s=this.store.getSession(t.sessionId),p=this.project(r.projectId);
-    if(!s||s.hostId!==p.hostId||s.projectId!==this.execution(r).id||!['interrupted','failed'].includes(s.status)||s.pendingCount)return false;
+    if(!s||s.hostId!==p.hostId||s.projectId!==this.execution(r).id||s.pendingCount)return false;
+    if(!['interrupted','failed'].includes(s.status)){
+      // Native history can report an ended failed turn as idle. A durable checkpoint
+      // still identifies the interrupted task; idle alone must never create one.
+      if(!allowSavedIdle||s.status!=='idle'||t.checkpoint?.sessionId!==t.sessionId)return false;
+      if(this.store.sessionEvents(t.sessionId).some(e=>e.at>t.checkpoint!.at&&(['message','delta','activity'].includes(e.type)||e.type==='status'&&['running','waiting'].includes(e.data.status))))return false;
+    }
     const row=t.actionId?this.store.db.prepare('SELECT result FROM actions WHERE id=?').get(t.actionId):undefined;
     // A confirmed old session is insufficient when the latest send itself has an unknown outcome.
     if(row&&!row.result)return false;
@@ -137,9 +145,45 @@ export class Studio {
     return true;
   }
   private continueTask(r:StudioRun,t:Task){
-    if(!t.checkpoint||!this.canCheckpoint(r,t)||t.checkpoint.sessionId!==t.sessionId)throw Error('当前断点尚不能恢复，请先核对会话状态与投递结果');
+    if(t.sessionId&&pendingProducerInput(this.store.sessionEvents(t.sessionId),this.store.getSession(t.sessionId)?.questionCount))throw Error('原会话有待回答的制作人问题或工具批准，请先打开职能对话或完整执行记录处理，再继续原任务');
+    if(!t.checkpoint||!this.canCheckpoint(r,t,true)||t.checkpoint.sessionId!==t.sessionId)throw Error('当前断点尚不能恢复，请先核对会话状态与投递结果');
     if(!this.dependenciesReady(r,t))throw Error('请先完成前置任务及制作人审批，再从断点继续');
     t.resumeSessionId=t.sessionId;t.status='queued';t.actionId=undefined;t.error=undefined;t.finishedAt=undefined;
+    if(t.recovery)t.recovery.nextAt=undefined;
+  }
+  private recovering=new Set<string>();
+  private recoverConnection(r:StudioRun,t:Task,p:StudioProject){
+    if(!t.checkpoint||t.status!=='blocked'||r.paused||r.workflow?.error||!modelConnectionFailure(t.checkpoint.reason)||!this.dependenciesReady(r,t))return;
+    const key=r.id+':'+t.id;if(this.recovering.has(key)||t.recovery?.phase==='stopped')return;
+    const s=this.store.getSession(t.sessionId!);if(!s)return;
+    if(pendingProducerInput(this.store.sessionEvents(s.id),s.questionCount)){
+      if(t.recovery?.phase!=='waiting-input'){t.recovery={retries:t.recovery?.retries??0,handoffs:t.recovery?.handoffs??0,checkpointAt:t.checkpoint.at,...t.recovery,phase:'waiting-input',nextAt:undefined};this.saveRun(r,'自动恢复等待制作人回答或工具批准',t);}return;
+    }
+    if(!this.canCheckpoint(r,t,true))return;
+    if(!t.recovery||t.recovery.checkpointAt!==t.checkpoint.at||t.recovery.phase==='waiting-input'){
+      const old=t.recovery;t.recovery={...old,retries:old?.retries??0,handoffs:old?.handoffs??0,checkpointAt:t.checkpoint.at,nextAt:Date.now()+MODEL_RETRY_MS,phase:'scheduled',probeFailures:0};
+      if(t.recovery.handoffs){t.recovery.phase='stopped';t.recovery.nextAt=undefined;t.recovery.note='接力会话仍发生模型连接错误，已停止自动恢复，请核对记录。';}
+      this.saveRun(r,t.recovery.phase==='stopped'?t.recovery.note!:'模型连接失败，已安排 1 分钟后自动恢复（重试最多 5 次，之后仅新建一次接力会话）',t);return;
+    }
+    if(t.recovery.phase!=='scheduled'||Date.now()<(t.recovery.nextAt??Infinity))return;
+    this.recovering.add(key);const sid=s.id,checkpointAt=t.checkpoint.at;
+    const job=(async()=>{try{
+      // Read-only live reconciliation before every retry/fork. Never create a
+      // second writer based solely on cached terminal status.
+      const page=await this.remote(p.hostId,{id:randomUUID(),type:'history',sessionId:sid,live:true},12000);
+      const latest=this.run(r.id),task=this.allTasks(latest).find(x=>x.id===t.id),current=this.store.getSession(sid);
+      if(!task||task.checkpoint?.at!==checkpointAt||task.sessionId!==sid||latest.paused||['cancelled','accepted'].includes(latest.status)||latest.workflow?.error||!this.dependenciesReady(latest,task)||!this.canCheckpoint(latest,task,true))return;
+      if(page.questions?.some((q:any)=>q.status==='pending')||pendingProducerInput(this.store.sessionEvents(sid),current?.questionCount)){task.recovery!.phase='waiting-input';task.recovery!.nextAt=undefined;this.saveRun(latest,'自动恢复等待制作人回答或工具批准',task);return;}
+      const recovery=task.recovery!;
+      if(recovery.retries<MODEL_RETRIES){this.continueTask(latest,task);recovery.retries++;recovery.phase='retrying';this.saveRun(latest,`模型连接自动重试 ${recovery.retries}/${MODEL_RETRIES}：继续原会话与已有文件`,task);}
+      else{
+        recovery.handoffs++;recovery.phase='handoff';recovery.nextAt=undefined;
+        recovery.handoff={sessionId:sid,context:handoffContext(this.store.sessionEvents(sid),task.output??''),provider:s.provider,agentId:s.agentId,model:current?.nextModel??current?.model,effort:current?.nextEffort??current?.effort,permissionMode:current?.nextPermissionMode??current?.permissionMode};
+        task.attempts=[...(task.attempts??[]),{sessionId:sid,output:task.output,at:Date.now()}];task.sessionId=undefined;task.resumeSessionId=undefined;task.checkpoint=undefined;task.actionId=undefined;task.finishedAt=undefined;task.error=undefined;task.status='queued';
+        this.saveRun(latest,'模型连接重试 5 次仍失败，安排一次新会话接力；原会话、工作副本、前置任务与审批保留',task);
+      }
+    }catch(e){const latest=this.run(r.id),task=this.allTasks(latest).find(x=>x.id===t.id);if(task?.checkpoint?.at===checkpointAt&&task.recovery){const recovery=task.recovery;recovery.probeFailures=(recovery.probeFailures??0)+1;recovery.nextAt=Date.now()+MODEL_RETRY_MS;recovery.note='无法确认旧会话已结束，未投递或新开会话：'+(e as Error).message;if(recovery.probeFailures>=MODEL_RETRIES){recovery.phase='stopped';recovery.nextAt=undefined;}this.saveRun(latest,recovery.note,task);}}
+    finally{this.recovering.delete(key);}})();this.launches.add(job);void job.finally(()=>this.launches.delete(job));
   }
   private taskOutput(t:Task){
     if(!t.sessionId)return '';
@@ -170,7 +214,7 @@ export class Studio {
     return {hostId:p.hostId,sessionId:t.sessionId,path:artifact.path};
   }
   private resetTask(t:Task,feedback?:string){
-    t.checkpoint=undefined;t.blockers=undefined;t.skip=undefined;
+    t.checkpoint=undefined;t.blockers=undefined;t.skip=undefined;t.recovery=undefined;
     t.attempts=[...(t.attempts??[]),{sessionId:t.sessionId,output:t.output,at:Date.now()}];
     Object.assign(t,{status:'queued',actionId:undefined,sessionId:undefined,output:undefined,summary:undefined,artifacts:undefined,checks:undefined,error:undefined,finishedAt:undefined,reviewId:undefined,approvedAt:undefined,visualSnapshots:undefined,feedback});
   }
@@ -276,7 +320,7 @@ export class Studio {
     else if(v.op==='continue-task'||v.op==='continue-run'){
       if(!this.online(p.hostId))throw Error('工作电脑离线，断点已保留，请上线后继续');
       if(r.workflow?.error)throw Error(r.workflow.error);
-      const pending=v.op==='continue-task'?(task?[task]:[]):this.allTasks(r).filter(t=>t.checkpoint&&this.canCheckpoint(r,t)&&this.dependenciesReady(r,t));
+      const pending=v.op==='continue-task'?(task?[task]:[]):this.allTasks(r).filter(t=>t.checkpoint&&this.canCheckpoint(r,t,true)&&this.dependenciesReady(r,t));
       if(!pending.length)throw Error('没有可继续的执行断点');
       for(const t of pending)this.continueTask(r,t);
       r.paused=false;this.saveRun(r,'从断点继续：'+pending.map(t=>t.title).join('、'),task);void this.tick();return this.run(r.id);
@@ -520,7 +564,8 @@ export class Studio {
     const a=p.roles.find(a=>a.role===t.role)!,role=STUDIO_ROLES.find(x=>x[0]===t.role)!;
     const contextNotes=`独立需求分支：${r.workspace!.value!.branch}\n当前工作副本：${this.execution(r).path}。源工程 ${r.workspace!.value!.sourcePath} 只用于识别，不在源目录执行或修改文件。任务说明中若提到源工程绝对路径，必须映射到当前工作副本；引擎子模块也使用副本内的 engine 目录。禁止切换或修改源工程 / 主干。\n制作人参考附件：${(r.attachments??[]).map(f=>f.name).join('、')||'无'}。图片随输入提供；视频和其他文件通过输入附带的本机路径读取，视频可用已有工具抽帧；工具不可用时明确报告，不能声称已经观看。\n团队群聊补充：\n${this.groupPosts(r.id).slice(-8).map(m=>'制作人 @'+m.roles.join(',')+': '+m.text+' [附件 '+m.files.map(f=>f.name).join(',')+']').join('\n').slice(-2500)}\n后续制作人补充：\n${(r.guidance??[]).slice(-12).map(g=>g.role+': '+g.text+' [附件 '+g.files.map(f=>f.name).join(',')+']').join('\n').slice(r.workflow?.kind==='scene'?-3000:-5000)}\n`;
     const resumeNote=t.resumeSessionId?['继续同一个任务、同一份工程与已有实现，从原代码续做，不另起一套玩法。先检查原会话记录、已有文件与验证结果，从未完成的步骤继续；不得重跑已完成的前置任务，也不得跳过制作人审批。','断点前的公开执行记录（可能不完整，须核对工程）：',(t.output??'').slice(-5000),''].join('\n'):'';
-    const common=`${resumeNote}${contextNotes}${continuationInstructions(r.continuation)}${toolchainInstructions(p.toolchain,this.execution(r).path,r.workspace!.value!.sourcePath)}${sceneTaskInstructions(t,r.workflow)}【${role[1]}】${r.title} / ${t.title}\n你是游戏团队的${role[1]}。制作人需求：\n${r.title}\n${t.resumeSessionId?'制作人原始需求沿用本会话开头的完整说明；结合以下最新补充与已有工程续做。':r.brief}\n\n职能职责：${role[2]}\n补充说明：${a.instructions||'无'}\n本机工具 / 引擎 / DCC：${a.tools||'自行检查工程和已有工具；工具缺失必须报告，不得虚构生成或验收结果。'}\n工具在工作电脑后台执行。遵循工程约定，保护已有修改，不提交、推送或发布，除非制作人明确要求。所有职能共享当前工程；并发时只修改分配给自己的文件，发现冲突立即报告 blocked。将可持久化交付物保存到工程内，文档优先 .studio/${r.id}/${t.id}/，实际游戏资源遵循工程目录。\n${r.feedback?'制作人本轮返工意见（按本任务相关项执行，优先于旧任务说明中的冲突限制）：'+r.feedback+'\n':''}${t.feedback?'返工要求：'+t.feedback+'\n':''}`;
+    const handoffNote=!t.resumeSessionId&&t.recovery?.handoff?`这是模型断连后的新会话接力，不是重做。原会话：${t.recovery.handoff.sessionId}。沿用本需求 worktree、分支、职责和已批准方向。先检查已有文件与日志，只继续未完成步骤；未知工具结果先核实，不重复启动进程、导出或发布，不重跑前置任务、不跳过审批。\n${t.recovery.handoff.context}\n`:'';
+    const common=`${handoffNote}${resumeNote}${contextNotes}${continuationInstructions(r.continuation)}${toolchainInstructions(p.toolchain,this.execution(r).path,r.workspace!.value!.sourcePath)}${sceneTaskInstructions(t,r.workflow)}【${role[1]}】${r.title} / ${t.title}\n你是游戏团队的${role[1]}。制作人需求：\n${r.title}\n${t.resumeSessionId?'制作人原始需求沿用本会话开头的完整说明；结合以下最新补充与已有工程续做。':r.brief}\n\n职能职责：${role[2]}\n补充说明：${a.instructions||'无'}\n本机工具 / 引擎 / DCC：${a.tools||'自行检查工程和已有工具；工具缺失必须报告，不得虚构生成或验收结果。'}\n工具在工作电脑后台执行。遵循工程约定，保护已有修改，不提交、推送或发布，除非制作人明确要求。所有职能共享当前工程；并发时只修改分配给自己的文件，发现冲突立即报告 blocked。将可持久化交付物保存到工程内，文档优先 .studio/${r.id}/${t.id}/，实际游戏资源遵循工程目录。\n${r.feedback?'制作人本轮返工意见（按本任务相关项执行，优先于旧任务说明中的冲突限制）：'+r.feedback+'\n':''}${t.feedback?'返工要求：'+t.feedback+'\n':''}`;
     const scenePlan=r.workflow?.selection?productionFlowInstructions(r.workflow.selection):r.workflow?.kind==='scene'?`场景生产流程为强制约束：玩法与 LD 设计 requirements → 原画 concept → 制作人确认（系统节点）→ 资产规格 asset-spec → ${r.workflow.assetMode==='new'?'资产生产 assets → ':''}LA 正式搭建 assembly → 布光效果与程序集成 integration → QA。玩法策划与 LD 必须先完成 requirements 设计文档和布局，原画依赖这两项；不安排独立玩法原型制作。制作人确认后再做数值 balance 和程序 implementation；玩法实现统一交给程序，复用现有代码，只做一套。最终 integration 只接入和验证已有实现，不重复开发。每个任务明确 stage。角色匹配：requirements 玩法/LD/系统；balance 数值；implementation 程序；concept 原画；asset-spec 原画/模型/技术美术；assets 模型；assembly 场景美术；integration 程序/技术美术/UI/音频。原画至少交付一张实际存在的 PNG/JPEG/WebP/GIF 工程内图片供制作人查看；工具缺失必须 blocked，禁止用文字假装产图。不要输出人工确认任务，系统自动插入；系统会补齐缺失的必要制作阶段并校验依赖。${r.workflow.assetMode==='reuse'?'制作人指定复用范围：'+r.workflow.reuseReason+'，只核对已有视觉、编资产清单和搭建，不安排新资产生产。':'这次需要新场景 / 新资产，不能自行以复用为由跳过原画、确认与资产生产。'}\n`:'通用任务仅做代码、配置或讨论；涉及正式场景或美术资产生产时需要场景流程。\n';
     const exampleStage=r.workflow?.selection?.stages[0]??'requirements',exampleRole=r.workflow?.selection?productionRoleIds({...r.workflow.selection,stages:[r.workflow.selection.stages[0]]}).find(id=>p.roles.some(a=>a.enabled&&a.role===id)):'gameplay';
     if(t.id==='studio-plan'){const instructions=`${scenePlan}\n你现在只做只读分析和任务规划，不改动工程。${r.recordVideo?'系统会在制作末尾安排成果展示视频，不要重复输出录制任务。':''}可用职能：${p.roles.filter(a=>a.enabled&&a.role!=='director'&&(!r.workflow?.selection||productionRoleIds(r.workflow.selection).includes(a.role))).map(a=>a.role+' ('+STUDIO_ROLES.find(r=>r[0]===a.role)![1]+')').join(', ')}。按需求选择必要职能，不要为了凑人数安排无关工作。把文件责任写入 brief；同文件写入必须有依赖。${r.workflow?.selection?(r.workflow.selection.stages.includes('validation')?'QA 只安排在选定的 validation 阶段，不重复追加。':'制作人未选 QA，不安排或追加 QA 任务。'):'系统会追加最终独立 QA 任务。'}最后只输出一个 JSON 代码块：\n\`\`\`STUDIO_PLAN\n${JSON.stringify({tasks:[{id:"task-1",title:"任务名",role:exampleRole,stage:exampleStage,brief:"具体工作与文件责任",acceptance:"可检查的验收标准",dependencies:[]}]})}\n\`\`\``;return common.slice(0,Math.max(0,MAX_TEXT-instructions.length))+instructions;}
@@ -539,7 +584,8 @@ export class Studio {
     const a=p.roles.find(a=>a.role===t.role)!;
     try{const host=this.store.hosts().find(h=>h.id===p.hostId);if(!host)throw Error('工作电脑不存在');validateAssignment(a,host);}catch(e){t.status='blocked';t.error=(e as Error).message;this.saveRun(r,t.error,t);return;}
     t.status='starting';t.actionId=randomUUID();t.startedAt=Date.now();this.saveRun(r,'分发：'+t.title,t);
-    const action:Action={id:t.actionId,type:t.resumeSessionId?'send':'start',sessionId:t.resumeSessionId,projectId:this.execution(r).id,workspaceIndex:0,attachmentIds:this.inputRefs(r).map(f=>f.id),provider:a.provider,agentId:a.agentId,model:a.model,effort:a.effort,permissionMode:t.resumeSessionId?undefined:p.permissionMode,text:this.prompt(r,t,p)};
+    const handoff=!t.resumeSessionId?t.recovery?.handoff:undefined,sameAgent=handoff?.provider===a.provider&&handoff?.agentId===a.agentId;
+    const action:Action={id:t.actionId,type:t.resumeSessionId?'send':'start',sessionId:t.resumeSessionId,projectId:this.execution(r).id,workspaceIndex:0,attachmentIds:this.inputRefs(r).map(f=>f.id),provider:a.provider,agentId:a.agentId,model:t.resumeSessionId?undefined:(sameAgent?handoff?.model:undefined)??a.model,effort:t.resumeSessionId?undefined:(sameAgent?handoff?.effort:undefined)??a.effort,permissionMode:t.resumeSessionId?undefined:(sameAgent?handoff?.permissionMode:undefined)??p.permissionMode,text:this.prompt(r,t,p)};
     const job=(async()=>{
       try{
         if(r.workflow?.kind==='scene'&&(!r.workflow.selection||r.workflow.selection.approvals.visual)&&['balance','implementation','asset-spec','assets','assembly','integration','validation'].includes(t.stage??'')){
@@ -601,6 +647,7 @@ export class Studio {
         for(const t of this.allTasks(r))if(t.status==='blocked'&&this.checkpoint(r,t))this.saveRun(r,'已保留执行断点：'+t.title,t);
         for(const t of this.allTasks(r))if(t.status==='running'){this.complete(r,t);if(t.status!=='running'){busy.set(key,Math.max(0,(busy.get(key)??1)-1));this.saveRun(r,(t.status==='done'?'完成：':'待处理：')+t.title,t);}}
         if(r.paused||r.workflow?.error)continue;
+        for(const t of this.allTasks(r))this.recoverConnection(r,t,p);
         if((r.chats??[]).some(c=>!c.sessionId&&!c.resolved))continue;
         if(r.status==='executing'&&r.tasks.length&&r.tasks.every(released)){r.status='delivery';const priorDelivery=r.delivery;r.delivery={attempts:priorDelivery?[...(priorDelivery.attempts??[]),{sessionId:priorDelivery.sessionId,output:priorDelivery.output,at:Date.now()}]:undefined,id:'studio-delivery',title:'汇总制作人交付包',role:'director',brief:'汇总所有实际交付物及验证结果，给制作人可直接使用的入口和验收步骤。',acceptance:'列出成果、启动 / 查看方法、验证结果及已知限制。',dependencies:[],status:'queued'};this.saveRun(r,r.tasks.some(t=>t.status==='skipped')?'QA 已结束，整理交付并披露制作人跳过记录':r.workflow?.selection&&!r.workflow.selection.stages.includes('validation')?'已选制作任务完成，整理交付（未安排 QA）':'QA 通过，整理最终交付');}
         const candidates=r.status==='planning'?[r.planner]:r.status==='executing'?r.tasks:r.status==='delivery'&&r.delivery?[r.delivery]:[];

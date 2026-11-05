@@ -24,7 +24,7 @@ const selectedFlow=(stages:string[],approvals={})=>({template:'custom',stages,ap
 async function fixture(prepareFailure=false,inspectVisual:()=>Promise<{sha256:string}>=async()=>({sha256:'a'.repeat(64)})){
   const dir=mkdtempSync(join(tmpdir(),'relay-studio-')),store=new RelayStore(dir),actions:Action[]=[],files=new FileStore(dir,store.db);let online=true;
   store.host({id:'workstation',name:'工作电脑',capabilities:{studioWorkspaces:true},online:true,lastSeen:Date.now(),projects:[{id:'game',name:'Game',path:dir}],agents:[{id:'codex',provider:'codex',name:'Codex'},{id:'claude',provider:'claude',name:'Claude'}]});
-  const studio=new Studio(store,async(_host,action)=>{if(action.type==='prepare-workspace'){if(prepareFailure)throw Error('Git preparation failed');return {workspace:workspace(action.workspaceId!,dir)};}actions.push(action);if(action.type==='upload')return {file:action.upload!.file};if(action.type==='set-permissions')return {ok:true,queued:false,permissionMode:action.permissionMode};if(action.type==='send'){const s=store.getSession(action.sessionId!)!;store.session({...s,status:'running'});return {ok:true,sessionId:action.sessionId,queued:s.status==='running'};}if(action.type==='stop')return {ok:true};const nativeId=randomUUID(),session:Session={id:'workstation:'+action.provider+':'+nativeId,hostId:'workstation',provider:action.provider!,nativeId,title:'工作室任务',cwd:dir,projectId:action.projectId??store.getSession(action.sessionId!)?.projectId,updatedAt:Date.now(),status:'running',managed:true};store.session(session);return {sessionId:session.id};},()=>online,()=>{},files,inspectVisual);
+  const studio=new Studio(store,async(_host,action)=>{if(action.type==='prepare-workspace'){if(prepareFailure)throw Error('Git preparation failed');return {workspace:workspace(action.workspaceId!,dir)};}actions.push(action);if(action.type==='history')return {messages:[],questions:[]};if(action.type==='upload')return {file:action.upload!.file};if(action.type==='set-permissions')return {ok:true,queued:false,permissionMode:action.permissionMode};if(action.type==='send'){const s=store.getSession(action.sessionId!)!;store.session({...s,status:'running'});return {ok:true,sessionId:action.sessionId,queued:s.status==='running'};}if(action.type==='stop')return {ok:true};const nativeId=randomUUID(),session:Session={id:'workstation:'+action.provider+':'+nativeId,hostId:'workstation',provider:action.provider!,nativeId,title:'工作室任务',cwd:dir,projectId:action.projectId??store.getSession(action.sessionId!)?.projectId,updatedAt:Date.now(),status:'running',managed:true};store.session(session);return {sessionId:session.id};},()=>online,()=>{},files,inspectVisual);
   const project=studio.saveProject({name:'测试团队',hostId:'workstation',projectId:'game',workspaceIndex:0,roles:roles(),permissionMode:'request',concurrency:1,reviewPlan:true});
   const run=()=>studio.runs()[0];
   const settle=async()=>{await studio.tick();await turn();await studio.tick();await turn();};
@@ -473,6 +473,35 @@ test('restart preserves a task checkpoint and continues the original session wit
   }finally{await recovered?.close();await f.close();}
 });
 
+test('a saved failed-turn checkpoint survives native idle synchronization and resumes the same task once',async()=>{
+  const f=await fixture();try{
+    f.studio.createRun({workflow:'general',projectId:f.project.id,title:'模型繁忙续做',brief:'保留原成果'});await f.settle();
+    const task=f.run().planner,sid=task.sessionId!;f.store.event({id:randomUUID(),sessionId:sid,at:Date.now(),type:'error',data:{message:'Selected model is at capacity. Please try a different model.'}});
+    f.finish(task,'已生成原画，尚未完成交付清单','failed');await f.settle();const checkpoint=f.run().planner.checkpoint!;assert.match(checkpoint.reason,/at capacity/);
+    f.store.session({...f.store.getSession(sid)!,status:'idle',managed:false,statusOrigin:'native'});await f.settle();assert.equal(f.run().planner.status,'blocked');assert.equal(f.run().planner.checkpoint?.at,checkpoint.at);
+    const before=f.actions.length;await f.studio.command({runId:f.run().id,op:'continue-task',taskId:task.id});await f.settle();assert.equal(f.actions.length,before+1);assert.equal(f.actions.at(-1)!.type,'send');assert.equal(f.actions.at(-1)!.sessionId,sid);assert.match(f.actions.at(-1)!.text!,/已生成原画/);assert.equal(f.run().planner.checkpoint,undefined);
+    await assert.rejects(f.studio.command({runId:f.run().id,op:'continue-task',taskId:task.id}),/断点/);assert.equal(f.actions.length,before+1);
+  }finally{await f.close();}
+});
+
+test('native idle checkpoint recovery rejects newer execution activity and unknown delivery receipts',async()=>{
+  const f=await fixture();try{
+    f.studio.createRun({workflow:'general',projectId:f.project.id,title:'断点身份',brief:'不重复投递'});await f.settle();f.finish(f.run().planner,'部分成果','failed');await f.settle();
+    const task=f.run().planner,sid=task.sessionId!,before=f.actions.length;f.store.session({...f.store.getSession(sid)!,status:'idle'});
+    f.store.db.prepare('UPDATE actions SET result=NULL WHERE id=?').run(task.actionId!);await assert.rejects(f.studio.command({runId:f.run().id,op:'continue-task',taskId:task.id}),/断点/);assert.equal(f.actions.length,before);
+    f.store.finishAction(task.actionId!,{sessionId:sid});f.store.event({id:randomUUID(),sessionId:sid,type:'message',at:task.checkpoint!.at+1,data:{id:randomUUID(),role:'user',text:'已从其他窗口继续'}});await assert.rejects(f.studio.command({runId:f.run().id,op:'continue-task',taskId:task.id}),/断点/);assert.equal(f.actions.length,before);
+  }finally{await f.close();}
+});
+
+test('a checkpoint with pending producer questions must be answered before any resume send',async()=>{
+  const f=await fixture();try{
+    f.studio.createRun({workflow:'general',projectId:f.project.id,title:'等待设计选择',brief:'不能绕过制作人'});await f.settle();f.finish(f.run().planner,'已保存成果','failed');await f.settle();
+    const task=f.run().planner,sid=task.sessionId!,qid=randomUUID(),before=f.actions.length;f.store.session({...f.store.getSession(sid)!,status:'idle'});f.store.event({id:randomUUID(),sessionId:sid,type:'question',at:task.checkpoint!.at+1,data:{id:qid,status:'pending'}});
+    await assert.rejects(f.studio.command({runId:f.run().id,op:'continue-task',taskId:task.id}),/待回答/);assert.equal(f.actions.length,before);assert.equal(f.run().planner.status,'blocked');
+    f.store.event({id:randomUUID(),sessionId:sid,type:'question.resolved',at:task.checkpoint!.at+2,data:{id:qid,status:'answered'}});await f.studio.command({runId:f.run().id,op:'continue-run'});await f.settle();assert.equal(f.actions.at(-1)!.sessionId,sid);
+  }finally{await f.close();}
+});
+
 test('unknown send receipts and QA failures cannot be resumed as interruption checkpoints',async()=>{
   const f=await fixture();try{
     f.studio.createRun({workflow:'general',projectId:f.project.id,title:'结果未知',brief:'不要重复发送'});await f.settle();const r=f.run(),t=r.planner;
@@ -480,6 +509,40 @@ test('unknown send receipts and QA failures cannot be resumed as interruption ch
     await assert.rejects(f.studio.command({runId:r.id,op:'continue-task',taskId:t.id}),/断点/);
     f.store.finishAction(t.actionId!,{sessionId:t.sessionId});f.store.session({...f.store.getSession(t.sessionId!)!,status:'idle'});await f.settle();assert.equal(f.run().planner.checkpoint,undefined);
   }finally{await f.close();}
+});
+
+test('model disconnects retry five times in place then hand off once with context and matching settings',async()=>{
+ const f=await fixture();try{
+  f.studio.saveProject({...f.project,roles:roles().map(a=>a.role==='director'?{...a,model:'role-default'}:a)});
+  f.studio.createRun({workflow:'general',projectId:f.project.id,title:'模型断连',brief:'继续制作原画，不重做'});await f.settle();const old=f.run().planner.sessionId!,branch=f.run().workspace!.value!.branch;
+  f.store.session({...f.store.getSession(old)!,model:'same-model',effort:'high',permissionMode:'full'});
+  const fail=async()=>{const t=f.run().planner;f.store.event({id:randomUUID(),sessionId:t.sessionId!,at:Date.now(),type:'error',data:{message:'stream disconnected before completion'}});f.finish(t,'已有 source.blend 和 preview.png，继续检查清单','failed');await f.settle();};
+  const due=async()=>{const r=f.run();r.planner.recovery!.nextAt=Date.now()-1;f.store.db.prepare('UPDATE studio_runs SET json=? WHERE id=?').run(JSON.stringify(r),r.id);await f.settle();await f.settle();};
+  await fail();assert.ok(f.run().planner.recovery!.nextAt!>=Date.now()+55000);
+  for(let i=1;i<=5;i++){await due();assert.equal(f.run().planner.recovery?.retries,i);assert.equal(f.run().planner.sessionId,old);assert.equal(f.actions.at(-1)!.type,'send');await fail();}
+  await due();const t=f.run().planner;assert.notEqual(t.sessionId,old);assert.equal(t.recovery?.handoffs,1);assert.equal(t.attempts?.at(-1)?.sessionId,old);assert.equal(f.run().workspace!.value!.branch,branch);
+  const action=f.actions.at(-1)!;assert.equal(action.type,'start');assert.equal(action.model,'same-model');assert.equal(action.permissionMode,'full');assert.match(action.text!,/新会话接力/);assert.match(action.text!,/source.blend/);assert.match(action.text!,/不重跑前置任务/);
+  await fail();assert.equal(f.run().planner.recovery?.phase,'stopped');const count=f.actions.length;await f.settle();assert.equal(f.actions.length,count);
+ }finally{await f.close();}
+});
+
+test('automatic recovery persists its next retry across restart and pauses without consuming an attempt',async()=>{
+ const f=await fixture();let restored:Studio|undefined;try{
+  f.studio.createRun({workflow:'general',projectId:f.project.id,title:'重启恢复',brief:'保留断点'});await f.settle();const t=f.run().planner;
+  f.store.event({id:randomUUID(),sessionId:t.sessionId!,type:'error',at:Date.now(),data:{message:'network connection failed'}});f.finish(t,'已有文件','failed');await f.settle();
+  const nextAt=f.run().planner.recovery!.nextAt,before=f.actions.length;await f.studio.close();restored=new Studio(f.store,(f.studio as any).remote,()=>true,()=>{},f.files);await restored.tick();assert.equal(restored.runs()[0].planner.recovery?.nextAt,nextAt);assert.equal(f.actions.length,before);
+  await restored.command({runId:f.run().id,op:'pause'});const r=f.run();r.planner.recovery!.nextAt=0;f.store.db.prepare('UPDATE studio_runs SET json=? WHERE id=?').run(JSON.stringify(r),r.id);await restored.tick();await turn();assert.equal(f.actions.length,before);assert.equal(f.run().planner.recovery?.retries,0);
+ }finally{await restored?.close();await f.close();}
+});
+
+test('five failed live-status probes stop recovery without sending or forking an unconfirmed old session',async()=>{
+ const f=await fixture();try{
+  f.studio.createRun({workflow:'general',projectId:f.project.id,title:'核对失败',brief:'不能重叠写入'});await f.settle();const t=f.run().planner;
+  f.store.event({id:randomUUID(),sessionId:t.sessionId!,type:'error',at:Date.now(),data:{message:'stream disconnected'}});f.finish(t,'已有文件','failed');await f.settle();
+  let probes=0;const before=f.actions.length;(f.studio as any).remote=async()=>{probes++;throw Error('Connection failed while checking history');};
+  for(let i=0;i<5;i++){const r=f.run();r.planner.recovery!.nextAt=0;f.store.db.prepare('UPDATE studio_runs SET json=? WHERE id=?').run(JSON.stringify(r),r.id);await f.settle();}
+  assert.equal(probes,5);assert.equal(f.actions.length,before);assert.equal(f.run().planner.sessionId,t.sessionId);assert.equal(f.run().planner.recovery?.phase,'stopped');assert.equal(f.run().planner.recovery?.handoffs,0);
+ }finally{await f.close();}
 });
 
 test('an agent process failure retains its original session as a checkpoint; a blocked deliverable does not',async()=>{
