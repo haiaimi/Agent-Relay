@@ -148,27 +148,6 @@ button.file-download { border: 0; background: transparent; color: var(--link); t
 .composer-toolbar .attach-button svg, #composer .send svg { display: block; width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .composer-toolbar .settings-toggle { min-width: 0; max-width: 40%; height: 34px; line-height: 20px; font-size: 12px; padding: 0 6px; }
 .composer-toolbar .settings-toggle>span:last-child { display: none; }
-.permission-toggle { border: 0; border-radius: 8px; background: transparent; color: var(--muted); height: 34px; line-height: 20px; padding: 0 7px; display: flex; align-items: center; gap: 5px; font-size: 12px; white-space: nowrap; }
-.permission-toggle svg { flex: none; width: 10px; height: 10px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
-.permission-toggle:hover { background: var(--surface-hover); color: var(--ink); }
-.permission-toggle[data-mode="full"] { color: #ff934d; background: #ff934d15; }
-.permission-menu { width: min(360px,calc(100vw - 24px)); padding: 14px; border-radius: 18px; max-height: 75dvh; overflow-y: auto; }
-.permission-menu .dialog-heading h2 { font-size: 15px; }
-#permission-close, #settings-close { appearance: none; border: 0; outline: none; box-shadow: none; background: transparent; padding: 0; width: 32px; height: 32px; display: grid; place-items: center; font-size: 24px; line-height: 1; color: var(--muted); }
-#permission-close:hover, #settings-close:hover { color: var(--ink); }
-#permission-close:focus-visible, #settings-close:focus-visible { outline: none; color: var(--link); }
-#permission-menu:focus, #session-settings:focus { outline: none; }
-.permission-option { display: flex; flex-direction: column; width: 100%; gap: 5px; padding: 12px; border: 0; border-radius: 10px; background: transparent; text-align: left; }
-.permission-option span { color: var(--muted); font-size: 12px; line-height: 1.5; }
-.permission-option:hover, .permission-option[aria-pressed="true"] { background: var(--surface); }
-.permission-option[aria-pressed="true"] strong::after { content: ' ✓'; }
-.permission-option[data-permission="full"] strong { color: #ff934d; }
-.permission-menu>.fine { margin: 10px 12px 0; }
-.permission-menu { scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
-.permission-menu::-webkit-scrollbar { width: 5px; }
-.permission-menu::-webkit-scrollbar-track { background: transparent; margin-block: 18px; }
-.permission-menu::-webkit-scrollbar-thumb { background: var(--line); border-radius: 8px; }
-.permission-menu::-webkit-scrollbar-button { display: none; }
 .session-settings.permission-menu { width: min(360px,calc(100vw - 24px)); max-width: 360px; max-height: 75dvh; padding: 14px; border-radius: 18px; overflow-y: auto; }
 .session-settings.permission-menu .dialog-heading h2 { font-size: 15px; }
 .session-settings .settings-field { display: flex; align-items: center; gap: 12px; margin: 12px 0; min-width: 0; }
@@ -185,7 +164,6 @@ button.file-download { border: 0; background: transparent; color: var(--link); t
 @media (max-width:760px) {
   .composer-toolbar { gap: 2px; }
   .composer-toolbar .settings-toggle { max-width: 43%; font-size: 11px; padding: 5px 3px; }
-  .permission-toggle { font-size: 11px; padding: 5px; }
 }
 .session-heading .session-meta #session-status { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session-heading .session-meta .run-indicator { flex: none; width: 20px; height: 20px; background: transparent; color: #22c55e; overflow: visible; }
