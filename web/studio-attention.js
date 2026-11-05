@@ -1,7 +1,7 @@
 import {QuestionPanel} from './questions.js';
 import {disposeMedia} from './studio-media.js';
 const el=(tag,cls,text)=>{const n=document.createElement(tag);n.className=cls||'';if(text!==undefined)n.textContent=text;return n;};
-export function studioAttention({root,getRuns,visible,api,refresh,roleName,review}){
+export function studioAttention({root,getRuns,visible,api,refresh,roleName,review,entryFilter=()=>true,includeReviews=true}){
   const rows=new Map(),reviews=new Map(),snapshots=new Map(),writes=new Map();let loading=false,generation=0,signature='',failures=0,retryAt=0,lastRead=0,successUntil=0;
   root.classList.add('studio-attention');root.hidden=true;root.setAttribute('aria-label','当前需要你确认');
   const heading=el('div','attention-heading'),title=el('strong','','需要你确认'),status=el('p','fine'),body=el('div','attention-items'),reload=el('button','quiet','刷新待确认事项');reload.type='button';heading.append(title,reload);root.append(heading,status,body);reload.onclick=()=>void load(true);
@@ -16,7 +16,7 @@ export function studioAttention({root,getRuns,visible,api,refresh,roleName,revie
     const wanted=new Set(),wantedReviews=new Set();let count=0;
     for(const r of getRuns()){
       const native=snapshots.get(r.id)?.entries??[];
-      for(const entry of native){
+      for(const entry of native.filter(entryFilter)){
         const key=r.id+':'+entry.sessionId;wanted.add(key);let row=rows.get(key);
         if(!row){const element=el('section','attention-session'),label=el('h3'),questionsRoot=el('div'),approvalRoot=el('div');element.append(label,questionsRoot,approvalRoot);row={element,label,approvalRoot,questionRoot:questionsRoot,entry,approvalVersion:''};
           row.panel=new QuestionPanel(questionsRoot,(card,answers)=>submit(row.entry,'answer:'+card.id+':'+JSON.stringify(answers),{type:'answer',questionId:card.id,answers}),()=>online(row.entry),message=>{status.textContent=message;});rows.set(key,row);body.insertBefore(element,body.firstChild);
@@ -34,7 +34,7 @@ export function studioAttention({root,getRuns,visible,api,refresh,roleName,revie
         }
         count+=entry.questions.length+entry.approvals.length||Number(entry.waiting);
       }
-      if(!['accepted','cancelled'].includes(r.status)){
+      if(includeReviews&&!['accepted','cancelled'].includes(r.status)){
         const gates=r.tasks.filter(t=>t.status==='awaiting-review');
         const items=[...gates,...r.status==='plan-review'?[{id:'plan',mode:'plan'}]:[],...r.status==='review'?[{id:'final',mode:'final'}]:[]];
         for(const gate of items){const key=r.id+':'+gate.id;wantedReviews.add(key);const upstream=r.tasks.filter(t=>gate.dependencies?.includes(t.id)),version=JSON.stringify([gate,upstream.map(t=>[t.id,t.summary,t.artifacts]),gate.mode==='final'?r.delivery:null]);let row=reviews.get(key);

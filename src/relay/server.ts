@@ -1,6 +1,7 @@
 import {streamStudioVideo} from './studio-video.js';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { readFile } from 'node:fs/promises';
+import {readFileSync} from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { randomUUID,createHash } from 'node:crypto';
 import { WebSocketServer, WebSocket } from 'ws';
@@ -18,6 +19,7 @@ import {Brainstorms} from './brainstorm.js';
 import {Studio} from './studio.js';
 import {QuestionAnswers} from './question-answers.js';
 import {StudioAttention} from './studio-attention.js';
+import {RelayRepairs} from './repairs.js';
 
 interface Options { dataDir: string; phoneToken: string; bridgeToken: string; publicOrigin?: string;turn?:TurnConfig }
 function publicAgents(value:any){if(value===undefined)return undefined;if(!Array.isArray(value)||value.length>32)throw Error('Invalid agent catalog');return value.map(a=>{if(!/^[a-zA-Z0-9_-]{1,60}$/.test(a.id)||!['codex','claude','api'].includes(a.provider)||typeof a.name!=='string'||a.name.length>80)throw Error('Invalid agent');return {id:a.id,provider:a.provider,name:a.name,configured:a.configured!==false,tools:a.tools===true,revision:typeof a.revision==='string'?a.revision.slice(0,64):undefined};});}
@@ -27,6 +29,7 @@ const staticFiles: Record<string,[string,string]> = {
   '/studio-sidebar.js':['studio-sidebar.js','text/javascript; charset=utf-8'],
   '/studio-attention.js':['studio-attention.js','text/javascript; charset=utf-8'],
   '/studio-api.js':['studio-api.js','text/javascript; charset=utf-8'],
+  '/studio-repairs.js':['studio-repairs.js','text/javascript; charset=utf-8'],
   '/workspace-shell.js':['workspace-shell.js','text/javascript; charset=utf-8'],
   '/workspace-shell.css':['workspace-shell.css','text/css; charset=utf-8'],
   '/studio':['index.html','text/html; charset=utf-8'],
@@ -72,6 +75,7 @@ async function body(req: IncomingMessage,limit=64_000): Promise<any> {
   return JSON.parse(text || '{}');
 }
 export function createRelay(options: Options) {
+  const uiRevision=createHash('sha256').update(['studio.js','studio-repairs.js','studio-attention.js','studio.css','studio.html','workspace-shell.js','app.js'].map(file=>readFileSync(fileURLToPath(new URL(`../../web/${file}`,import.meta.url)))).reduce((all,part)=>Buffer.concat([all,part]),Buffer.alloc(0))).digest('hex');
   if(options.turn)turnCredentials(options.turn);
   requireSecret(options.phoneToken,'PHONE_TOKEN'); requireSecret(options.bridgeToken,'BRIDGE_TOKEN');
   if (equalSecret(options.phoneToken, options.bridgeToken)) throw new Error('Use separate phone and bridge secrets');
@@ -123,7 +127,8 @@ export function createRelay(options: Options) {
   };
   const studio=new Studio(store,remote,host=>bridges.get(host)?.readyState===WebSocket.OPEN,()=>emit('studio',{}),files,inspectVisual);
   const questionAnswers=new QuestionAnswers(store,studio,remote,event=>emit('event',event,store.latestSeq()));
-  const attention=new StudioAttention(store,studio,remote,event=>emit('event',event,store.latestSeq()),host=>bridges.has(host));
+  const repairs=new RelayRepairs(store,studio,remote,host=>bridges.get(host)?.readyState===WebSocket.OPEN,()=>emit('studio',{}),options.publicOrigin,uiRevision);
+  const attention=new StudioAttention(store,studio,remote,event=>emit('event',event,store.latestSeq()),host=>bridges.has(host),id=>repairs.sessionsFor(id));
   const brains=new Brainstorms(store,studio,remote,host=>bridges.get(host)?.readyState===WebSocket.OPEN,()=>emit('studio',{}),files,media);
   const server=createServer(async(req,res)=>{
     res.setHeader('Cache-Control','no-store'); res.setHeader('X-Content-Type-Options','nosniff');
@@ -136,7 +141,7 @@ export function createRelay(options: Options) {
         const embedded=url.pathname==='/studio'&&url.searchParams.get('embedded')==='1';
         if(embedded){res.setHeader('X-Frame-Options','SAMEORIGIN');res.setHeader('Content-Security-Policy',String(res.getHeader('Content-Security-Policy')).replace("frame-ancestors 'none'","frame-ancestors 'self'"));}
         const [mapped,mime]=staticFiles[url.pathname],file=embedded?'studio.html':mapped; const content=await readFile(fileURLToPath(new URL(`../../web/${file}`,import.meta.url)));
-        res.writeHead(200,{'Content-Type':mime}); return res.end(content);
+        res.writeHead(200,{'Content-Type':mime}); return res.end(file==='studio.html'?content.toString().replace('<head>','<head><meta name="relay-ui-version" content="'+uiRevision+'">'):content);
       }
       if(req.method==='POST') {
         const expected=origin ?? `http://${req.headers.host}`;
@@ -159,11 +164,15 @@ export function createRelay(options: Options) {
       }
       if(!auth(req)) return json(res,401,{error:'请先登录'});
       if(req.method==='GET'&&url.pathname==='/api/studio'){
-        const text=JSON.stringify({...studio.state(),brainstorms:brains.list()}),etag='"'+createHash('sha256').update(text).digest('hex')+'"';res.setHeader('ETag',etag);
+        const state=studio.state(),text=JSON.stringify({...state,features:{...state.features,repairVersion:uiRevision},brainstorms:brains.list()}),etag='"'+createHash('sha256').update(text).digest('hex')+'"';res.setHeader('ETag',etag);
         if(req.headers['if-none-match']?.split(',').some(value=>value.trim()==='*'||value.trim().replace(/^W\//,'')===etag)){res.writeHead(304);return res.end();}
         res.writeHead(200,{'Content-Type':'application/json; charset=utf-8'});return res.end(text);
       }
       if(req.method==='GET'&&url.pathname==='/api/studio/attention')return json(res,200,attention.read(url.searchParams.get('runId')??'',url.searchParams.get('refresh')==='1'));
+      if(req.method==='GET'&&url.pathname==='/api/studio/repairs')return json(res,200,repairs.state(url.searchParams.get('runId')??'',url.searchParams.get('taskId')||undefined));
+      if(req.method==='POST'&&url.pathname==='/api/studio/repairs')return json(res,202,repairs.create(await body(req,16000)));
+      if(req.method==='POST'&&url.pathname==='/api/studio/repairs/bind')return json(res,200,{repair:repairs.bind(await body(req))});
+      if(req.method==='POST'&&url.pathname==='/api/studio/repairs/resolve')return json(res,200,{repair:repairs.resolve(await body(req))});
       if(req.method==='GET'&&url.pathname==='/api/studio/channels')return json(res,200,studio.channels(url.searchParams.get('runId')??''));
       if(req.method==='GET'&&url.pathname==='/api/studio/skip-state')return json(res,200,studio.skipState(url.searchParams.get('runId')??'',url.searchParams.get('taskId')??''));
       if(req.method==='POST'&&url.pathname==='/api/studio/chat/settings')return json(res,200,await studio.chatSettings(await body(req)));
@@ -380,5 +389,5 @@ export function createRelay(options: Options) {
     });
     ws.on('error',()=>{});
   });
-  return {server,store,studio,brains, async close(){for(const p of pending.values()){clearTimeout(p.timer);p.reject(new Error('Relay stopping'));}pending.clear();await studio.close();await attention.close();for(const res of viewers)res.end();for(const ws of wss.clients)ws.terminate();wss.close();await new Promise<void>(resolve=>server.close(()=>resolve()));store.close();}};
+  return {server,store,studio,brains,repairs, async close(){for(const p of pending.values()){clearTimeout(p.timer);p.reject(new Error('Relay stopping'));}pending.clear();await studio.close();await repairs.close();await attention.close();for(const res of viewers)res.end();for(const ws of wss.clients)ws.terminate();wss.close();await new Promise<void>(resolve=>server.close(()=>resolve()));store.close();}};
 }

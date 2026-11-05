@@ -9,14 +9,15 @@ export class StudioAttention {
   private syncing=new Map<string,Promise<void>>();
   private checked=new Map<string,number>();
   private failures=new Map<string,number>();
-  constructor(private store:RelayStore,private studio:Studio,private remote:(host:string,action:Action,timeout?:number)=>Promise<any>,private changed:(event:any)=>void,private isOnline:(host:string)=>boolean){}
+  constructor(private store:RelayStore,private studio:Studio,private remote:(host:string,action:Action,timeout?:number)=>Promise<any>,private changed:(event:any)=>void,private isOnline:(host:string)=>boolean,private additional:(runId:string)=>{hostId:string;projectId:string;sessionId:string;taskId:string;title:string;role:string;status:string}[]=()=>[]){}
   private context(id:string){
     const run=this.studio.runs().find(r=>r.id===id);if(!run)throw Error('制作需求不存在');
     const project=this.studio.projects().find(p=>p.id===run.projectId);if(!project)throw Error('项目组不存在');
     const tasks=[run.planner,...run.tasks,...run.delivery?[run.delivery]:[]],ids=new Set<string>();
-    const entries=[...tasks.map(t=>({sessionId:t.sessionId,taskId:t.id,title:t.title,role:t.role,status:t.status})),...(run.chats??[]).filter(c=>!c.resolved).map(c=>({sessionId:c.sessionId,taskId:undefined,title:'职能对话',role:c.role,status:'chat'}))].filter(entry=>{
+    const base=[...tasks.map(t=>({sessionId:t.sessionId,taskId:t.id,title:t.title,role:t.role,status:t.status})),...(run.chats??[]).filter(c=>!c.resolved).map(c=>({sessionId:c.sessionId,taskId:undefined,title:'职能对话',role:c.role,status:'chat'}))].map(e=>({...e,hostId:project.hostId,projectId:run.workspace?.value?.project.id}));
+    const entries=[...base,...this.additional(id)].filter(entry=>{
       if(!entry.sessionId||ids.has(entry.sessionId))return false;const s=this.store.getSession(entry.sessionId);
-      if(!s||s.hostId!==project.hostId||run.workspace?.value&&s.projectId!==run.workspace.value.project.id)return false;
+      if(!s||s.hostId!==entry.hostId||entry.projectId&&s.projectId!==entry.projectId)return false;
       ids.add(entry.sessionId);return true;
     });
     return {run,project,entries};
@@ -32,14 +33,14 @@ export class StudioAttention {
     return {questions:[...questions.values()].filter(q=>['pending','unknown'].includes(q.status)&&(!q.expiresAt||q.expiresAt>Date.now())),approvals:[...approvals.values()].filter(a=>a.expiresAt>Date.now())};
   }
   read(id:string,refresh=false){
-    const {run,project,entries}=this.context(id),online=this.isOnline(project.hostId);
+    const {run,entries}=this.context(id);
     if(refresh)for(const entry of entries){this.failures.delete(entry.sessionId!);this.checked.delete(entry.sessionId!);}
-    const pending=entries.map(entry=>({...entry,sessionId:entry.sessionId!,online,waiting:this.store.getSession(entry.sessionId!)?.status==='waiting',syncFailures:this.failures.get(entry.sessionId!)??0,...this.pending(entry.sessionId!)})).filter(entry=>entry.questions.length||entry.approvals.length||entry.waiting);
+    const pending=entries.map(entry=>({...entry,sessionId:entry.sessionId!,online:this.isOnline(entry.hostId),waiting:this.store.getSession(entry.sessionId!)?.status==='waiting',syncFailures:this.failures.get(entry.sessionId!)??0,...this.pending(entry.sessionId!)})).filter(entry=>entry.questions.length||entry.approvals.length||entry.waiting);
     // Native async questions may first be discovered by a focused history read.
     // Schedule it in the background; a disconnected computer must not delay UI.
     for(const entry of entries){const s=this.store.getSession(entry.sessionId!)!;
       const failures=this.failures.get(s.id)??0;
-      if(online&&failures<5&&(s.status==='waiting'||s.questionCount||!s.managed&&['running','blocked'].includes(entry.status))&&!this.syncing.has(s.id)&&Date.now()-(this.checked.get(s.id)??0)>(failures?60_000:15_000))this.sync(project.hostId,s.id);
+      if(this.isOnline(entry.hostId)&&failures<5&&(s.status==='waiting'||s.questionCount||!s.managed&&['running','blocked'].includes(entry.status))&&!this.syncing.has(s.id)&&Date.now()-(this.checked.get(s.id)??0)>(failures?60_000:15_000))this.sync(entry.hostId,s.id);
     }
     return {runId:run.id,checkedAt:Date.now(),refreshing:entries.some(e=>this.syncing.has(e.sessionId!)),entries:pending};
   }

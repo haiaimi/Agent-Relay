@@ -1,3 +1,4 @@
+import {studioRepairs} from './studio-repairs.js';
 import {createStudioApi} from './studio-api.js';
 import {studioAttention} from './studio-attention.js';
 import {deliveryMedia} from './studio-delivery-media.js';
@@ -26,12 +27,12 @@ const labels={planning:'统筹拆解中','plan-review':'等待确认计划',exec
 const node=(tag,cls,value)=>{const n=document.createElement(tag);if(cls)n.className=cls;if(value!==undefined)n.textContent=value;return n;};
 const pill=(status,label)=>node('span','pill '+status,label||labels[status]||status);
 const current=()=>state.projects.find(p=>p.id===selected);
-const roleName=id=>state.roles.find(r=>r.id===id)?.name||id;
+const roleName=id=>id==='relay-repair'?'Relay 修复 Codex':state.roles.find(r=>r.id===id)?.name||id;
 const hostOf=p=>relay.hosts.find(h=>h.id===p?.hostId);
 const allTasks=r=>[r.planner,...r.tasks,...r.delivery?[r.delivery]:[]];
 const date=at=>new Date(at).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false});
 function notify(message){const notice=$('notice'),dialog=document.activeElement?.closest('dialog[open]')||[...document.querySelectorAll('dialog[open]')].at(-1);(dialog||document.body).append(notice);notice.textContent=message;notice.hidden=false;clearTimeout(noticeTimer);noticeTimer=setTimeout(()=>notice.hidden=true,6000);}
-const api=createStudioApi({sharedState:()=>embed.state(),onUnauthorized:()=>{void clearConversationCache();$('app').hidden=true;$('login').hidden=false;source?.close();for(const panel of attentionPanels)panel.reset();chats.resetAttention();}});
+const api=createStudioApi({sharedState:()=>embed.state(),onUnauthorized:()=>{void clearConversationCache();$('app').hidden=true;$('login').hidden=false;source?.close();for(const panel of attentionPanels)panel.reset();chats.resetAttention();selfRepair.reset();}});
 function option(value,label){const o=document.createElement('option');o.value=value;o.textContent=label;return o;}
 function button(label,fn,cls='quiet'){const b=node('button',cls,label);b.type='button';b.onclick=()=>Promise.resolve().then(fn).catch(e=>notify(e.message));return b;}
 function link(label,url){const a=node('a','button quiet',label);a.href=url;return a;}
@@ -50,7 +51,7 @@ function studioSidebarCommand(v){
 }
 let studioSyncedAt=0,studioSyncError='',studioSyncFailures=0,studioRetryAt=0,studioReadAt=0;
 function renderSyncStatus(){for(const el of document.querySelectorAll('[data-studio-sync]')){el.textContent=studioSyncError?'状态同步失败，当前为上次记录：'+studioSyncError:studioSyncedAt?'已同步 '+new Date(studioSyncedAt).toLocaleTimeString('zh-CN',{hour12:false}):'正在同步状态…';el.classList.toggle('error',!!studioSyncError);}}
-const refresh=coalescedRefresh(async force=>{if(!force&&(Date.now()<studioRetryAt||studioSyncFailures>=5||Date.now()-studioReadAt<2000))return;if(force){studioSyncFailures=0;studioRetryAt=0;}studioReadAt=Date.now();try{const values=await Promise.all([api('studio'),api('state')]);state=values[0];relay=values[1];studioSyncedAt=Date.now();studioSyncError='';studioSyncFailures=0;studioRetryAt=0;selectedProject();const signature=JSON.stringify([state,relay.hosts.map(h=>[h.id,h.online,h.agents,h.projects]),studioSessionSignature(state,relay)]);if(force||signature!==lastSignature){lastSignature=signature;render();if($('run-dialog').open)renderRun();if($('task-dialog').open)renderTask();}chats.update();brainstorms.update();updateAttention();$('connection').textContent=relay.hosts.filter(h=>h.online).length+' 台工作电脑在线';$('connection').dataset.offline=String(!relay.hosts.some(h=>h.online));renderSyncStatus();}catch(e){studioSyncFailures++;studioRetryAt=Date.now()+60000;studioSyncError=e.message+(studioSyncFailures<5?'（一分钟后重试 '+studioSyncFailures+'/5）':'（已尝试五次，请手动刷新核对）');renderSyncStatus();if(force)throw e;}});
+const refresh=coalescedRefresh(async force=>{if(!force&&(Date.now()<studioRetryAt||studioSyncFailures>=5||Date.now()-studioReadAt<2000))return;if(force){studioSyncFailures=0;studioRetryAt=0;}studioReadAt=Date.now();try{const values=await Promise.all([api('studio'),api('state')]);state=values[0];relay=values[1];selfRepair.checkVersion(state.features?.repairVersion);studioSyncedAt=Date.now();studioSyncError='';studioSyncFailures=0;studioRetryAt=0;selectedProject();const signature=JSON.stringify([state,relay.hosts.map(h=>[h.id,h.online,h.agents,h.projects]),studioSessionSignature(state,relay)]);if(force||signature!==lastSignature){lastSignature=signature;render();if($('run-dialog').open)renderRun();if($('task-dialog').open)renderTask();}chats.update();brainstorms.update();updateAttention();$('connection').textContent=relay.hosts.filter(h=>h.online).length+' 台工作电脑在线';$('connection').dataset.offline=String(!relay.hosts.some(h=>h.online));renderSyncStatus();}catch(e){studioSyncFailures++;studioRetryAt=Date.now()+60000;studioSyncError=e.message+(studioSyncFailures<5?'（一分钟后重试 '+studioSyncFailures+'/5）':'（已尝试五次，请手动刷新核对）');renderSyncStatus();if(force)throw e;}});
 function render(){
   publishStudioSidebar();
   updateAttention();
@@ -175,7 +176,7 @@ function activityPanel(r,selected){
   if(selected&&['done','skipped'].includes(selected.status)&&!progress.terminal)section.append(node('p','',selected.status==='skipped'?'你正在查看已跳过的步骤；当前流程进度见下方。':'你正在查看已完成的步骤；当前流程进度见下方。'));
   if(progress.paused&&progress.active.length)section.append(node('p','fine','当前执行继续，后续分发已暂停。'));
   for(const item of progress.items){const row=node('div','run-actions');row.append(node('span','fine',roleName(item.role)+' · '+item.label),button((progress.active.includes(item.id)?'查看当前执行：':'查看待处理：')+item.title,()=>{const latest=state.runs.find(x=>x.id===r.id),task=latest&&allTasks(latest).find(x=>x.id===item.id);if(task)openTask(latest,task);}));section.append(row);}
-  const sync=node('small','fine');sync.dataset.studioSync='';sync.textContent=studioSyncError?'状态同步失败，当前为上次记录：'+studioSyncError:studioSyncedAt?'已同步 '+new Date(studioSyncedAt).toLocaleTimeString('zh-CN',{hour12:false}):'正在同步状态…';section.append(sync,button('刷新流程状态',()=>refresh(true)));return section;
+  const sync=node('small','fine');sync.dataset.studioSync='';sync.textContent=studioSyncError?'状态同步失败，当前为上次记录：'+studioSyncError:studioSyncedAt?'已同步 '+new Date(studioSyncedAt).toLocaleTimeString('zh-CN',{hour12:false}):'正在同步状态…';section.append(sync,button('刷新流程状态',()=>refresh(true)),button('诊断并修复 Relay',()=>selfRepair.open(r,selected)));return section;
 }
 function detailProgress(dialog,r){const heading=$(dialog).querySelector('.dialog-heading>div');if(!heading)return;let line=heading.querySelector('.studio-live-summary');if(!line){line=node('p','fine studio-live-summary');line.setAttribute('role','status');line.setAttribute('aria-live','polite');heading.append(line);}line.textContent=studioRunActivity(r,relay).headline;}
 let renderedRunKey='';
@@ -285,6 +286,7 @@ function confirmationReview(r,gate){
 const attentionPanels=['board','run','task'].map(view=>studioAttention({root:$(view+'-attention'),getRuns:()=>view==='board'?state.runs.filter(r=>r.projectId===selected&&!['accepted','cancelled'].includes(r.status)):state.runs.filter(r=>r.id===activeRun),visible:()=>embed.active&&!$('app').hidden&&!document.hidden&&(view==='board'?!$('board-view').hidden&&!document.querySelector('dialog[open]'):$(view+'-dialog').open&&!$('chat-dialog').open&&!$('feedback-dialog').open&&(view==='task'||!$('task-dialog').open)),api,refresh,roleName,review:confirmationReview}));
 function updateAttention(){for(const panel of attentionPanels)panel.update();}
 function focusAttention(){const index=$('task-dialog').open?2:$('run-dialog').open?1:0;attentionPanels[index].update();void attentionPanels[index].refresh();$( ['board','run','task'][index]+'-attention').scrollIntoView({block:'nearest',behavior:'smooth'});}
+const selfRepair=studioRepairs({api,snapshot:()=>({state,relay}),refresh,notify,roleName,review:confirmationReview,clientError:()=>studioSyncError});
 const chats=studioChat({snapshot:()=>({state,relay}),api,refresh,roleName,notify,review:confirmationReview});
 setInterval(()=>{if(embed.active&&!$('app').hidden&&!document.hidden){updateAttention();chats.updateAttention();}},4000);
 for(const id of ['run-dialog','task-dialog','chat-dialog','feedback-dialog'])$(id).addEventListener('close',()=>updateAttention());
