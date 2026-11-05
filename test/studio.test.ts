@@ -199,6 +199,48 @@ test('extra role conversations use assigned agents in the isolated workspace, pe
 test('guiding a completed task reopens production and invalidates downstream QA',async()=>{
   const f=await fixture();try{f.studio.saveProject({...f.project,reviewPlan:false});f.studio.createRun({workflow:'general',projectId:f.project.id,title:'返工',brief:'制作'});await f.settle();f.finish(f.run().planner,plan([task('a')]));await f.settle();f.finish(f.run().tasks[0],result());await f.settle();f.finish(f.run().tasks[1],result());await f.settle();f.finish(f.run().delivery,result());await f.settle();assert.equal(f.run().status,'review');const r=f.run();await f.studio.chat({id:randomUUID(),runId:r.id,role:'engineering',sessionId:r.tasks[0].sessionId,text:'请把灯改成暖色'});assert.equal(f.run().status,'executing');assert.equal(f.run().tasks[0].status,'running');assert.equal(f.run().tasks[1].status,'queued');assert.equal(f.run().tasks[1].sessionId,undefined);assert.equal(f.run().delivery,undefined);}finally{await f.close();}
 });
+
+async function acceptedDiscussionFixture(){
+ const f=await fixture();try{
+  f.studio.saveProject({...f.project,reviewPlan:false});f.studio.createRun({workflow:'general',projectId:f.project.id,title:'已交付资产',brief:'只核对本需求交付'});await f.settle();
+  f.finish(f.run().planner,plan([task('asset')]));await f.settle();f.finish(f.run().tasks[0],result('done','资产已完成，尚未组装房间'));await f.settle();
+  f.finish(f.run().tasks[1],result());await f.settle();f.finish(f.run().delivery,result('done','只交付素材，没有可运行新房间'));await f.settle();await f.studio.command({op:'accept',runId:f.run().id});return f;
+ }catch(e){await f.close();throw e;}
+}
+const productionSnapshot=(r:any)=>JSON.stringify({status:r.status,planner:r.planner,tasks:r.tasks,delivery:r.delivery,workspace:r.workspace,workflow:r.workflow});
+
+test('accepted task replies start separate followups with scoped attachments and preserve all production state',async()=>{
+ const f=await acceptedDiscussionFixture();try{
+  const r=f.run(),before=productionSnapshot(r),source=r.tasks[0].sessionId!,bytes=Buffer.from('review notes'),id=randomUUID();
+  const file=f.files.put('workstation|'+source,{id,name:'review.txt',size:bytes.length,mime:'text/plain',sha256:createHash('sha256').update(bytes).digest('hex')},bytes);
+  const request={id:randomUUID(),runId:r.id,role:'engineering',sessionId:source,text:'我怎样在本机验收？',attachmentIds:[file.id]},receipt=await f.studio.chat(request),action=f.actions.at(-1)!;
+  assert.equal(action.type,'start');assert.notEqual(receipt.sessionId,source);assert.equal(action.projectId,'studio-'+r.id);assert.equal(action.permissionMode,'request');assert.match(action.text!,/已交付需求的只读后续讨论/);assert.match(action.text!,/没有可运行新房间/);
+  const upload=f.actions.find(a=>a.type==='upload'&&a.upload?.file.id===file.id)!;assert.equal(upload.upload!.scope,'workstation|project:studio-'+r.id);assert.equal(Buffer.from(upload.upload!.data,'base64').toString(),bytes.toString());
+  assert.equal(f.files.refs('workstation|project:studio-'+r.id,[file.id])[0].id,file.id);assert.equal(f.run().chats?.at(-1)?.sourceSessionId,source);assert.equal(f.run().chats?.at(-1)?.afterDelivery,true);assert.equal(productionSnapshot(f.run()),before);
+  const count=f.actions.length;assert.equal((await f.studio.chat(request)).sessionId,receipt.sessionId);assert.equal(f.actions.length,count);
+  await f.studio.chat({id:randomUUID(),runId:r.id,role:'engineering',sessionId:receipt.sessionId,text:'继续说明查看入口'});assert.equal(f.actions.at(-1)!.type,'send');assert.equal(f.actions.at(-1)!.sessionId,receipt.sessionId);assert.equal(productionSnapshot(f.run()),before);
+  await assert.rejects(f.studio.chat({...request,id:randomUUID(),role:'concept'}),/不属于/);
+ }finally{await f.close();}
+});
+
+test('accepted group discussions remain available without reopening production, while cancelled demands reject messages',async()=>{
+ const f=await acceptedDiscussionFixture();try{
+  const r=f.run(),before=productionSnapshot(r),request={id:randomUUID(),runId:r.id,text:'请说明真机验收还缺哪些步骤',roles:['director','concept']};
+  const first=await f.studio.groupChat(request);assert.ok(first.post.deliveries.every(d=>d.status==='sent'));assert.equal(f.run().chats?.filter(c=>c.afterDelivery).length,2);assert.equal(productionSnapshot(f.run()),before);
+  const count=f.actions.length;await f.studio.groupChat(request);assert.equal(f.actions.length,count);await assert.rejects(f.studio.command({op:'resume',runId:r.id}),/已结束/);
+  const cancelled=f.run();cancelled.status='cancelled';f.store.db.prepare('UPDATE studio_runs SET json=? WHERE id=?').run(JSON.stringify(cancelled),r.id);
+  await assert.rejects(f.studio.chat({id:randomUUID(),runId:r.id,role:'director',text:'继续'}),/停止接收/);await assert.rejects(f.studio.groupChat({...request,id:randomUUID()}),/已取消/);
+ }finally{await f.close();}
+});
+
+test('uncertain followup starts on accepted deliveries do not retry or permit a second unconfirmed writer',async()=>{
+ const f=await acceptedDiscussionFixture();try{
+  const r=f.run(),before=productionSnapshot(r),request={id:randomUUID(),runId:r.id,role:'engineering',sessionId:r.tasks[0].sessionId,text:'解释交付'};let attempts=0;
+  (f.studio as any).remote=async()=>{attempts++;throw Error('connection dropped after dispatch');};
+  await assert.rejects(f.studio.chat(request),/connection dropped/);await assert.rejects(f.studio.chat(request),/结果未确认/);await assert.rejects(f.studio.chat({...request,id:randomUUID()}),/启动结果未确认/);assert.equal(attempts,1);assert.equal(productionSnapshot(f.run()),before);
+  await f.studio.command({op:'resolve-chat',runId:r.id,actionId:request.id,confirmedNotStarted:true});assert.equal(f.run().chats?.at(-1)?.resolved,true);assert.equal(productionSnapshot(f.run()),before);
+ }finally{await f.close();}
+});
 test('studio routes independent role sessions through plan confirmation, dependencies, QA, delivery and acceptance',async()=>{
   const f=await fixture();try{
     f.studio.createRun({workflow:'general',projectId:f.project.id,title:'第一关',brief:'做一个可运行关卡'});await f.settle();assert.equal(f.actions.length,1);assert.equal(f.actions[0].provider,'claude');

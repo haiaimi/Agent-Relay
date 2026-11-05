@@ -35,7 +35,7 @@ interface Assignment {role:string;enabled:boolean;provider:Provider;agentId?:str
 export interface StudioProject {toolchain?:StudioToolchain;includeCaptures?:boolean;id:string;name:string;hostId:string;projectId:string;workspaceIndex:number;roles:Assignment[];permissionMode:PermissionMode;concurrency:number;reviewPlan:boolean;createdAt:number;updatedAt:number}
 interface Artifact {path:string;description:string}
 export interface Task {resumeSessionId?:string;flowStopId?:string;id:string;title:string;role:string;brief:string;acceptance:string;dependencies:string[];status:TaskState;stage?:SceneStage;kind?:'visual-review'|'producer-review';reviewType?:'design'|'scene';reviewId?:string;approvedAt?:number;visualSnapshots?:{taskId:string;path:string;sha256:string}[];actionId?:string;sessionId?:string;startedAt?:number;finishedAt?:number;output?:string;summary?:string;artifacts?:Artifact[];checks?:string[];error?:string;feedback?:string;attempts?:{sessionId?:string;output?:string;at:number}[]}
-interface RoleChat {role:string;actionId:string;sessionId?:string;error?:string;startedAt:number;resolved?:boolean}
+interface RoleChat {role:string;actionId:string;sessionId?:string;error?:string;startedAt:number;resolved?:boolean;afterDelivery?:boolean;sourceSessionId?:string}
 export interface StudioRun {recordVideo?:boolean;autoAccepted?:boolean;id:string;projectId:string;title:string;brief:string;status:'planning'|'plan-review'|'executing'|'delivery'|'review'|'accepted'|'cancelled';paused:boolean;tasks:Task[];planner:Task;delivery?:Task;workflow?:SceneWorkflow;createdAt:number;updatedAt:number;revision:number;feedback?:string;log:{id?:string;at:number;text:string;taskId?:string;taskTitle?:string;sessionId?:string;role?:string;skip?:TaskSkip;handoff?:{id:string;role:string;title:string;summary?:string;artifacts?:Artifact[]}[]}[];attachments?:FileRef[];workspace?:{status:'queued'|'preparing'|'ready'|'blocked';actionId?:string;value?:StudioWorkspace;error?:string};chats?:RoleChat[];guidance?:{id:string;role:string;text:string;files:FileRef[];at:number;sessionId:string}[]}
 const roleIds=new Set<string>(STUDIO_ROLES.map(r=>r[0]));
 const text=(v:unknown,max:number,label:string,optional=false)=>{if(typeof v!=='string'||v.length>max||(!optional&&!v.trim()))throw Error('请填写有效的'+label);return v.trim();};
@@ -218,7 +218,7 @@ export class Studio {
   async command(v:any){
     const r=this.run(v.runId),p=this.project(r.projectId),task=this.allTasks(r).find(t=>t.id===v.taskId);
     if(v.op==='record-showcase'){if(r.status==='cancelled'||r.workspace?.status!=='ready'||!this.online(p.hostId))throw Error('请确认需求工作副本可用且工作电脑在线');if(r.tasks.some(t=>t.showcase))return r;if(this.chatBusy(r)||!r.tasks.length||!r.tasks.every(released)||this.allTasks(r).some(t=>['starting','running'].includes(t.status)))throw Error('请先完成制作、审批和当前执行');r.tasks=withShowcase(r.tasks,true);r.recordVideo=true;r.autoAccepted=undefined;r.status='executing';r.paused=false;this.saveRun(r,'制作人补录成果展示视频，保留原分支、已完成任务和审批',r.tasks.find(t=>t.showcase));void this.tick();return this.run(r.id);}
-    if(['accepted','cancelled'].includes(r.status))throw Error('需求已结束');
+    if(r.status==='cancelled'||r.status==='accepted'&&!['bind-chat','resolve-chat'].includes(v.op))throw Error('需求已结束');
     if(v.op==='approve-step'||v.op==='reject-step'){
       if(task?.kind!=='producer-review'||task.status!=='awaiting-review'||task.reviewId!==v.reviewId||!this.dependenciesReady(r,task))throw Error('本轮审批内容已变化，请重新查看');
       if(v.op==='approve-step'){task.status='done';task.approvedAt=Date.now();task.finishedAt=task.approvedAt;task.summary='制作人已确认本轮交付，开放后续环节';this.saveRun(r,'制作人批准：'+task.title,task);}
@@ -317,7 +317,7 @@ export class Studio {
   async groupChat(v:any){const job=this.groupAction(v);this.launches.add(job);try{return await job;}finally{this.launches.delete(job);}}
   private async groupAction(v:any){
     const r=this.run(v.runId),p=this.project(r.projectId),execution=this.execution(r);
-    if(['accepted','cancelled'].includes(r.status))throw Error('此需求已结束');
+    if(r.status==='cancelled')throw Error('此需求已取消');
     if(typeof v.id!=='string'||!uploadId.test(v.id)||!Array.isArray(v.roles)||v.roles.length>13||new Set(v.roles).size!==v.roles.length||v.roles.some((role:string)=>!p.roles.some(a=>a.role===role&&a.enabled)))throw Error('请选择该团队中已启用的接收角色');
     const body=text(v.text??'',12000,'群消息',true);if(!body&&!v.attachmentIds?.length)throw Error('请输入群消息或添加附件');
     if(v.attachmentIds!==undefined&&(!Array.isArray(v.attachmentIds)||!v.attachmentIds.every((id:unknown)=>typeof id==='string'&&uploadId.test(id))))throw Error('无效群消息附件');
@@ -330,8 +330,8 @@ export class Studio {
     // A persisted pending/unconfirmed delivery is never retried automatically.
     for(const delivery of post.deliveries){
       try{
-        const latest=this.run(r.id);if(['accepted','cancelled'].includes(latest.status))throw Error('需求已结束，尚未投递');
-        const active=this.allTasks(latest).find(t=>t.role===delivery.role&&['starting','running'].includes(t.status)),discussion=(latest.chats??[]).filter(c=>c.role===delivery.role&&c.sessionId).at(-1),sessionId=active?.sessionId??discussion?.sessionId;
+        const latest=this.run(r.id);if(latest.status==='cancelled')throw Error('需求已取消，尚未投递');
+        const active=this.allTasks(latest).find(t=>t.role===delivery.role&&['starting','running'].includes(t.status)),discussion=(latest.chats??[]).filter(c=>c.role===delivery.role&&c.sessionId&&(latest.status!=='accepted'||c.afterDelivery)).at(-1),sessionId=active?.sessionId??discussion?.sessionId;
         if(active&&!active.sessionId)throw Error('该职能任务正在启动，消息已留在群里；请核对会话后继续引导');
         if(sessionId)for(const file of refs)this.files?.link(scope,p.hostId+'|'+sessionId,file.id);
         const shared=this.group(r.id).messages.slice(-16).map(m=>`${m.role}${m.taskId?' ['+m.taskId+']':''}: ${m.text.slice(0,1000)}`).join('\n').slice(-7000);
@@ -344,7 +344,7 @@ export class Studio {
   async chat(v:any){const job=this.chatAction(v);this.launches.add(job);try{return await job;}finally{this.launches.delete(job);}}
   private async chatAction(v:any,groupContext=''){
     const r=this.run(v.runId),p=this.project(r.projectId),execution=this.execution(r),a=p.roles.find(a=>a.role===v.role&&a.enabled);
-    if(!a||['accepted','cancelled'].includes(r.status))throw Error('此需求或职能已停止接收消息');
+    if(!a||r.status==='cancelled')throw Error('此需求或职能已停止接收消息');
     if(!this.online(p.hostId))throw Error('工作电脑离线');
     if(typeof v.id!=='string'||!uploadId.test(v.id))throw Error('无效消息 ID');
     const body=text(v.text??'',12000,'消息',true);if(!body&&!v.attachmentIds?.length)throw Error('请输入消息或添加附件');
@@ -356,13 +356,19 @@ export class Studio {
     const scope=p.hostId+'|'+(v.sessionId??'project:'+execution.id),refs=this.files?.refs(scope,v.attachmentIds??[])??[];
     if(v.attachmentIds?.length&&!this.files)throw Error('附件服务未启用');
     validateAssignment(a,this.store.hosts().find(h=>h.id===p.hostId)!);
-    const task=this.allTasks(r).find(t=>t.sessionId===v.sessionId&&v.sessionId);
+    const afterDelivery=r.status==='accepted',sourceTask=this.allTasks(r).find(t=>t.sessionId===v.sessionId&&v.sessionId);
+    // Completed production remains an immutable reference. A follow-up gets its
+    // own discussion writer instead of reopening the accepted task or its QA.
+    const targetSessionId=afterDelivery&&v.sessionId&&!(r.chats??[]).some(c=>c.sessionId===v.sessionId&&c.afterDelivery)?undefined:v.sessionId;
+    if(!targetSessionId&&(r.chats??[]).some(c=>c.role===v.role&&!c.sessionId&&!c.resolved&&c.actionId!==v.id))throw Error('该角色的会话启动结果未确认，请先核对执行记录');
+    const task=afterDelivery?undefined:sourceTask;
     if(task&&!['starting','running'].includes(task.status)&&this.allTasks(r).some(t=>t!==task&&['starting','running'].includes(t.status)))throw Error('其他制作任务正在进行。请向当前执行的任务引导，或待本轮结束后对该职能补充，系统将重新验证后续任务');
     if(task&&!this.dependenciesReady(r,task))throw Error('该任务的前置环节或本轮视觉确认尚未完成，不能通过聊天提前执行');
     const sharedTools=p.toolchain?'\n团队共享工具环境（工作电脑上的路径，纯讨论不运行无关 DCC）：'+JSON.stringify(p.toolchain)+'\n':'';
-    const instruction=(task?'\n这是制作人对本任务的补充。按补充继续制作，完成后重新输出原要求的 '+(task===r.planner?'STUDIO_PLAN':'STUDIO_RESULT')+' 结构化代码块；验收必须基于补充后的实际结果。':'')+sharedTools;
-    groupContext=groupContext.slice(0,Math.max(0,MAX_TEXT-body.length-r.brief.length-a.instructions.length-a.tools.length-sharedTools.length-1500));
-    const action:Action=v.sessionId?{id:v.id,type:'send',sessionId:v.sessionId,text:groupContext+(body||'请查看附件。')+instruction,attachmentIds:refs.map(f=>f.id)}:{id:v.id,type:'start',projectId:execution.id,workspaceIndex:0,provider:a.provider,agentId:a.agentId,model:a.model,effort:a.effort,permissionMode:p.permissionMode,text:`你是游戏团队的${STUDIO_ROLES.find(x=>x[0]===v.role)![1]}，与制作人直接对话。需求：${r.title}\n${r.brief}\n独立分支：${r.workspace!.value!.branch}\n工作目录：${execution.path}\n职责：${a.instructions}\n工具：${a.tools}${sharedTools}\n这是只读讨论会话，不修改工程。制作人要求改动时，请说明需要在对应制作任务会话中提出，以便后续 QA 重新验证。保护已有修改，遵循工程约定，不切换源工程或主干，不提交、推送或发布。视频或其他文件使用本机工具读取，无法读取须说明。\n制作人：${groupContext}${body||'请查看附件。'}`,attachmentIds:refs.map(f=>f.id)};
+    const deliveryContext=afterDelivery?'\n这是已交付需求的只读后续讨论。回答制作人的追问，不修改工程、已完成任务或验收记录，不重新输出制作结果或重新执行生产。需要改动时建议发起新制作需求。解释本机/真机验收时，区分素材预览、真实游戏入口与目标设备实测，不将旧场景或展示视频当成新关卡已可玩。\n所选流程与实际交付：'+JSON.stringify({workflow:r.workflow?.selection,sourceTask:sourceTask?{id:sourceTask.id,title:sourceTask.title,summary:sourceTask.summary}:undefined,delivery:r.delivery?.summary,tasks:r.tasks.map(t=>({id:t.id,title:t.title,stage:t.stage,summary:t.summary?.slice(0,500),artifacts:t.artifacts?.slice(0,5)}))}).slice(0,6000):'';
+    const instruction=(task?'\n这是制作人对本任务的补充。按补充继续制作，完成后重新输出原要求的 '+(task===r.planner?'STUDIO_PLAN':'STUDIO_RESULT')+' 结构化代码块；验收必须基于补充后的实际结果。':'')+sharedTools+deliveryContext;
+    groupContext=groupContext.slice(0,Math.max(0,MAX_TEXT-body.length-r.brief.length-a.instructions.length-a.tools.length-sharedTools.length-deliveryContext.length-1500));
+    const action:Action=targetSessionId?{id:v.id,type:'send',sessionId:targetSessionId,text:groupContext+(body||'请查看附件。')+instruction,attachmentIds:refs.map(f=>f.id)}:{id:v.id,type:'start',projectId:execution.id,workspaceIndex:0,provider:a.provider,agentId:a.agentId,model:a.model,effort:a.effort,permissionMode:afterDelivery?'request':p.permissionMode,text:`你是游戏团队的${STUDIO_ROLES.find(x=>x[0]===v.role)![1]}，与制作人直接对话。需求：${r.title}\n${r.brief}\n独立分支：${r.workspace!.value!.branch}\n工作目录：${execution.path}\n职责：${a.instructions}\n工具：${a.tools}${sharedTools}${deliveryContext}\n这是只读讨论会话，不修改工程。制作人要求改动时，请说明${afterDelivery?'需要发起新的制作需求':'需要在对应制作任务会话中提出'}，以便后续 QA 重新验证。保护已有修改，遵循工程约定，不切换源工程或主干，不提交、推送或发布。视频或其他文件使用本机工具读取，无法读取须说明。\n制作人：${groupContext}${body||'请查看附件。'}`,attachmentIds:refs.map(f=>f.id)};
     const prior=this.store.beginAction(action.id,p.hostId,action);if(!prior.fresh){if(prior.result)return prior.result;throw Error('消息已接受，结果未确认；请核对聊天记录，不会重复发送');}
     if(task&&!['starting','running'].includes(task.status)){
       const affected=this.dependentTasks(r,[task.id]);
@@ -370,12 +376,18 @@ export class Studio {
       task.status='running';task.skip=undefined;task.startedAt=Date.now();task.error=undefined;
       if(task===r.planner){r.tasks=[];r.delivery=undefined;r.status='planning';}else if(task===r.delivery)r.status='delivery';else{r.delivery=undefined;r.status='executing';}this.saveRun(r,'制作人补充已完成任务，重新验证后续交付',task);
     }
-    if(!v.sessionId){r.chats??=[];r.chats.push({role:v.role,actionId:v.id,startedAt:Date.now()});this.saveRun(r,'开启角色对话：'+STUDIO_ROLES.find(x=>x[0]===v.role)![1]);}
+    if(!targetSessionId){for(const file of refs)this.files?.link(scope,p.hostId+'|project:'+execution.id,file.id);r.chats??=[];r.chats.push({role:v.role,actionId:v.id,startedAt:Date.now(),...afterDelivery?{afterDelivery:true,sourceSessionId:v.sessionId}:{}});this.saveRun(r,(afterDelivery?'开启交付后讨论：':'开启角色对话：')+STUDIO_ROLES.find(x=>x[0]===v.role)![1]);}
     try{
-      const result=await this.remote(p.hostId,action);this.store.finishAction(action.id,result);const latest=this.run(r.id),sessionId=v.sessionId??result.sessionId;
+      if(!targetSessionId&&v.sessionId)for(const file of refs){
+        // The browser uploaded against the selected old session. Register those
+        // same user files in the workstation's new-discussion project scope too.
+        const payload=this.files!.read(scope,file.id),uploaded=await this.remote(p.hostId,{id:randomUUID(),type:'upload',projectId:execution.id,upload:{scope:p.hostId+'|project:'+execution.id,file:payload.file,data:payload.bytes.toString('base64')}});
+        if(uploaded.file?.id!==file.id||uploaded.file?.sha256!==file.sha256)throw Error('附件转入交付后讨论未确认，请核对后再继续');
+      }
+      const result=await this.remote(p.hostId,action);this.store.finishAction(action.id,result);const latest=this.run(r.id),sessionId=targetSessionId??result.sessionId;
       if(typeof sessionId!=='string')throw Error('Agent 未返回会话 ID，请核对执行记录');
       for(const f of refs)this.files?.link(scope,p.hostId+'|project:'+execution.id,f.id);
-      if(!v.sessionId){const c=latest.chats!.find(c=>c.actionId===v.id)!;c.sessionId=sessionId;for(const f of refs)this.files?.link(scope,p.hostId+'|'+sessionId,f.id);}
+      if(!targetSessionId){const c=latest.chats!.find(c=>c.actionId===v.id)!;c.sessionId=sessionId;for(const f of refs)this.files?.link(scope,p.hostId+'|'+sessionId,f.id);}
       latest.guidance??=[];latest.guidance.push({id:v.id,role:v.role,text:body,files:refs,at:Date.now(),sessionId});latest.guidance=latest.guidance.slice(-100);this.saveRun(latest,'制作人补充：'+STUDIO_ROLES.find(x=>x[0]===v.role)![1]);
       if(latest.status==='cancelled')await this.remote(p.hostId,{id:randomUUID(),type:'stop',sessionId});
       return {...result,sessionId};

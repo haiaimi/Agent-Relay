@@ -15,7 +15,7 @@ export function roleSessions(run,role){
     for(const [index,attempt] of (task.attempts??[]).entries())if(attempt.sessionId&&attempt.sessionId!==task.sessionId)result.push({id:attempt.sessionId,task,archived:true,label:`${task.id} · ${task.title} · 历史第 ${index+1} 次`});
     if(task.sessionId)result.push({id:task.sessionId,task,archived:false,label:`${task.id} · ${task.title} · ${taskStatus[task.status]||task.status}`});
   }
-  for(const [index,chat] of (run.chats??[]).filter(c=>c.role===role&&c.sessionId).entries())result.push({id:chat.sessionId,label:'制作人对话 '+(index+1),archived:false});
+  for(const [index,chat] of (run.chats??[]).filter(c=>c.role===role&&c.sessionId).entries())result.push({id:chat.sessionId,label:(chat.afterDelivery?'交付后讨论 ':'制作人对话 ')+(index+1),archived:false});
   return result.filter((s,i)=>result.findIndex(x=>x.id===s.id)===i);
 }
 // Native tool messages contain the reviewable command and result. Activity events
