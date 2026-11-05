@@ -24,6 +24,25 @@ test('each demand receives its own branch, preserves staged/unstaged/untracked s
 test('a nested game directory stays within the matching isolated repository',async()=>{
   const f=fixture();try{mkdirSync(join(f.repo,'project'));writeFileSync(join(f.repo,'project','project.godot'),'fixture');const result=await prepareStudioWorkspace(f.store,f.data,{...f.project,path:join(f.repo,'project')},0,randomUUID());assert.equal(readFileSync(join(result.project.path,'project.godot'),'utf8'),'fixture');assert.ok(result.project.path.endsWith('project'));}finally{f.close();}
 });
+
+test('continuation snapshots the delivered worktree including uncommitted assets without modifying its branch or index',async()=>{
+  const f=fixture();try{
+    const parent=await prepareStudioWorkspace(f.store,f.data,f.project,0,randomUUID());
+    writeFileSync(join(parent.project.path,'game.txt'),'delivered game changes');git(parent.project.path,'add','game.txt');
+    writeFileSync(join(parent.project.path,'game.txt'),'delivered staged and unstaged changes');
+    mkdirSync(join(parent.project.path,'assets'));writeFileSync(join(parent.project.path,'assets','room.glb'),'delivered untracked asset');
+    mkdirSync(join(parent.project.path,'cache'));writeFileSync(join(parent.project.path,'cache','ignored.bin'),'cache');
+    const before=git(parent.project.path,'status','--porcelain=v1'),index=git(parent.project.path,'diff','--cached');
+    const child=await prepareStudioWorkspace(f.store,f.data,parent.project,0,randomUUID());
+    assert.equal(child.sourcePath,parent.project.path);assert.equal(child.sourceBranch,parent.branch);assert.equal(child.head,parent.head);assert.notEqual(child.branch,parent.branch);
+    assert.equal(readFileSync(join(child.project.path,'assets','room.glb'),'utf8'),'delivered untracked asset');
+    assert.equal(readFileSync(join(child.project.path,'game.txt'),'utf8'),'delivered staged and unstaged changes');assert.equal(existsSync(join(child.project.path,'cache')),false);
+    writeFileSync(join(child.project.path,'assets','room.glb'),'next production change');
+    assert.equal(readFileSync(join(parent.project.path,'assets','room.glb'),'utf8'),'delivered untracked asset');
+    assert.equal(git(parent.project.path,'status','--porcelain=v1'),before);assert.equal(git(parent.project.path,'diff','--cached'),index);assert.equal(git(parent.project.path,'branch','--show-current').trim(),parent.branch);
+    assert.equal(readFileSync(join(f.repo,'game.txt'),'utf8'),'baseline\n');
+  }finally{f.close();}
+});
 test('engine submodules get independent dirty snapshots without switching the original engine',async()=>{
   const f=fixture();try{
     const engine=join(f.root,'engine-origin');mkdirSync(engine);git(engine,'init','-b','main');writeFileSync(join(engine,'engine.txt'),'baseline');git(engine,'add','.');git(engine,'commit','-m','Engine fixture');

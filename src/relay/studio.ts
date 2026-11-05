@@ -1,7 +1,8 @@
 import {withShowcase,videoPath} from './studio-showcase.js';
 import {normalizeProductionFlow,productionFlowInstructions,productionRoleIds,ProductionPlanError} from './studio-flow.js';
 import {validateToolchain,validateBlockers,toolchainInstructions,type StudioToolchain,type StudioBlocker} from './studio-tools.js';
-import {randomUUID} from 'node:crypto';
+import {createHash,randomUUID} from 'node:crypto';
+import {continuationSnapshot,continuationInstructions,type StudioContinuation} from './studio-continuation.js';
 import {MAX_TEXT,type Action,type Host,type Provider,type PermissionMode} from '../shared/protocol.js';
 import type {RelayStore} from './store.js';
 import {FileStore,type FileRef,uploadId,MAX_UPLOAD_BYTES} from '../shared/files.js';
@@ -37,6 +38,7 @@ interface Artifact {path:string;description:string}
 export interface Task {resumeSessionId?:string;flowStopId?:string;id:string;title:string;role:string;brief:string;acceptance:string;dependencies:string[];status:TaskState;stage?:SceneStage;kind?:'visual-review'|'producer-review';reviewType?:'design'|'scene';reviewId?:string;approvedAt?:number;visualSnapshots?:{taskId:string;path:string;sha256:string}[];actionId?:string;sessionId?:string;startedAt?:number;finishedAt?:number;output?:string;summary?:string;artifacts?:Artifact[];checks?:string[];error?:string;feedback?:string;attempts?:{sessionId?:string;output?:string;at:number}[]}
 interface RoleChat {role:string;actionId:string;sessionId?:string;error?:string;startedAt:number;resolved?:boolean;afterDelivery?:boolean;sourceSessionId?:string}
 export interface StudioRun {chatPermissions?:Partial<Record<string,PermissionMode>>}
+export interface StudioRun {continuation?:StudioContinuation}
 export interface StudioRun {recordVideo?:boolean;autoAccepted?:boolean;id:string;projectId:string;title:string;brief:string;status:'planning'|'plan-review'|'executing'|'delivery'|'review'|'accepted'|'cancelled';paused:boolean;tasks:Task[];planner:Task;delivery?:Task;workflow?:SceneWorkflow;createdAt:number;updatedAt:number;revision:number;feedback?:string;log:{id?:string;at:number;text:string;taskId?:string;taskTitle?:string;sessionId?:string;role?:string;skip?:TaskSkip;handoff?:{id:string;role:string;title:string;summary?:string;artifacts?:Artifact[]}[]}[];attachments?:FileRef[];workspace?:{status:'queued'|'preparing'|'ready'|'blocked';actionId?:string;value?:StudioWorkspace;error?:string};chats?:RoleChat[];guidance?:{id:string;role:string;text:string;files:FileRef[];at:number;sessionId:string}[]}
 const roleIds=new Set<string>(STUDIO_ROLES.map(r=>r[0]));
 const text=(v:unknown,max:number,label:string,optional=false)=>{if(typeof v!=='string'||v.length>max||(!optional&&!v.trim()))throw Error('请填写有效的'+label);return v.trim();};
@@ -98,7 +100,7 @@ export class Studio {
           run.workspace={status:'queued'};this.saveRun(run,'现有只读计划已保留；制作任务改用独立分支，原统筹会话归入历史');
         }else{run.workspace={status:'blocked',error:'旧需求未建立隔离分支，已暂停后续分发；请新建需求使用独立分支。'};run.paused=true;this.saveRun(run);}
       }
-      if(run.workspace.status==='preparing'){const result=this.receipt(run.workspace.actionId);run.workspace=result?.workspace?{status:'ready',value:result.workspace}:{status:'blocked',error:'工作副本准备结果未确认。检查后可点击重新核对；不会在原工程启动。'};this.saveRun(run);}
+      if(run.workspace.status==='preparing'){const result=this.receipt(run.workspace.actionId);try{this.verifyWorkspace(run,result?.workspace);run.workspace={status:'ready',value:result.workspace};}catch(e){run.workspace={status:'blocked',error:result?.workspace?(e as Error).message:'工作副本准备结果未确认。检查后可点击重新核对；不会在原工程启动。'};}this.saveRun(run);}
       if(run.workspace.status==='ready'&&run.workspace.value){const p=this.project(run.projectId);for(const f of run.attachments??[])this.files?.link(p.hostId+'|project:'+p.projectId,p.hostId+'|project:'+run.workspace.value.project.id,f.id);}
       for(const chat of run.chats??[])if(!chat.sessionId&&!chat.error&&!chat.resolved){const result=this.receipt(chat.actionId);if(result?.sessionId)chat.sessionId=result.sessionId;else chat.error='会话启动结果未确认，请先核对会话工作台，系统不会重复发送。';this.saveRun(run);}
     }
@@ -205,20 +207,39 @@ export class Studio {
     this.store.db.prepare('INSERT OR REPLACE INTO studio_projects VALUES(?,?)').run(p.id,JSON.stringify(p));this.changed();return p;
   }
   createRun(v:any){
+    // The client keeps this UUID across uncertain responses. Never create a second branch on retry.
+    const requestHash=v.parentRunId?createHash('sha256').update(JSON.stringify([v.projectId,v.parentRunId,v.title,v.brief,v.workflow,v.reuseReason,v.flowConfig,v.recordVideo,v.attachmentIds??[]])).digest('hex'):undefined;
+    if(v.parentRunId){
+      if(!uploadId.test(v.parentRunId)||typeof v.requestId!=='string'||!uploadId.test(v.requestId))throw Error('继续制作需要有效的上游需求和创建 ID');
+      const existing=this.runs().find(r=>r.id===v.requestId);
+      if(existing){if(!existing.continuation||existing.continuation.requestHash!==requestHash||existing.continuation.parentRunId!==v.parentRunId)throw Error('创建 ID 已用于其他内容，请重新发起');return existing;}
+    }
     const p=this.project(v.projectId);if(!this.online(p.hostId))throw Error('工作电脑离线，请上线后发起');
     if(!this.store.hosts().find(h=>h.id===p.hostId)?.capabilities?.studioWorkspaces)throw Error('请先升级工作电脑连接程序，以支持每个需求独立分支');
     if(v.attachmentIds!==undefined&&(!Array.isArray(v.attachmentIds)||!v.attachmentIds.every((id:unknown)=>typeof id==='string'&&uploadId.test(id))))throw Error('无效需求附件');
     if(v.attachmentIds?.length&&!this.files)throw Error('附件服务未启用');
     const title=text(v.title,160,'需求名称'),brief=text(v.brief,12000,'制作需求'),workflow=sceneWorkflow(v.workflow,title,brief,v.reuseReason);workflow.selection=normalizeProductionFlow(v.flowConfig);if(workflow.selection){workflow.kind=workflow.selection.stages.some(s=>['concept','asset-spec','assets','assembly'].includes(s))?'scene':'general';workflow.explicitGeneral=false;}requireSceneRoles(workflow,p.roles);
     if(v.recordVideo!==undefined&&typeof v.recordVideo!=='boolean')throw Error('无效展示视频选项');
-    const now=Date.now(),r:StudioRun={recordVideo:v.recordVideo===true,id:randomUUID(),projectId:p.id,title,brief,workflow,status:'planning',paused:false,tasks:[],planner:{id:'studio-plan',title:'需求拆解与制作计划',role:'director',brief:'拆解制作人需求',acceptance:'任务依赖与验收标准完整',dependencies:[],status:'queued'},createdAt:now,updatedAt:now,revision:0,log:[]};
+    const parent=v.parentRunId?this.continuationParent(v.parentRunId,p):undefined;
+    const now=Date.now(),r:StudioRun={recordVideo:v.recordVideo===true,id:parent?v.requestId:randomUUID(),projectId:p.id,title,brief,workflow,status:'planning',paused:false,tasks:[],planner:{id:'studio-plan',title:'需求拆解与制作计划',role:'director',brief:'拆解制作人需求',acceptance:'任务依赖与验收标准完整',dependencies:[],status:'queued'},createdAt:now,updatedAt:now,revision:0,log:[]};
+    if(parent)r.continuation=continuationSnapshot(parent,p.hostId,requestHash!);
     r.workspace={status:'queued'};r.chats=[];r.guidance=[];r.attachments=this.files?.refs(p.hostId+'|project:'+p.projectId,v.attachmentIds??[])??[];
     for(const file of r.attachments)this.files?.link(p.hostId+'|project:'+p.projectId,'studio:'+r.id,file.id);
-    this.saveRun(r,'制作人提出需求，先准备独立分支与工作副本');void this.tick();return r;
+    this.saveRun(r,parent?'基于已交付需求继续制作：'+parent.title+'；从上游副本准备独立分支':'制作人提出需求，先准备独立分支与工作副本');void this.tick();return r;
+  }
+  private continuationCopying(id:string){return this.runs().some(r=>r.continuation?.parentRunId===id&&['queued','preparing'].includes(r.workspace?.status??''));}
+  private continuationParent(id:string,p:StudioProject){
+    const r=this.run(id),w=r.workspace?.value;
+    if(r.projectId!==p.id)throw Error('上游需求不属于当前项目组');
+    if(r.status!=='accepted'||r.workspace?.status!=='ready'||!w||r.delivery?.status!=='done'||!r.tasks.every(released))throw Error('请先完成并交付上游需求，再继续制作');
+    if(this.chatBusy(r)||this.allTasks(r).some(t=>{const s=t.sessionId?this.store.getSession(t.sessionId):undefined;return s&&(['running','waiting'].includes(s.status)||s.pendingCount);}))throw Error('上游职能对话正在执行，请结束后再复制交付');
+    const hostId=r.planner.sessionId?this.store.getSession(r.planner.sessionId)?.hostId:undefined;
+    if(hostId!==p.hostId)throw Error('上游工作副本所在电脑与当前团队不一致，请恢复原工作电脑');
+    return r;
   }
   async command(v:any){
     const r=this.run(v.runId),p=this.project(r.projectId),task=this.allTasks(r).find(t=>t.id===v.taskId);
-    if(v.op==='record-showcase'){if(r.status==='cancelled'||r.workspace?.status!=='ready'||!this.online(p.hostId))throw Error('请确认需求工作副本可用且工作电脑在线');if(r.tasks.some(t=>t.showcase))return r;if(this.chatBusy(r)||!r.tasks.length||!r.tasks.every(released)||this.allTasks(r).some(t=>['starting','running'].includes(t.status)))throw Error('请先完成制作、审批和当前执行');r.tasks=withShowcase(r.tasks,true);r.recordVideo=true;r.autoAccepted=undefined;r.status='executing';r.paused=false;this.saveRun(r,'制作人补录成果展示视频，保留原分支、已完成任务和审批',r.tasks.find(t=>t.showcase));void this.tick();return this.run(r.id);}
+    if(v.op==='record-showcase'){if(this.continuationCopying(r.id))throw Error('正在复制本次交付，请稍后再补录');if(r.status==='cancelled'||r.workspace?.status!=='ready'||!this.online(p.hostId))throw Error('请确认需求工作副本可用且工作电脑在线');if(r.tasks.some(t=>t.showcase))return r;if(this.chatBusy(r)||!r.tasks.length||!r.tasks.every(released)||this.allTasks(r).some(t=>['starting','running'].includes(t.status)))throw Error('请先完成制作、审批和当前执行');r.tasks=withShowcase(r.tasks,true);r.recordVideo=true;r.autoAccepted=undefined;r.status='executing';r.paused=false;this.saveRun(r,'制作人补录成果展示视频，保留原分支、已完成任务和审批',r.tasks.find(t=>t.showcase));void this.tick();return this.run(r.id);}
     if(r.status==='cancelled'||r.status==='accepted'&&!['bind-chat','resolve-chat'].includes(v.op))throw Error('需求已结束');
     if(v.op==='approve-step'||v.op==='reject-step'){
       if(task?.kind!=='producer-review'||task.status!=='awaiting-review'||task.reviewId!==v.reviewId||!this.dependenciesReady(r,task))throw Error('本轮审批内容已变化，请重新查看');
@@ -365,6 +386,7 @@ export class Studio {
   async chat(v:any){const job=this.chatAction(v);this.launches.add(job);try{return await job;}finally{this.launches.delete(job);}}
   private async chatAction(v:any,groupContext=''){
     const r=this.run(v.runId),p=this.project(r.projectId),execution=this.execution(r),a=p.roles.find(a=>a.role===v.role&&a.enabled);
+    if(this.continuationCopying(r.id))throw Error('正在复制本次交付，请稍后再发起职能对话');
     if(!a||r.status==='cancelled')throw Error('此需求或职能已停止接收消息');
     if(!this.online(p.hostId))throw Error('工作电脑离线');
     if(typeof v.id!=='string'||!uploadId.test(v.id))throw Error('无效消息 ID');
@@ -438,12 +460,27 @@ export class Studio {
       this.saveRun(latest,'已更新：玩法与 LD 设计 → 原画 → 制作人确认 → 数值与程序制作；已有成果保留，暂存任务在原会话续做');return latest;
     }catch(e){const latest=this.run(r.id);latest.paused=true;if(latest.workflow)latest.workflow.error='更新场景流程未完成：'+(e as Error).message;this.saveRun(latest,latest.workflow?.error);throw e;}
   }
+  private verifyWorkspace(r:StudioRun,w:StudioWorkspace|undefined){
+    if(w?.runId!==r.id||w.branch!=='codex/studio-'+r.id||w.project?.id!=='studio-'+r.id)throw Error('工作电脑未确认隔离工作副本');
+    const source=r.continuation?.source;
+    if(source&&(w.sourcePath!==source.path||w.sourceBranch!==source.branch||w.head!==source.head))throw Error('继承的源副本 / 分支 / HEAD 与上游交付不一致，已停止分发');
+  }
   private prepare(r:StudioRun,p:StudioProject){
     r.workspace={status:'preparing',actionId:randomUUID()};this.saveRun(r,'准备独立 Git 分支与工作副本');
-    const action:Action={id:r.workspace.actionId!,type:'prepare-workspace',includeCaptures:p.includeCaptures===true,workspaceId:r.id,projectId:p.projectId,workspaceIndex:p.workspaceIndex,attachmentIds:(r.attachments??[]).map(f=>f.id)};
+    const source=r.continuation?.source;
+    const action:Action={id:r.workspace.actionId!,type:'prepare-workspace',includeCaptures:p.includeCaptures===true,workspaceId:r.id,projectId:source?.projectId??p.projectId,workspaceIndex:source?0:p.workspaceIndex,attachmentIds:(r.attachments??[]).map(f=>f.id)};
     const job=(async()=>{try{
+      if(source){
+        const parent=this.continuationParent(r.continuation!.parentRunId,p),w=parent.workspace!.value!;
+        if(w.project.id!==source.projectId||w.project.path!==source.path||w.branch!==source.branch||w.head!==source.head)throw Error('上游工作副本绑定已变化，请重新发起继续制作');
+        for(const file of r.attachments??[]){
+          const payload=this.files!.read('studio:'+r.id,file.id),scope=p.hostId+'|project:'+source.projectId;
+          const uploaded=await this.remote(p.hostId,{id:randomUUID(),type:'upload',projectId:source.projectId,upload:{scope,file:payload.file,data:payload.bytes.toString('base64')}});
+          if(uploaded?.file?.id!==file.id||uploaded.file.sha256!==file.sha256)throw Error('上游副本未收到新增参考附件：'+file.name);
+        }
+      }
       this.store.beginAction(action.id,p.hostId,action);const result=await this.remote(p.hostId,action,1800000);this.store.finishAction(action.id,result);
-      if(result?.workspace?.runId!==r.id||result.workspace.branch!=='codex/studio-'+r.id||result.workspace.project?.id!=='studio-'+r.id)throw Error('工作电脑未确认隔离工作副本');
+      this.verifyWorkspace(r,result?.workspace);
       const latest=this.run(r.id);latest.workspace={status:'ready',value:result.workspace};for(const f of latest.attachments??[])this.files?.link(p.hostId+'|project:'+p.projectId,p.hostId+'|project:'+result.workspace.project.id,f.id);this.saveRun(latest,'独立分支已就绪：'+result.workspace.branch);
     }catch(e){const latest=this.run(r.id);latest.workspace={status:'blocked',error:(e as Error).message};this.saveRun(latest,'工作副本准备失败，已停止分发');}})();this.launches.add(job);void job.finally(()=>this.launches.delete(job));
   }
@@ -451,10 +488,10 @@ export class Studio {
     const a=p.roles.find(a=>a.role===t.role)!,role=STUDIO_ROLES.find(x=>x[0]===t.role)!;
     const contextNotes=`独立需求分支：${r.workspace!.value!.branch}\n当前工作副本：${this.execution(r).path}。源工程 ${r.workspace!.value!.sourcePath} 只用于识别，不在源目录执行或修改文件。任务说明中若提到源工程绝对路径，必须映射到当前工作副本；引擎子模块也使用副本内的 engine 目录。禁止切换或修改源工程 / 主干。\n制作人参考附件：${(r.attachments??[]).map(f=>f.name).join('、')||'无'}。图片随输入提供；视频和其他文件通过输入附带的本机路径读取，视频可用已有工具抽帧；工具不可用时明确报告，不能声称已经观看。\n团队群聊补充：\n${this.groupPosts(r.id).slice(-8).map(m=>'制作人 @'+m.roles.join(',')+': '+m.text+' [附件 '+m.files.map(f=>f.name).join(',')+']').join('\n').slice(-2500)}\n后续制作人补充：\n${(r.guidance??[]).slice(-12).map(g=>g.role+': '+g.text+' [附件 '+g.files.map(f=>f.name).join(',')+']').join('\n').slice(r.workflow?.kind==='scene'?-3000:-5000)}\n`;
     const resumeNote=t.resumeSessionId?['继续同一个任务、同一份工程与已有实现，从原代码续做，不另起一套玩法。先检查原会话记录、已有文件与验证结果，从未完成的步骤继续；不得重跑已完成的前置任务，也不得跳过制作人审批。','断点前的公开执行记录（可能不完整，须核对工程）：',(t.output??'').slice(-5000),''].join('\n'):'';
-    const common=`${resumeNote}${contextNotes}${toolchainInstructions(p.toolchain,this.execution(r).path,r.workspace!.value!.sourcePath)}${sceneTaskInstructions(t,r.workflow)}【${role[1]}】${r.title} / ${t.title}\n你是游戏团队的${role[1]}。制作人需求：\n${r.title}\n${t.resumeSessionId?'制作人原始需求沿用本会话开头的完整说明；结合以下最新补充与已有工程续做。':r.brief}\n\n职能职责：${role[2]}\n补充说明：${a.instructions||'无'}\n本机工具 / 引擎 / DCC：${a.tools||'自行检查工程和已有工具；工具缺失必须报告，不得虚构生成或验收结果。'}\n工具在工作电脑后台执行。遵循工程约定，保护已有修改，不提交、推送或发布，除非制作人明确要求。所有职能共享当前工程；并发时只修改分配给自己的文件，发现冲突立即报告 blocked。将可持久化交付物保存到工程内，文档优先 .studio/${r.id}/${t.id}/，实际游戏资源遵循工程目录。\n${r.feedback?'制作人本轮返工意见（按本任务相关项执行，优先于旧任务说明中的冲突限制）：'+r.feedback+'\n':''}${t.feedback?'返工要求：'+t.feedback+'\n':''}`;
+    const common=`${resumeNote}${contextNotes}${continuationInstructions(r.continuation)}${toolchainInstructions(p.toolchain,this.execution(r).path,r.workspace!.value!.sourcePath)}${sceneTaskInstructions(t,r.workflow)}【${role[1]}】${r.title} / ${t.title}\n你是游戏团队的${role[1]}。制作人需求：\n${r.title}\n${t.resumeSessionId?'制作人原始需求沿用本会话开头的完整说明；结合以下最新补充与已有工程续做。':r.brief}\n\n职能职责：${role[2]}\n补充说明：${a.instructions||'无'}\n本机工具 / 引擎 / DCC：${a.tools||'自行检查工程和已有工具；工具缺失必须报告，不得虚构生成或验收结果。'}\n工具在工作电脑后台执行。遵循工程约定，保护已有修改，不提交、推送或发布，除非制作人明确要求。所有职能共享当前工程；并发时只修改分配给自己的文件，发现冲突立即报告 blocked。将可持久化交付物保存到工程内，文档优先 .studio/${r.id}/${t.id}/，实际游戏资源遵循工程目录。\n${r.feedback?'制作人本轮返工意见（按本任务相关项执行，优先于旧任务说明中的冲突限制）：'+r.feedback+'\n':''}${t.feedback?'返工要求：'+t.feedback+'\n':''}`;
     const scenePlan=r.workflow?.selection?productionFlowInstructions(r.workflow.selection):r.workflow?.kind==='scene'?`场景生产流程为强制约束：玩法与 LD 设计 requirements → 原画 concept → 制作人确认（系统节点）→ 资产规格 asset-spec → ${r.workflow.assetMode==='new'?'资产生产 assets → ':''}LA 正式搭建 assembly → 布光效果与程序集成 integration → QA。玩法策划与 LD 必须先完成 requirements 设计文档和布局，原画依赖这两项；不安排独立玩法原型制作。制作人确认后再做数值 balance 和程序 implementation；玩法实现统一交给程序，复用现有代码，只做一套。最终 integration 只接入和验证已有实现，不重复开发。每个任务明确 stage。角色匹配：requirements 玩法/LD/系统；balance 数值；implementation 程序；concept 原画；asset-spec 原画/模型/技术美术；assets 模型；assembly 场景美术；integration 程序/技术美术/UI/音频。原画至少交付一张实际存在的 PNG/JPEG/WebP/GIF 工程内图片供制作人查看；工具缺失必须 blocked，禁止用文字假装产图。不要输出人工确认任务，系统自动插入；系统会补齐缺失的必要制作阶段并校验依赖。${r.workflow.assetMode==='reuse'?'制作人指定复用范围：'+r.workflow.reuseReason+'，只核对已有视觉、编资产清单和搭建，不安排新资产生产。':'这次需要新场景 / 新资产，不能自行以复用为由跳过原画、确认与资产生产。'}\n`:'通用任务仅做代码、配置或讨论；涉及正式场景或美术资产生产时需要场景流程。\n';
     const exampleStage=r.workflow?.selection?.stages[0]??'requirements',exampleRole=r.workflow?.selection?productionRoleIds({...r.workflow.selection,stages:[r.workflow.selection.stages[0]]}).find(id=>p.roles.some(a=>a.enabled&&a.role===id)):'gameplay';
-    if(t.id==='studio-plan')return `${common}${scenePlan}\n你现在只做只读分析和任务规划，不改动工程。${r.recordVideo?'系统会在制作末尾安排成果展示视频，不要重复输出录制任务。':''}可用职能：${p.roles.filter(a=>a.enabled&&a.role!=='director'&&(!r.workflow?.selection||productionRoleIds(r.workflow.selection).includes(a.role))).map(a=>a.role+' ('+STUDIO_ROLES.find(r=>r[0]===a.role)![1]+')').join(', ')}。按需求选择必要职能，不要为了凑人数安排无关工作。把文件责任写入 brief；同文件写入必须有依赖。${r.workflow?.selection?(r.workflow.selection.stages.includes('validation')?'QA 只安排在选定的 validation 阶段，不重复追加。':'制作人未选 QA，不安排或追加 QA 任务。'):'系统会追加最终独立 QA 任务。'}最后只输出一个 JSON 代码块：\n\`\`\`STUDIO_PLAN\n${JSON.stringify({tasks:[{id:"task-1",title:"任务名",role:exampleRole,stage:exampleStage,brief:"具体工作与文件责任",acceptance:"可检查的验收标准",dependencies:[]}]})}\n\`\`\``;
+    if(t.id==='studio-plan'){const instructions=`${scenePlan}\n你现在只做只读分析和任务规划，不改动工程。${r.recordVideo?'系统会在制作末尾安排成果展示视频，不要重复输出录制任务。':''}可用职能：${p.roles.filter(a=>a.enabled&&a.role!=='director'&&(!r.workflow?.selection||productionRoleIds(r.workflow.selection).includes(a.role))).map(a=>a.role+' ('+STUDIO_ROLES.find(r=>r[0]===a.role)![1]+')').join(', ')}。按需求选择必要职能，不要为了凑人数安排无关工作。把文件责任写入 brief；同文件写入必须有依赖。${r.workflow?.selection?(r.workflow.selection.stages.includes('validation')?'QA 只安排在选定的 validation 阶段，不重复追加。':'制作人未选 QA，不安排或追加 QA 任务。'):'系统会追加最终独立 QA 任务。'}最后只输出一个 JSON 代码块：\n\`\`\`STUDIO_PLAN\n${JSON.stringify({tasks:[{id:"task-1",title:"任务名",role:exampleRole,stage:exampleStage,brief:"具体工作与文件责任",acceptance:"可检查的验收标准",dependencies:[]}]})}\n\`\`\``;return common.slice(0,Math.max(0,MAX_TEXT-instructions.length))+instructions;}
     const upstream=t===r.delivery?r.tasks:r.tasks.filter(x=>t.dependencies.includes(x.id));
     const taskIntro=`\n任务：${t.title}\n${t.brief}\n验收标准：${t.acceptance}\n上游交付：\n`;
     const waivers=r.tasks.filter(x=>x.status==='skipped').map(x=>({id:x.id,title:x.title,...x.skip}));

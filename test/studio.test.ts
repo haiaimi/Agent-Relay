@@ -243,6 +243,66 @@ test('new post-delivery conversations inherit an explicitly configured team perm
  }finally{await f.close();}
 });
 
+test('continuation inherits the delivered project, isolates the new flow, preserves parent and deduplicates uncertain creation retries',async()=>{
+ const f=await acceptedDiscussionFixture();try{
+  const parent=f.run(),before=JSON.stringify(parent),prepare:Action[]=[],remote=(f.studio as any).remote;
+  (f.studio as any).remote=async(host:string,a:Action)=>{if(a.type==='prepare-workspace'){prepare.push(a);return {workspace:{...workspace(a.workspaceId!,f.dir+'-child'),sourcePath:parent.workspace!.value!.project.path,sourceBranch:parent.workspace!.value!.branch}};}return remote(host,a);};
+  const bytes=Buffer.from('followup attachment'),file={id:randomUUID(),name:'notes.txt',size:bytes.length,mime:'application/octet-stream',sha256:createHash('sha256').update(bytes).digest('hex')};f.files.put('workstation|project:game',file,bytes);
+  const v={projectId:f.project.id,parentRunId:parent.id,requestId:randomUUID(),title:'组装并接入游戏',brief:'复用上游资产，交付 Windows 试玩',workflow:'scene-reuse',reuseReason:'已交付资产',flowConfig:selectedFlow(['assembly','integration','validation'],{plan:true,scene:true,final:true}),attachmentIds:[file.id]};
+  const child=f.studio.createRun(v);assert.equal(child.id,v.requestId);assert.equal(f.studio.createRun(v).id,child.id);await f.settle();
+  let r=f.studio.run(child.id);assert.equal(r.workspace?.status,'ready');assert.equal(prepare.length,1);assert.equal(prepare[0].projectId,parent.workspace!.value!.project.id);assert.equal(prepare[0].workspaceIndex,0);
+  assert.equal(r.continuation?.parentRunId,parent.id);assert.match(r.continuation!.summary,/没有可运行新房间/);assert.ok(r.continuation!.artifacts.some(a=>a.path==='game/test.tscn'));
+  assert.equal(JSON.stringify(f.studio.run(parent.id)),before);assert.equal(f.studio.runs().length,2);
+  const upload=f.actions.find(a=>a.type==='upload')!;assert.equal(upload.projectId,parent.workspace!.value!.project.id);assert.equal(upload.upload?.scope,'workstation|project:'+parent.workspace!.value!.project.id);
+  assert.deepEqual(f.files.read('workstation|project:studio-'+child.id,file.id).bytes,bytes);
+  const planner=f.actions.at(-1)!;assert.match(planner.text!,/基于已交付需求继续制作/);assert.match(planner.text!,/没有可运行新房间/);assert.match(planner.text!,/实际游戏入口加载本次新场景/);assert.ok(planner.text!.length<=MAX_TEXT);validateAction(planner);
+  f.finish(r.planner,plan([{...task('room',[],'environment'),stage:'assembly'},{...task('connect',['room']),stage:'integration'},{...task('check',['connect'],'qa'),stage:'validation'}]));await f.settle();r=f.studio.run(child.id);
+  assert.equal(r.status,'plan-review');assert.ok(r.tasks.some(t=>t.kind==='producer-review'&&t.reviewType==='scene'));assert.ok(!r.tasks.some(t=>['concept','assets','requirements'].includes(t.stage??'')));
+  assert.equal(f.studio.createRun(v).id,child.id);assert.throws(()=>f.studio.createRun({...v,brief:'other'}),/创建 ID/);
+  await f.studio.command({op:'approve-plan',runId:child.id});await f.settle();assert.match(f.actions.at(-1)!.text!,/基于已交付需求继续制作/);
+  assert.equal(JSON.stringify(f.studio.run(parent.id)),before);
+ }finally{await f.close();}
+});
+
+test('continuation rejects unfinished, cross-team, busy and moved-host parents without dispatching work',async()=>{
+ const f=await acceptedDiscussionFixture();try{
+  const parent=f.run(),v={projectId:f.project.id,parentRunId:parent.id,requestId:randomUUID(),title:'后续',brief:'组装',workflow:'general'};
+  assert.throws(()=>f.studio.createRun({...v,requestId:undefined}),/创建 ID/);
+  const save=(r:any)=>f.store.db.prepare('UPDATE studio_runs SET json=? WHERE id=?').run(JSON.stringify(r),r.id);
+  save({...parent,status:'review'});assert.throws(()=>f.studio.createRun(v),/先完成/);
+  save({...parent,projectId:'other'});assert.throws(()=>f.studio.createRun(v),/不属于/);
+  save({...parent,chats:[{role:'director',actionId:randomUUID(),startedAt:Date.now()}]});assert.throws(()=>f.studio.createRun(v),/正在执行/);
+  save(parent);const s=f.store.getSession(parent.planner.sessionId!)!;f.store.session({...s,hostId:'other-mac'});assert.throws(()=>f.studio.createRun(v),/工作电脑/);assert.equal(f.studio.runs().length,1);
+ }finally{await f.close();}
+});
+
+test('continuation fails closed on a mismatched snapshot and locks parent writers while copying',async()=>{
+ const f=await acceptedDiscussionFixture();try{
+  const parent=f.run(),before=productionSnapshot(parent);let resolveCopy!:(v:any)=>void;
+  (f.studio as any).remote=async()=>new Promise(resolve=>{resolveCopy=resolve;});
+  const child=f.studio.createRun({projectId:f.project.id,parentRunId:parent.id,requestId:randomUUID(),title:'后续',brief:'组装',workflow:'general'});await f.settle();
+  await assert.rejects(f.studio.chat({runId:parent.id,id:randomUUID(),role:'director',text:'启动'}),/正在复制/);
+  await assert.rejects(f.studio.command({runId:parent.id,op:'record-showcase'}),/正在复制/);
+  resolveCopy({workspace:workspace(child.id,f.dir)});await f.settle();assert.equal(f.studio.run(child.id).workspace?.status,'blocked');assert.match(f.studio.run(child.id).workspace!.error!,/不一致/);assert.equal(productionSnapshot(f.studio.run(parent.id)),before);
+ }finally{await f.close();}
+});
+
+test('restarting continuation preparation validates the saved source binding before releasing any agent',async()=>{
+ const f=await acceptedDiscussionFixture();try{
+  const parent=f.run(),remote=(f.studio as any).remote;
+  (f.studio as any).remote=async(host:string,a:Action)=>a.type==='prepare-workspace'?{workspace:{...workspace(a.workspaceId!,f.dir+'-child'),sourcePath:parent.workspace!.value!.project.path,sourceBranch:parent.workspace!.value!.branch}}:remote(host,a);
+  const child=f.studio.createRun({projectId:f.project.id,parentRunId:parent.id,requestId:randomUUID(),title:'后续',brief:'组装',workflow:'general'});await f.settle();await f.studio.close();
+  const completed=f.studio.run(child.id),valid=completed.workspace!.value!;
+  for(const mismatch of [false,true]){
+    const actionId=randomUUID(),pending={...completed,planner:{...child.planner,status:'queued',sessionId:undefined,actionId:undefined},workspace:{status:'preparing',actionId}};
+    f.store.db.prepare('UPDATE studio_runs SET json=? WHERE id=?').run(JSON.stringify(pending),child.id);
+    f.store.beginAction(actionId,'workstation',{type:'prepare-workspace'});f.store.finishAction(actionId,{workspace:{...valid,sourceBranch:mismatch?'wrong-branch':valid.sourceBranch}});
+    const resumed=new Studio(f.store,async()=>{throw Error('must not dispatch');},()=>false,()=>{},f.files);
+    try{const r=resumed.run(child.id);assert.equal(r.workspace!.status,mismatch?'blocked':'ready');assert.equal(r.planner.status,'queued');assert.equal(r.continuation!.parentRunId,parent.id);if(mismatch)assert.match(r.workspace!.error!,/不一致/);}finally{await resumed.close();}
+  }
+ }finally{await f.close();}
+});
+
 test('accepted task replies start separate followups with scoped attachments and preserve all production state',async()=>{
  const f=await acceptedDiscussionFixture();try{
   const r=f.run(),before=productionSnapshot(r),source=r.tasks[0].sessionId!,bytes=Buffer.from('review notes'),id=randomUUID();
