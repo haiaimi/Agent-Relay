@@ -37,6 +37,7 @@ export interface StudioProject {toolchain?:StudioToolchain;includeCaptures?:bool
 interface Artifact {path:string;description:string}
 export interface Task {resumeSessionId?:string;flowStopId?:string;id:string;title:string;role:string;brief:string;acceptance:string;dependencies:string[];status:TaskState;stage?:SceneStage;kind?:'visual-review'|'producer-review';reviewType?:'design'|'scene';reviewId?:string;approvedAt?:number;visualSnapshots?:{taskId:string;path:string;sha256:string}[];actionId?:string;sessionId?:string;startedAt?:number;finishedAt?:number;output?:string;summary?:string;artifacts?:Artifact[];checks?:string[];error?:string;feedback?:string;attempts?:{sessionId?:string;output?:string;at:number}[]}
 interface RoleChat {role:string;actionId:string;sessionId?:string;error?:string;startedAt:number;resolved?:boolean;afterDelivery?:boolean;sourceSessionId?:string}
+interface SkipBlocker {kind:'receipt'|'active'|'queue'|'state'|'dependency';title:string;message:string;sessionId?:string;taskId?:string;canStop?:boolean;canCancelQueue?:boolean}
 export interface StudioRun {chatPermissions?:Partial<Record<string,PermissionMode>>}
 export interface StudioRun {continuation?:StudioContinuation}
 export interface StudioRun {recordVideo?:boolean;autoAccepted?:boolean;id:string;projectId:string;title:string;brief:string;status:'planning'|'plan-review'|'executing'|'delivery'|'review'|'accepted'|'cancelled';paused:boolean;tasks:Task[];planner:Task;delivery?:Task;workflow?:SceneWorkflow;createdAt:number;updatedAt:number;revision:number;feedback?:string;log:{id?:string;at:number;text:string;taskId?:string;taskTitle?:string;sessionId?:string;role?:string;skip?:TaskSkip;handoff?:{id:string;role:string;title:string;summary?:string;artifacts?:Artifact[]}[]}[];attachments?:FileRef[];workspace?:{status:'queued'|'preparing'|'ready'|'blocked';actionId?:string;value?:StudioWorkspace;error?:string};chats?:RoleChat[];guidance?:{id:string;role:string;text:string;files:FileRef[];at:number;sessionId:string}[]}
@@ -254,8 +255,8 @@ export class Studio {
       if(task.status==='skipped'&&task.skip?.reason===reason)return r;
       if(task.status!=='blocked')throw Error('只能跳过已阻断的制作任务');
       if(v.expectedActionId!==(task.actionId??null)||v.expectedFinishedAt!==(task.finishedAt??null))throw Error('任务执行记录已变化，请重新查看后决定是否跳过');
-      const s=task.sessionId?this.store.getSession(task.sessionId):undefined,receipt=task.actionId?this.store.db.prepare('SELECT result FROM actions WHERE id=?').get(task.actionId):undefined;
-      if(task.actionId&&!receipt?.result||task.sessionId&&(!s||!['idle','failed','interrupted'].includes(s.status)||s.pendingCount)||this.chatBusy(r)||this.allTasks(r).some(t=>['starting','running'].includes(t.status)))throw Error('当前执行或投递结果尚未确认，请先核对并停止执行，再跳过');
+      const inspection=this.skipState(r.id,task.id);
+      if(!inspection.canSkip)throw Error('当前执行或投递结果尚未确认：'+inspection.blockers.map(b=>b.message).join('；'));
       if(!this.dependenciesReady(r,task))throw Error('前置任务或本轮视觉确认尚未完成');
       task.skip={at:Date.now(),reason,previousStatus:'blocked',summary:task.summary,error:task.error,blockers:task.blockers};task.status='skipped';task.checkpoint=undefined;
       r.paused=false;this.saveRun(r,'制作人跳过并继续：'+task.title+'\n原因：'+reason+'\n原阻断与验证结果保留，交给后续 QA 核查。',task);void this.tick();return this.run(r.id);
@@ -331,6 +332,37 @@ export class Studio {
       r.feedback=feedback;this.saveRun(r,`返工：${task.title}`,task);
     }else throw Error('当前状态不支持此操作');
     void this.tick();return this.run(r.id);
+  }
+  skipState(runId:string,taskId:string){
+    const r=this.run(runId),p=this.project(r.projectId),task=r.tasks.find(t=>t.id===taskId);if(!task||task.kind||task.role==='qa')throw Error('只能核对制作任务；审批和最终 QA 不能跳过');
+    const blockers:SkipBlocker[]=[],session=task.sessionId?this.store.getSession(task.sessionId):undefined;
+    let receipt:any;try{const row=task.actionId?this.store.db.prepare('SELECT result FROM actions WHERE id=?').get(task.actionId):undefined;if(row?.result)receipt=JSON.parse(String(row.result));}catch{/* An invalid receipt is unconfirmed. */}
+    const confirmedReceipt=!!receipt&&(!task.sessionId||receipt.sessionId===task.sessionId);
+    // A completed native turn eventually ages out of live status detection.
+    // "history" is acceptable only with its matching dispatch receipt, a real
+    // completed report, no queued input and no activity newer than that report.
+    const finishedHistory=!!(session?.status==='history'&&confirmedReceipt&&task.output&&task.finishedAt&&session.updatedAt<=task.finishedAt&&!session.pendingCount);
+    if(['accepted','cancelled'].includes(r.status)||task.status!=='blocked')blockers.push({kind:'state',title:task.title,message:'任务状态已变化，请关闭窗口后重新查看',taskId:task.id});
+    if(task.actionId&&!confirmedReceipt)blockers.push({kind:'receipt',title:task.title,message:task.title+'：投递回执尚未确认，请打开执行记录核对或绑定会话',taskId:task.id,sessionId:task.sessionId});
+    const inspectSession=(id:string|undefined,title:string,taskId?:string,allowHistory=false)=>{
+      const s=id?this.store.getSession(id):undefined;
+      if(!s||s.hostId!==p.hostId||s.projectId!==this.execution(r).id){blockers.push({kind:'state',title,message:title+'：会话状态或工作副本未确认，请核对执行记录',sessionId:id,taskId});return;}
+      if(['running','waiting'].includes(s.status))blockers.push({kind:'active',title,message:title+'：'+(s.status==='waiting'?'仍在等待确认':'仍在执行')+'，停止并确认结束后才能跳过',sessionId:id,taskId,canStop:s.canStop!==false});
+      else if(!['idle','failed','interrupted'].includes(s.status)&&!allowHistory)blockers.push({kind:'state',title,message:title+'：只有历史状态，无法确认是否有新执行，请打开会话核对',sessionId:id,taskId});
+      if(s.pendingCount)blockers.push({kind:'queue',title,message:title+'：还有 '+s.pendingCount+' 条排队消息，请先取消排队',sessionId:id,taskId,canCancelQueue:true});
+    };
+    if(task.sessionId)inspectSession(task.sessionId,task.title,task.id,finishedHistory);
+    for(const other of this.allTasks(r))if(other!==task&&['starting','running'].includes(other.status)){
+      const s=other.sessionId?this.store.getSession(other.sessionId):undefined;
+      blockers.push({kind:'active',title:other.title,message:other.title+'：'+(other.status==='starting'?'启动结果尚未确认':'任务尚未结束')+'，请先核对',taskId:other.id,sessionId:other.sessionId,canStop:!!s&&['running','waiting'].includes(s.status)&&s.canStop!==false});
+    }
+    for(const c of r.chats??[])if(!c.resolved){
+      const s=c.sessionId?this.store.getSession(c.sessionId):undefined,title=(STUDIO_ROLES.find(x=>x[0]===c.role)?.[1]??c.role)+'对话';
+      if(!c.sessionId)blockers.push({kind:'receipt',title,message:title+'：启动结果尚未确认，请核对角色对话',taskId:undefined});
+      else if(['running','waiting'].includes(s?.status??'')||s?.pendingCount)inspectSession(c.sessionId,title);
+    }
+    if(!this.dependenciesReady(r,task))blockers.push({kind:'dependency',title:task.title,message:'前置任务或本轮视觉确认尚未完成',taskId:task.id});
+    return {runId:r.id,taskId:task.id,canSkip:blockers.length===0,finishedHistory,expectedActionId:task.actionId??null,expectedFinishedAt:task.finishedAt??null,blockers};
   }
   private chatBusy(r:StudioRun){return (r.chats??[]).some(c=>!c.resolved&&(!c.sessionId||['running','waiting'].includes(this.store.getSession(c.sessionId)?.status??'')||this.store.getSession(c.sessionId)?.pendingCount));}
   private groupPosts(runId:string):GroupPost[]{return this.store.db.prepare('SELECT json FROM studio_group_posts WHERE run_id=? ORDER BY at').all(runId).map(row=>JSON.parse(String(row.json)));}

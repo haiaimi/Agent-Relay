@@ -56,6 +56,37 @@ test('skip rejects running, unconfirmed, visual and planning tasks; rework clear
   }finally{await f.close();}
 });
 
+test('completed historical sessions can be skipped with matching receipts without stopping or replaying the original turn',async()=>{
+ const f=await fixture();try{
+  f.studio.saveProject({...f.project,reviewPlan:false});f.studio.createRun({workflow:'general',projectId:f.project.id,title:'历史阻断',brief:'保留历史失败'});await f.settle();f.finish(f.run().planner,plan([task('scene')]));await f.settle();
+  f.finish(f.run().tasks[0],result('blocked','历史场景质量未通过'));await f.settle();const r=f.run(),t=r.tasks[0],session=f.store.getSession(t.sessionId!)!;f.store.session({...session,status:'history',managed:false,updatedAt:t.finishedAt!-1,pendingCount:0,canStop:false});
+  const calls=f.actions.length,check=f.studio.skipState(r.id,t.id);assert.equal(check.finishedHistory,true);assert.equal(check.canSkip,true);assert.deepEqual(check.blockers,[]);assert.equal(f.actions.length,calls);
+  await f.studio.command(skipRequest(r,t));await f.settle();assert.equal(f.run().tasks[0].status,'skipped');assert.equal(f.run().tasks[0].sessionId,t.sessionId);assert.equal(f.run().tasks[0].output,t.output);assert.equal(f.actions.some(a=>a.type==='stop'),false);assert.equal(f.run().tasks[1].status,'running');
+ }finally{await f.close();}
+});
+
+test('skip inspection identifies real active and queued sessions, and never treats newer or unconfirmed history as completed',async()=>{
+ const f=await fixture();try{
+  f.studio.saveProject({...f.project,reviewPlan:false});f.studio.createRun({workflow:'general',projectId:f.project.id,title:'核对阻挡项',brief:'禁止不确定跳过'});await f.settle();f.finish(f.run().planner,plan([task('scene')]));await f.settle();f.finish(f.run().tasks[0],result('blocked','失败保留'));await f.settle();
+  const r=f.run(),t=r.tasks[0],s=f.store.getSession(t.sessionId!)!;f.store.session({...s,status:'running',pendingCount:1,canStop:true});let check=f.studio.skipState(r.id,t.id);
+  assert.equal(check.canSkip,false);assert.equal(check.blockers.find(b=>b.kind==='active')?.sessionId,s.id);assert.equal(check.blockers.find(b=>b.kind==='active')?.canStop,true);assert.equal(check.blockers.find(b=>b.kind==='queue')?.canCancelQueue,true);await assert.rejects(f.studio.command(skipRequest(r,t)),/尚未确认/);
+  f.store.session({...s,status:'history',pendingCount:0,updatedAt:t.finishedAt!+1});assert.equal(f.studio.skipState(r.id,t.id).canSkip,false);
+  f.store.session({...s,status:'history',pendingCount:0,updatedAt:t.finishedAt!-1});f.store.db.prepare('UPDATE actions SET result=NULL WHERE id=?').run(t.actionId!);check=f.studio.skipState(r.id,t.id);assert.equal(check.finishedHistory,false);assert.equal(check.blockers.some(b=>b.kind==='receipt'),true);
+  f.store.finishAction(t.actionId!,{sessionId:'another-session'});assert.equal(f.studio.skipState(r.id,t.id).canSkip,false);f.store.finishAction(t.actionId!,{sessionId:s.id});
+  f.store.session({...s,status:'history',updatedAt:t.finishedAt!-1,projectId:'another-workspace'});assert.equal(f.studio.skipState(r.id,t.id).canSkip,false);
+ }finally{await f.close();}
+});
+
+test('skip inspection names a blocking role conversation and releases only after its execution and queue end',async()=>{
+ const f=await fixture();try{
+  f.studio.saveProject({...f.project,reviewPlan:false});f.studio.createRun({workflow:'general',projectId:f.project.id,title:'会话阻挡',brief:'核对对应角色'});await f.settle();f.finish(f.run().planner,plan([task('scene')]));await f.settle();f.finish(f.run().tasks[0],result('blocked','失败保留'));await f.settle();
+  const r=f.run(),chat=await f.studio.chat({id:randomUUID(),runId:r.id,role:'concept',text:'讨论'}),session=f.store.getSession(chat.sessionId)!;let check=f.studio.skipState(r.id,r.tasks[0].id);
+  assert.equal(check.canSkip,false);assert.equal(check.blockers.find(b=>b.sessionId===session.id)?.canStop,true);assert.match(check.blockers.find(b=>b.sessionId===session.id)!.title,/原画/);
+  f.store.session({...session,status:'interrupted',pendingCount:1});check=f.studio.skipState(r.id,r.tasks[0].id);assert.equal(check.canSkip,false);assert.equal(check.blockers.find(b=>b.sessionId===session.id)?.canCancelQueue,true);
+  f.store.session({...session,status:'interrupted',pendingCount:0});assert.equal(f.studio.skipState(r.id,r.tasks[0].id).canSkip,true);
+ }finally{await f.close();}
+});
+
 test('selected level flow runs without art/assets or hidden visual gates and routes only selected approvals',async()=>{
   const f=await fixture();try{
     const flowConfig=selectedFlow(['requirements','implementation','assembly','integration','validation'],{design:true,scene:true,final:true});

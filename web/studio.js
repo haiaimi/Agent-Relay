@@ -19,6 +19,7 @@ let desktopHostId='';
 function syncDesktop(){if(window.relayStudioDesktop)void window.relayStudioDesktop.context().then(info=>{desktopHostId=info.hostId;syncBrowse();}).catch(()=>{});}
 if(embed.active)syncDesktop();
 let state={roles:[],projects:[],runs:[]},relay={hosts:[],sessions:[]},selected=localStorage.getItem('relay-studio-team')||'',editing=null,activeRun=null,activeTask=null,feedback=null,source,lastSignature='',noticeTimer;
+let skipTimer,skipGeneration=0,skipLoading=false,feedbackSubmitting=false,skipRetryAt=0,skipFailures=0;const skipStops=new Map();
 const labels={planning:'统筹拆解中','plan-review':'等待确认计划',executing:'团队制作中',delivery:'整理交付中',review:'等待制作人验收',accepted:'已验收',cancelled:'已取消','awaiting-review':'待制作人审批',queued:'待分发',starting:'启动中',running:'执行中',done:'已完成',skipped:'制作人已跳过',blocked:'待处理'};
 const node=(tag,cls,value)=>{const n=document.createElement(tag);if(cls)n.className=cls;if(value!==undefined)n.textContent=value;return n;};
 const pill=(status,label)=>node('span','pill '+status,label||labels[status]||status);
@@ -28,7 +29,7 @@ const hostOf=p=>relay.hosts.find(h=>h.id===p?.hostId);
 const allTasks=r=>[r.planner,...r.tasks,...r.delivery?[r.delivery]:[]];
 const date=at=>new Date(at).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false});
 function notify(message){$('notice').textContent=message;$('notice').hidden=false;clearTimeout(noticeTimer);noticeTimer=setTimeout(()=>$('notice').hidden=true,6000);}
-async function api(path,payload){if(path==='state'&&!payload&&embed.state())return embed.state();const response=await fetch('/api/'+path,{method:payload?'POST':'GET',headers:payload?{'Content-Type':'application/json'}:{},body:payload?JSON.stringify(payload):undefined});const result=await response.json();if(response.status===401){void clearConversationCache();$('app').hidden=true;$('login').hidden=false;source?.close();throw Error('请登录工作室');}if(!response.ok||result.error)throw Error(result.error||'操作失败');return result;}
+async function api(path,payload,signal){if(path==='state'&&!payload&&embed.state())return embed.state();const response=await fetch('/api/'+path,{method:payload?'POST':'GET',headers:payload?{'Content-Type':'application/json'}:{},body:payload?JSON.stringify(payload):undefined,signal});const result=await response.json();if(response.status===401){void clearConversationCache();$('app').hidden=true;$('login').hidden=false;source?.close();throw Error('请登录工作室');}if(!response.ok||result.error)throw Error(result.error||'操作失败');return result;}
 function option(value,label){const o=document.createElement('option');o.value=value;o.textContent=label;return o;}
 function button(label,fn,cls='quiet'){const b=node('button',cls,label);b.type='button';b.onclick=()=>Promise.resolve().then(fn).catch(e=>notify(e.message));return b;}
 function link(label,url){const a=node('a','button quiet',label);a.href=url;return a;}
@@ -128,12 +129,41 @@ function openBrief(proposal){
 async function command(r,op,extra={}){await api('studio/command',{runId:r.id,op,...extra});await refresh(true);notify({pause:'已暂停后续任务分发',resume:'已继续分发任务','continue-run':'已从原会话断点继续，已完成任务保持不变','continue-task':'已安排原任务从断点继续','recheck-task':'已安排在原会话复核阻断，保留已完成前置任务',accept:'制作人验收通过','approve-plan':'计划已确认，开始制作',cancel:'已取消需求，停止结果请查看记录',bind:'已绑定会话'}[op]||'操作已保存');}
 function producerReview(r,t){const box=node('section','producer-review');box.append(node('h3','',t.title),pill(t.status));for(const up of r.tasks.filter(x=>t.dependencies.includes(x.id))){box.append(node('h3','',up.title));if(up.summary)box.append(node('p','delivery-copy',up.summary));box.append(button('查看交付与执行记录',()=>openTask(r,up)));for(const a of up.artifacts??[]){const row=node('div','artifact');row.append(node('code','',a.path),node('p','fine',a.description));if(/\.(png|jpg|jpeg|webp|gif)$/i.test(a.path)&&up.sessionId){const img=node('img');img.loading='lazy';img.alt=a.description||'本轮实机交付';img.style.maxWidth='100%';img.src='/api/studio/artifact?'+new URLSearchParams({runId:r.id,taskId:up.id,index:String(up.artifacts.indexOf(a))});row.append(img);}box.append(row);}}if(t.status==='awaiting-review'&&!['accepted','cancelled'].includes(r.status)){const actions=node('div','run-actions');actions.append(button('批准并继续',()=>command(r,'approve-step',{taskId:t.id,reviewId:t.reviewId}),'primary'),button('打回修改',()=>feedbackFor(r,t,{op:'reject-step',reviewId:t.reviewId})));box.append(actions);}return box;}
 function openTask(r,t){activeRun=r.id;activeTask=t.id;renderTask();show('task-dialog');}
+async function inspectSkip(manual=false){
+  if(skipLoading||feedbackSubmitting||!$('feedback-dialog').open||feedback?.op!=='skip-task'||!manual&&(Date.now()<skipRetryAt||skipFailures>=5))return;
+  const generation=skipGeneration,target={...feedback},root=$('feedback-recovery');skipLoading=true;
+  try{
+    const value=await api('studio/skip-state?'+new URLSearchParams({runId:target.runId,taskId:target.taskId}),undefined,AbortSignal.timeout(12000));if(generation!==skipGeneration||!$('feedback-dialog').open)return;skipFailures=0;skipRetryAt=0;
+    root.replaceChildren();const changed=value.expectedActionId!==target.expectedActionId||value.expectedFinishedAt!==target.expectedFinishedAt;
+    $('feedback-submit').disabled=feedbackSubmitting||changed||!value.canSkip;
+    root.append(node('p',value.canSkip&&!changed?'fine':'error',changed?'任务执行记录已变化，请关闭窗口后重新核对。':value.canSkip?value.finishedHistory?'本任务已结束，目前仅保留历史记录，无需停止，可以确认跳过。':'执行已结束且没有未确认投递，可以确认跳过。':'请在下面处理阻挡项。停止请求确认后仍需等待状态结束，再确认跳过。'));
+    for(const b of value.blockers){
+      const row=node('section','workspace-summary');row.append(node('strong','',b.title),node('p','fine',b.message));
+      if(b.sessionId){const a=link('打开对应会话核对 ↗','/?sessionId='+encodeURIComponent(b.sessionId));a.target='_blank';a.rel='noopener';row.append(a);}
+      for(const queueOnly of [false,true])if(b.sessionId&&(queueOnly?b.canCancelQueue:b.canStop)){
+        const key=b.sessionId+':'+queueOnly,previous=skipStops.get(key),stop=button(previous?.pending?'停止请求处理中…':previous?.done?'请求已确认，等待状态更新':previous?.error?'重新核对停止回执':queueOnly?'取消此会话排队':'停止此会话执行',async()=>{
+          const operation=skipStops.get(key)??{id:crypto.randomUUID()};skipStops.set(key,operation);operation.pending=true;stop.disabled=true;
+          try{await api('actions',{id:operation.id,type:'stop',sessionId:b.sessionId,...queueOnly?{queueOnly:true}:{}} ,AbortSignal.timeout(30000));operation.done=true;operation.error='';if(generation===skipGeneration)$('feedback-error').textContent='停止/取消请求已确认，正在等待会话状态更新；不会自动跳过。';await refresh(true);}
+          catch(e){operation.error=e.message;if(generation===skipGeneration)$('feedback-error').textContent='停止结果需核对：'+e.message+'。请打开对应会话查看，不会自动重复停止。';}
+          finally{operation.pending=false;if(generation===skipGeneration)void inspectSkip();}
+        });stop.disabled=!!(previous?.pending||previous?.done);row.append(stop);if(previous?.error)row.append(node('p','error',previous.error));
+      }
+      if(b.kind==='active'&&b.sessionId&&!b.canStop)row.append(node('p','fine','当前没有可用的远程停止入口；请打开对应本机会话停止，结束后点下方刷新核对。'));
+      if(b.taskId&&b.kind==='receipt')row.append(button('查看任务并核对绑定',()=>{$('feedback-dialog').close();const r=state.runs.find(r=>r.id===target.runId),t=r&&allTasks(r).find(t=>t.id===b.taskId);if(t)openTask(r,t);}));
+      root.append(row);
+    }
+    root.append(button('刷新核对状态',()=>inspectSkip(true)));
+  }catch(e){if(generation===skipGeneration){skipFailures++;skipRetryAt=Date.now()+60000;$('feedback-submit').disabled=true;root.replaceChildren(node('p','error','状态核对失败：'+e.message+(skipFailures<5?'；一分钟后重试（'+skipFailures+'/5），也可手动核对。':'；已尝试 5 次，请检查连接后手动核对。')),button('重新核对',()=>{skipFailures=0;return inspectSkip(true);}));}}
+  finally{skipLoading=false;}
+}
+$('feedback-dialog').addEventListener('close',()=>{clearInterval(skipTimer);skipGeneration++;});
 function feedbackFor(r,t,extra={}){
   const skip=extra.op==='skip-task',accept=extra.op==='accept';feedback={runId:r.id,taskId:t.id,...extra,...skip?{expectedActionId:t.actionId??null,expectedFinishedAt:t.finishedAt??null}:{}};
   $('feedback-title').textContent=skip?'跳过并继续下一步':accept?'确认遗留问题并验收':extra.op==='reject-visual'?'修改场景原画':extra.op==='reject-step'?'打回修改':'返工 / 重试';
   $('feedback-text').value='';$('feedback-text').required=!accept;$('feedback-text').placeholder=skip?'填写跳过原因，遗留问题将交给后续 QA 核查。':accept?'可补充对跳过任务和遗留问题的验收说明。':'说明需要修正的问题或环境已恢复。';
   $('feedback-note').textContent=skip?'将此任务标为“制作人已跳过”，恢复分发满足依赖的后续任务。保留当前失败、文件和执行记录，QA 仍按实际结果验收；不会重跑已完成前置任务。':accept?'确认你已查看交付报告中的跳过记录及遗留问题。跳过任务仍显示为跳过，原失败记录继续保留。':'重新执行此任务及依赖它的后续任务，旧执行记录会保留。最终交付汇总的重试只重写汇总报告；产品问题请对具体制作任务返工。';
   $('feedback-submit').textContent=skip?'确认跳过并继续':accept?'确认遗留问题并验收':'确认返工';$('feedback-error').textContent='';$('feedback-target').textContent=t.title;show('feedback-dialog');
+  clearInterval(skipTimer);skipGeneration++;skipStops.clear();skipFailures=0;skipRetryAt=0;feedbackSubmitting=false;let recovery=$('feedback-recovery');if(!recovery){recovery=node('section','task-section');recovery.id='feedback-recovery';$('feedback-error').before(recovery);}recovery.hidden=!skip;recovery.replaceChildren();$('feedback-submit').disabled=skip;if(skip){recovery.append(node('p','fine','正在核对执行、回执与排队状态…'));void inspectSkip();skipTimer=setInterval(()=>{if(!document.hidden)void inspectSkip();},2000);}
 }
 let renderedRunKey='';
 function renderRun(){
@@ -224,7 +254,7 @@ $('brief-form').onsubmit=async e=>{
     activeRun=result.run.id;$('brief-dialog').close();await refresh(true).catch(e=>notify('需求已创建；刷新状态失败，请稍后重试：'+e.message));renderRun();show('run-dialog');
   }catch(e){$('brief-error').textContent=e.message;}finally{$('brief-submit').disabled=false;}
 };
-$('feedback-form').onsubmit=async e=>{e.preventDefault();$('feedback-submit').disabled=true;$('feedback-error').textContent='';try{await api('studio/command',{op:'retry',...feedback,feedback:$('feedback-text').value});await refresh(true);$('feedback-dialog').close();notify(feedback.op==='skip-task'?'已记录跳过，继续分发后续任务；原失败记录保留':feedback.op==='accept'?'已确认遗留问题并验收':feedback.op==='reject-step'?'已打回修改，本轮审批与下游将重新验证':feedback.op==='reject-visual'?'已安排原画修改；旧视觉确认与下游结果已失效':'已安排返工，下游任务将重新执行');}catch(e){$('feedback-error').textContent=e.message;}finally{$('feedback-submit').disabled=false;}};
+$('feedback-form').onsubmit=async e=>{e.preventDefault();if(feedbackSubmitting)return;feedbackSubmitting=true;$('feedback-submit').disabled=true;$('feedback-error').textContent='';try{await api('studio/command',{op:'retry',...feedback,feedback:$('feedback-text').value});await refresh(true);$('feedback-dialog').close();notify(feedback.op==='skip-task'?'已记录跳过，继续分发后续任务；原失败记录保留':feedback.op==='accept'?'已确认遗留问题并验收':feedback.op==='reject-step'?'已打回修改，本轮审批与下游将重新验证':feedback.op==='reject-visual'?'已安排原画修改；旧视觉确认与下游结果已失效':'已安排返工，下游任务将重新执行');}catch(e){$('feedback-error').textContent=e.message;}finally{feedbackSubmitting=false;if(feedback?.op==='skip-task'&&$('feedback-dialog').open)void inspectSkip(true);else $('feedback-submit').disabled=false;}};
 function stream(){source?.close();source=new EventSource('/api/events');for(const type of ['studio','state','sessions','reset','event'])source.addEventListener(type,()=>void refresh().catch(()=>{}));source.onerror=()=>{$('connection').textContent='连接恢复中';$('connection').dataset.offline='true';};}
 async function start(){await refresh(true);conversationCache.enable();$('login').hidden=true;$('app').hidden=false;if(embed.active)stream();embed.ready();}
 $('login-form').onsubmit=async e=>{e.preventDefault();$('login-error').textContent='';try{await api('login',{token:$('token').value});$('token').value='';await start();}catch(e){$('login-error').textContent=e.message;}};
