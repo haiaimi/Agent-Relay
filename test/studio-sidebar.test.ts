@@ -13,7 +13,7 @@ test('studio sidebar scopes progress to the selected team and carries real role/
 test('studio sidebar exposes questions and checkpoints without claiming a blocked task is running; terminal runs remain terminal',()=>{
   const r:any={id:'run',projectId:'p',title:'Prototype',status:'executing',planner:{id:'plan',role:'director',title:'Plan',status:'done'},tasks:[{id:'code',role:'engineering',title:'Gameplay',status:'running',sessionId:'s'},{id:'qa',role:'qa',title:'QA',status:'blocked',checkpoint:{sessionId:'q'}}]};
   const state={roles:[],projects:[{id:'p',name:'P'}],runs:[r]},relay={sessions:[{id:'s',status:'waiting',questionCount:1}]};
-  let value=studioProgress(state,relay,'p','run','code');assert.equal(value.runs[0].tasks[0].label,'等待你回答');assert.equal(value.runs[0].tasks[1].label,'待续做');assert.equal(value.activeTask,'code');
+  let value=studioProgress(state,relay,'p','run','code');assert.equal(value.runs[0].tasks[0].label,'等待你回答');assert.equal(value.runs[0].tasks[1].label,'上次工作已中断');assert.equal(value.activeTask,'code');
   r.paused=true;value=studioProgress(state,relay,'p');assert.equal(value.runs[0].label,'已暂停');
   r.paused=false;r.status='accepted';value=studioProgress(state,relay,'p');assert.equal(value.runs[0].label,'已验收');assert.equal(value.runs[0].attention,false);assert.equal(value.activeRun,undefined);
   assert.equal(studioProgress(state,relay,'missing').runs.length,0);

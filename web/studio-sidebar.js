@@ -1,3 +1,4 @@
+import {taskGuidance} from './studio-guidance.js';
 const names={planning:'需求拆解中','plan-review':'待确认计划',executing:'制作中',delivery:'整理交付中',review:'待你验收',accepted:'已验收',cancelled:'已取消',queued:'等待前置',starting:'正在启动',running:'进行中',done:'已完成',skipped:'制作人已跳过',blocked:'待处理','awaiting-review':'待确认原画'};
 const terminal=r=>['accepted','cancelled'].includes(r.status);
 export function studioSessionSignature(state,relay){
@@ -9,7 +10,7 @@ export function studioRunActivity(r,relay){
   const active=all.filter(t=>['starting','running'].includes(t.status)),blocked=all.filter(t=>t.status==='blocked'),approvals=all.filter(t=>t.status==='awaiting-review'),queued=all.filter(t=>t.status==='queued');
   const targets=terminal(r)?[]:[...active,...blocked,...approvals];
   const headline=terminal(r)?r.autoAccepted?'已交付':names[r.status]:active.length?'当前正在推进：'+active.map(t=>t.title).join('；'):r.paused?'已暂停后续分发':blocked.length?'流程等待处理：'+blocked.map(t=>t.title).join('；'):approvals.length?'等待制作人确认：'+approvals.map(t=>t.title).join('；'):r.status==='plan-review'?'等待制作人确认计划':r.status==='review'?'等待制作人验收':queued.length?'等待后续任务分发':'正在整理交付状态';
-  const items=targets.map(t=>{const s=sessions.get(t.sessionId),waiting=!!s?.questionCount||s?.status==='waiting';return {id:t.id,title:t.title,role:t.role,status:t.status,label:waiting?'等待你回答 / 确认':t.preflightRetry?.nextAt?'预检连接恢复中（'+t.preflightRetry.attempts+'/5）':t.status==='starting'?'正在核对原画 / 准备投递':t.status==='running'&&['idle','history','failed','interrupted'].includes(s?.status)?'正在核对执行结果':t.checkpoint?'待续做':t.kind==='producer-review'&&t.status==='awaiting-review'?'待制作人审批':names[t.status]||t.status};});
+  const items=targets.map(t=>{const s=sessions.get(t.sessionId),waiting=!!s?.questionCount||s?.status==='waiting';return {id:t.id,title:t.title,role:t.role,status:t.status,label:waiting?'等待你回答 / 确认':t.preflightRetry?.nextAt?'预检连接恢复中（'+t.preflightRetry.attempts+'/5）':t.status==='starting'?'正在核对原画 / 准备投递':t.status==='running'&&['idle','history','failed','interrupted'].includes(s?.status)?'正在核对执行结果':t.status==='blocked'?taskGuidance(t,s).label:t.checkpoint?'待续做':t.kind==='producer-review'&&t.status==='awaiting-review'?'待制作人审批':names[t.status]||t.status};});
   return {headline,items,active:active.map(t=>t.id),blocked:blocked.map(t=>t.id),paused:!!r.paused,terminal:terminal(r)};
 }
 export function studioProgress(state,relay,projectId,activeRun,activeTask){
@@ -17,7 +18,7 @@ export function studioProgress(state,relay,projectId,activeRun,activeTask){
   const runs=state.runs.filter(r=>r.projectId===projectId).map(r=>{
     const all=[r.planner,...r.tasks,r.delivery].filter(Boolean),tasks=all.filter(t=>t!==r.planner||t.status!=='done'||!r.tasks.length).map(t=>{
       const s=sessions.get(t.sessionId),question=!!s?.questionCount||s?.status==='waiting',attention=['blocked','awaiting-review'].includes(t.status)||question;
-      return {id:t.id,title:t.title,role:roles.get(t.role)||t.role,status:t.status,attention,label:question?'等待你回答':t.kind==='producer-review'&&t.status==='awaiting-review'?'待制作人审批':t.checkpoint&&t.status==='blocked'?'待续做':names[t.status]||t.status};
+      return {id:t.id,title:t.title,role:roles.get(t.role)||t.role,status:t.status,attention,label:question?'等待你回答':t.kind==='producer-review'&&t.status==='awaiting-review'?'待制作人审批':t.status==='blocked'?taskGuidance(t,s).label:names[t.status]||t.status};
     });
     const attention=!terminal(r)&&(r.paused||!!r.workflow?.error||r.workspace?.status==='blocked'||['plan-review','review'].includes(r.status)||tasks.some(t=>t.attention));
     const label=terminal(r)?r.autoAccepted?'已交付':names[r.status]:r.paused?'已暂停':r.workflow?.error||r.workspace?.status==='blocked'?'待处理':names[r.status];

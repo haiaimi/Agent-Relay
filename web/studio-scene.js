@@ -17,10 +17,10 @@ export function scenePanel(run,{command,openTask,feedbackFor,notify,fresh=false}
   if(gate.error)box.append(el('p','error',gate.error));
   const action=(label,fn,primary=false)=>{const b=el('button',primary?'primary':'quiet',label);b.type='button';b.onclick=async()=>{b.disabled=true;try{await fn();}catch(e){notify(e.message);b.disabled=false;}};return b;};
   const concepts=run.tasks.filter(t=>gate.dependencies.includes(t.id));
-  const sourceButtons=el('div','run-actions');for(const t of concepts)sourceButtons.append(action('查看：'+t.title,()=>openTask(run,t)));box.append(sourceButtons);
+  const sourceButtons=el('div','run-actions');for(const t of concepts)sourceButtons.append(action('查看：'+t.title,()=>openTask(run,t)));const sourceDetails=el('details','task-section');sourceDetails.append(el('summary','','查看制作记录'),sourceButtons);box.append(sourceDetails);
   if(!['awaiting-review','done'].includes(gate.status)){box.append(el('p','muted','原画交付完成后，这里显示本轮图片预览。等待期间不启动资产生产和正式搭建。'));root.append(box);return root;}
   const references=concepts.flatMap(t=>(t.artifacts??[]).flatMap((a,index)=>imagePath(a.path)?[{taskId:t.id,index,path:a.path,description:a.description,sessionId:t.sessionId}]:[])),gallery=el('div','visual-gallery'),hashes=new Map(),failed=new Set();
-  const progress=el('p','fine','正在加载本轮原画（0/'+references.length+'）');progress.setAttribute('role','status');box.append(progress,gallery);const approve=action('确认本轮原画，开放后续制作',()=>command(run,'approve-visual',{taskId:gate.id,reviewId:gate.reviewId,visualHashes:[...hashes.values()]}),true);approve.disabled=true;
+  const progress=el('p','fine','正在加载本轮原画（0/'+references.length+'）');progress.setAttribute('role','status');box.append(progress,gallery);const approve=action('认可原画并继续',()=>command(run,'approve-visual',{taskId:gate.id,reviewId:gate.reviewId,visualHashes:[...hashes.values()]}),true);approve.disabled=true;
   for(const ref of references){
     const snapshot=gate.visualSnapshots?.find(s=>s.taskId===ref.taskId&&s.path===ref.path),target=snapshot?'/api/images/'+encodeURIComponent(snapshot.sha256)+'?'+new URLSearchParams({sessionId:ref.sessionId}):'/api/studio/artifact?'+new URLSearchParams({runId:run.id,taskId:ref.taskId,index:String(ref.index)}),card=el('figure','visual-reference'),anchor=el('a'),img=el('img'),caption=el('figcaption','',ref.description||ref.path),status=el('span','fine','正在加载本轮原画…');
     img.hidden=true;img.alt=ref.description||ref.path;anchor.href=target;anchor.target='_blank';anchor.rel='noopener';anchor.append(img);card.append(anchor,caption,el('small','fine',ref.path),status);gallery.append(card);
@@ -33,7 +33,7 @@ export function scenePanel(run,{command,openTask,feedbackFor,notify,fresh=false}
   }
   if(gate.status==='awaiting-review'&&!finished){
     box.append(el('p','fine','请逐张查看。确认仅对本轮图片有效；原画返工后，资产、场景与 QA 将重新验证。'));
-    const actions=el('div','run-actions');actions.append(approve,action('需要修改原画',()=>feedbackFor(run,gate,{op:'reject-visual',reviewId:gate.reviewId})),action('重新加载原画',()=>{for(const img of root.querySelectorAll('[data-object-url]'))URL.revokeObjectURL(img.dataset.objectUrl);root.replaceWith(scenePanel(run,{command,openTask,feedbackFor,notify,fresh:true}));}));box.append(actions);
+    const actions=el('div','run-actions');actions.append(approve,action('提出修改',()=>feedbackFor(run,gate,{op:'reject-visual',reviewId:gate.reviewId})));sourceDetails.append(action('重新加载原画',()=>{for(const img of root.querySelectorAll('[data-object-url]'))URL.revokeObjectURL(img.dataset.objectUrl);root.replaceWith(scenePanel(run,{command,openTask,feedbackFor,notify,fresh:true}));}));box.append(actions);
   }else if(gate.status==='done'){
     box.append(el('p','fine','制作人已确认 · '+new Date(gate.approvedAt).toLocaleString('zh-CN')));
     if(!finished&&concepts[0])box.append(action('原画需要返工',()=>feedbackFor(run,concepts[0])));
