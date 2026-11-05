@@ -26,8 +26,8 @@ export interface RelayEvent {
   data: Record<string, any>; at: number;
 }
 export interface Action {
-  agentId?:string;
-  id: string; type: 'start' | 'send' | 'steer' | 'cancel-input' | 'stop' | 'approve' | 'answer' | 'history' | 'asset' | 'file' | 'models' | 'commands' | 'set-model' | 'upload' | 'direct' | 'create-project' | 'set-permissions';
+  brainstormContext?:string;agentId?:string;workspaceId?:string;includeCaptures?:boolean;artifactPath?:string;artifactHash?:string;videoOffset?:number;videoLength?:number;videoVersion?:string;
+  id: string; type: 'start' | 'send' | 'steer' | 'cancel-input' | 'stop' | 'approve' | 'answer' | 'history' | 'asset' | 'file' | 'models' | 'commands' | 'set-model' | 'upload' | 'direct' | 'create-project' | 'set-permissions' | 'prepare-workspace' | 'prepare-brainstorm' | 'studio-artifact' | 'studio-video';
   sessionId?: string; provider?: Provider; projectId?: string;
   live?:boolean;
   text?: string; assetId?:string;queuedId?:string; approvalId?: string; allow?: boolean; cursor?: number; model?: string;effort?:string; workspaceIndex?:number;attachmentIds?:string[];upload?:FilePayload;
@@ -37,31 +37,40 @@ export interface Action {
   questionId?:string;answers?:Record<string,string[]>;queueOnly?:boolean;
   permissionMode?:PermissionMode;approvalScope?:'once'|'session';projectName?:string;projectPath?:string;createFolder?:boolean;
 }
-export interface Host { agents?:AgentInfo[]; id: string; name: string; hostname?: string; platform?: string; projects: Project[]; online: boolean; lastSeen: number;capabilities?:{createProject?:boolean;permissions?:boolean}; sync?:{done:number;total:number;pages:number;state:string;errors:number} }
+export interface Host { agents?:AgentInfo[]; id: string; name: string; hostname?: string; platform?: string; projects: Project[]; online: boolean; lastSeen: number;capabilities?:{createProject?:boolean;permissions?:boolean;studioWorkspaces?:boolean;studioArtifacts?:boolean;brainstorm?:boolean}; sync?:{done:number;total:number;pages:number;state:string;errors:number} }
 export interface AgentModel { id: string; name: string; description?: string; isDefault?: boolean;efforts?:string[];defaultEffort?:string;aliases?:string[] }
 export interface AgentCommand {name:string;description:string;argumentHint?:string;source?:'relay'|'claude'}
 export const sessionKey = (host: string, provider: Provider, nativeId: string) => `${host}:${provider}:${nativeId}`;
 export const MAX_TEXT = 32_000;
 export function validateAction(value: any): Action {
   if (!value || typeof value !== 'object' || !/^[a-zA-Z0-9_-]{8,100}$/.test(value.id ?? '')) throw new Error('Invalid action ID');
-  if (!['start', 'send', 'steer', 'cancel-input', 'stop', 'approve', 'answer', 'history', 'asset', 'file', 'models', 'commands', 'set-model','upload','direct','create-project','set-permissions'].includes(value.type)) throw new Error('Unknown action');
+  if (!['start', 'send', 'steer', 'cancel-input', 'stop', 'approve', 'answer', 'history', 'asset', 'file', 'models', 'commands', 'set-model','upload','direct','create-project','set-permissions','prepare-workspace','prepare-brainstorm','studio-artifact','studio-video'].includes(value.type)) throw new Error('Unknown action');
   if(value.permissionMode!==undefined&&(!['start','set-permissions'].includes(value.type)||!['request','auto','full'].includes(value.permissionMode)))throw new Error('无效权限模式');
   if(value.type==='set-permissions'&&!value.permissionMode)throw new Error('请选择权限模式');
   if(value.approvalScope!==undefined&&(value.type!=='approve'||!['once','session'].includes(value.approvalScope)||value.approvalScope==='session'&&value.allow!==true))throw new Error('无效批准范围');
   if(value.type==='create-project'&&(typeof value.projectName!=='string'||!value.projectName.trim()||value.projectName.length>100||/[\r\n\x00]/.test(value.projectName)||typeof value.projectPath!=='string'||!value.projectPath.trim()||value.projectPath.length>2000||/[\r\n\x00]/.test(value.projectPath)||value.createFolder!==undefined&&typeof value.createFolder!=='boolean'))throw new Error('请输入项目名称和工作电脑上的文件夹绝对路径');
+  if(value.brainstormContext!==undefined&&(!['start','send'].includes(value.type)||typeof value.brainstormContext!=='string'||value.brainstormContext.length>18000))throw Error('无效项目组上下文');
+  if(value.type==='prepare-brainstorm'&&(!uploadId.test(value.workspaceId??'')||typeof value.projectId!=='string'||!value.projectId||value.projectId.length>100))throw Error('无效讨论 ID');
+  if(value.workspaceId!==undefined&&!['prepare-workspace','prepare-brainstorm'].includes(value.type))throw Error('无效工作目录请求');
+  if(value.includeCaptures!==undefined&&(value.type!=='prepare-workspace'||typeof value.includeCaptures!=='boolean'))throw Error('无效截图复制设置');
+  if(value.type==='prepare-workspace'&&(!/^[a-f0-9-]{36}$/i.test(value.workspaceId??'')||typeof value.projectId!=='string'||!value.projectId||value.projectId.length>100))throw new Error('无效需求工作副本');
+  if([value.videoOffset,value.videoLength,value.videoVersion].some(x=>x!==undefined)&&(value.type!=='studio-video'||!Number.isSafeInteger(value.videoOffset)||value.videoOffset<0||!Number.isSafeInteger(value.videoLength)||value.videoLength<1||value.videoLength>262144||!/^[a-f0-9]{64}$/.test(value.videoVersion??'')))throw Error('无效视频分段');
+  if(value.artifactHash!==undefined&&(value.type!=='studio-artifact'||!/^[a-f0-9]{64}$/.test(value.artifactHash)))throw Error('无效原画版本');
+  if(value.artifactPath!==undefined&&!['studio-artifact','studio-video'].includes(value.type))throw Error('原画路径只能用于原画读取请求');
+  if(['studio-artifact','studio-video'].includes(value.type)&&(typeof value.artifactPath!=='string'||!value.artifactPath.trim()||value.artifactPath.length>2000||/[\x00\r\n]/.test(value.artifactPath)))throw Error('无效原画请求');
   if(value.type==='file'&&!uploadId.test(value.fileId??''))throw new Error('无效附件 ID');
   if(value.queueOnly!==undefined&&(value.type!=='stop'||typeof value.queueOnly!=='boolean'))throw new Error('无效停止方式');
   if(value.live!==undefined&&(value.type!=='history'||typeof value.live!=='boolean'||value.cursor!==undefined))throw new Error('Invalid live history request');
   if(value.type==='answer'&&(!/^[a-f0-9-]{36}$/i.test(value.questionId??'')||!value.answers||typeof value.answers!=='object'||Array.isArray(value.answers)||JSON.stringify(value.answers).length>30000))throw new Error('无效问题回答');
   if(value.type==='direct'&&(!validDirectSdp(value.offer,'offer',value.relay===true)||Boolean(value.sessionId)===Boolean(value.projectId)||value.relay!==undefined&&typeof value.relay!=='boolean'||value.iceServers!==undefined&&(!value.relay||!validTurnServers(value.iceServers))))throw new Error('无效直连协商或目标');
-  if(value.attachmentIds!==undefined&&(!['start','send'].includes(value.type)||!Array.isArray(value.attachmentIds)||value.attachmentIds.length>MAX_ATTACHMENTS||new Set(value.attachmentIds).size!==value.attachmentIds.length||!value.attachmentIds.every((id:unknown)=>typeof id==='string'&&uploadId.test(id))))throw new Error('无效附件列表');
+  if(value.attachmentIds!==undefined&&(!['start','send','prepare-workspace'].includes(value.type)||!Array.isArray(value.attachmentIds)||value.attachmentIds.length>MAX_ATTACHMENTS||new Set(value.attachmentIds).size!==value.attachmentIds.length||!value.attachmentIds.every((id:unknown)=>typeof id==='string'&&uploadId.test(id))))throw new Error('无效附件列表');
   if(value.type==='upload'&&(!value.upload||typeof value.upload.scope!=='string'||value.upload.scope.length>400||!value.upload.file||!uploadId.test(value.upload.file.id??'')||typeof value.upload.data!=='string'))throw new Error('无效附件上传');
   if(value.type==='asset'&&!(/^[a-f0-9]{64}$/).test(value.assetId??''))throw new Error('Invalid image ID');
   if (value.sessionId !== undefined && (typeof value.sessionId !== 'string' || value.sessionId.length > 250)) throw new Error('Invalid session');
   if (['start', 'send'].includes(value.type) && (typeof value.text !== 'string' || (!value.text.trim()&&!value.attachmentIds?.length) || value.text.length > MAX_TEXT)) throw new Error('请输入消息或选择附件');
   if(['steer','cancel-input'].includes(value.type)&&!(/^[a-zA-Z0-9_-]{8,100}$/).test(value.queuedId??''))throw new Error('Queued message required');
   if (value.type === 'start' && (!['codex', 'claude', 'api'].includes(value.provider) || typeof value.projectId !== 'string' || value.projectId.length > 100)) throw new Error('Choose an agent and configured project');
-  if (!['start','models','upload','direct','create-project'].includes(value.type) && !value.sessionId) throw new Error('Session required');
+  if (!['start','models','upload','direct','create-project','prepare-workspace','prepare-brainstorm'].includes(value.type) && !value.sessionId) throw new Error('Session required');
   if(value.agentId!==undefined&&!/^[a-zA-Z0-9_-]{1,60}$/.test(value.agentId))throw new Error('Invalid agent ID');
   if(['start','models'].includes(value.type)&&value.provider==='api'&&!value.agentId)throw new Error('Select an API agent');
   if(value.type==='models'&&!['codex','claude','api'].includes(value.provider))throw new Error('Invalid provider');
@@ -71,5 +80,5 @@ export function validateAction(value: any): Action {
   if(value.workspaceIndex!==undefined&&(!Number.isInteger(value.workspaceIndex)||value.workspaceIndex<0||value.workspaceIndex>100))throw new Error('Invalid workspace');
   if (value.type === 'approve' && (typeof value.approvalId !== 'string' || value.approvalId.length > 200 || typeof value.allow !== 'boolean')) throw new Error('Invalid approval');
   if (value.cursor !== undefined && (!Number.isSafeInteger(value.cursor) || value.cursor < 0)) throw new Error('Invalid history cursor');
-  return Object.fromEntries(Object.entries(value).filter(([k]) => ['live','agentId','id','type','sessionId','provider','projectId','text','assetId','fileId','queuedId','approvalId','allow','cursor','model','effort','workspaceIndex','attachmentIds','upload','offer','relay','iceServers','questionId','answers','queueOnly','permissionMode','approvalScope','projectName','projectPath','createFolder'].includes(k))) as unknown as Action;
+  return Object.fromEntries(Object.entries(value).filter(([k]) => ['videoOffset','videoLength','videoVersion','brainstormContext','artifactHash','artifactPath','includeCaptures','workspaceId','live','agentId','id','type','sessionId','provider','projectId','text','assetId','fileId','queuedId','approvalId','allow','cursor','model','effort','workspaceIndex','attachmentIds','upload','offer','relay','iceServers','questionId','answers','queueOnly','permissionMode','approvalScope','projectName','projectPath','createFolder'].includes(k))) as unknown as Action;
 }

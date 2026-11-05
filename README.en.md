@@ -32,6 +32,18 @@ Swipe from the left edge to open the conversation list. Tap an image to enlarge 
 
 Screenshots show synthetic content from the isolated demo. See [preview source and deployment instructions](preview/README.md) for details.
 
+## Game studio
+
+The game studio at `/studio` shares the persistent shell with the conversation workbench at `/`. Assign an agent, model, and reasoning effort to each planning, art, engineering, and QA role. Use role conversations or the team chat to guide production and inspect task-tagged handoffs.
+
+Each demand gets its own Git branch and isolated workspace. Select a full-scene, levels-only, design-only, code/fix, or custom workflow. Plan, design, visual, in-engine scene, and final-delivery approvals are independent choices. Unselected stages are not added automatically; omitting QA does not mean QA passed.
+
+Project-bound brainstorming defaults to Claude and can delegate reference-image generation to Codex. A proposal opens the same workflow configuration before creating a production demand. Images, video, files, sanitized SVG, and Mermaid diagrams support review on desktop and mobile.
+
+When visual approval is selected, decoded, verified images are required before confirmation. Review previews are cached by production version; approval still checks workstation file hashes. Interruptions preserve sessions, files, dependencies, and approvals, while uncertain deliveries are never automatically replayed.
+
+See the [documentation index](docs/README.md), [studio guide](docs/game-studio.md), [architecture](docs/architecture.md), and [troubleshooting](docs/troubleshooting.md) (Chinese). The public demo primarily illustrates conversation interactions, not a completed game production run.
+
 ## Repository layout
 
 This repository includes the workstation tool, relay server, and website.
@@ -93,7 +105,7 @@ The workstation uses `BRIDGE_TOKEN`; the browser uses a different `PHONE_TOKEN`.
 
 ## Deployment and operation
 
-Run `npm run desktop` to open the local agent/model manager (`scripts/start-desktop.ps1` is also available on Windows). It can reuse or start the workstation bridge; closing the window leaves tasks running. API agents run requests from the workstation and create their own conversations; they do not import provider website chats.
+Run `npm run desktop` to open the standalone studio window; its workspace menu opens agent/model settings (`scripts/start-desktop.ps1` is also available on Windows). It can reuse or start the workstation bridge; closing the window leaves tasks running. API agents run requests from the workstation and create their own conversations; they do not import provider website chats.
 
 ![Desktop agent and model manager, using an isolated sample configuration](docs/images/desktop-manager.png)
 
@@ -132,6 +144,10 @@ Verification output is saved under ignored `.data/`. See the [validation record]
 - Current resource transfers use authenticated HTTPS and the workstation's existing WSS connection. Duplicate cold reads are coalesced, with at most three concurrent resource jobs. The current UI does not wait for STUN/ICE/TURN; legacy direct-transfer endpoints remain for older clients. No public workstation HTTP file server is needed.
 - Intended for a single trusted user. There is no multi-user authorization, per-device pairing, key-rotation UI, or automatic data cleanup. Anyone holding the browser access key can operate allowed projects.
 - **The server can read and cache conversations and resources.** Disk files and the database are not encrypted. Transfers retain HTTPS/WSS and login authentication, but do not use additional end-to-end encryption. Only explicitly referenced or uploaded resources are synchronized. Never upload model credential files; restrict data-directory permissions and plan backups and storage monitoring.
+
+## Knowledge base
+
+The [documentation index](docs/README.md) links deployment, studio operation, implementation contracts, troubleshooting, and validation. See the [2026-11-05 validation report](docs/validation-2026-11-05.md) for the current scope. Runtime secrets, session databases, uploads, generated production media, and private diagnostics remain excluded from Git.
 
 ## Dependencies and references
 

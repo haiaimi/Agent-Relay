@@ -2,6 +2,7 @@ import {createHash,randomUUID} from 'node:crypto';
 import {mkdirSync,readFileSync,writeFileSync,renameSync,existsSync} from 'node:fs';
 import {join,resolve} from 'node:path';
 import type {DatabaseSync} from 'node:sqlite';
+import {videoMime} from './video.js';
 import {imageMime} from './media.js';
 export const MAX_UPLOAD_BYTES=16*1024*1024;
 export const MAX_ATTACHMENTS=5;
@@ -16,14 +17,14 @@ export class FileStore {
   }
   put(scope:string,file:FileRef,bytes:Buffer):FileRef {
     if(!scope||scope.length>400||!uploadId.test(file?.id??'')||!bytes.length||bytes.length>MAX_UPLOAD_BYTES||file.size!==bytes.length||createHash('sha256').update(bytes).digest('hex')!==file.sha256)throw new Error('附件校验失败或超过 16 MB');
-    const ref:FileRef={id:file.id,name:file.name,size:bytes.length,mime:imageMime(bytes)??'application/octet-stream',sha256:file.sha256};
+    const ref:FileRef={id:file.id,name:file.name,size:bytes.length,mime:imageMime(bytes)??videoMime(bytes)??'application/octet-stream',sha256:file.sha256};
     this.validate(scope,ref);
     const dir=join(this.root,ref.id);mkdirSync(dir,{recursive:true,mode:0o700});
     const path=join(dir,ref.name);if(!existsSync(path)){const temp=join(dir,randomUUID()+'.part');writeFileSync(temp,bytes,{mode:0o600,flag:'wx'});renameSync(temp,path);}
     this.db.prepare('INSERT OR IGNORE INTO upload_files VALUES(?,?,?)').run(ref.id,scope,JSON.stringify(ref));return ref;
   }
   private validate(scope:string,file:FileRef){
-    if(!scope||scope.length>400||!uploadId.test(file?.id??'')||!Number.isSafeInteger(file.size)||file.size<1||file.size>MAX_UPLOAD_BYTES||!/^[a-f0-9]{64}$/.test(file.sha256)||!['image/png','image/jpeg','image/gif','image/webp','application/octet-stream'].includes(file.mime))throw new Error('无效附件索引');
+    if(!scope||scope.length>400||!uploadId.test(file?.id??'')||!Number.isSafeInteger(file.size)||file.size<1||file.size>MAX_UPLOAD_BYTES||!/^[a-f0-9]{64}$/.test(file.sha256)||!['image/png','image/jpeg','image/gif','image/webp','video/mp4','video/quicktime','video/webm','application/octet-stream'].includes(file.mime))throw new Error('无效附件索引');
     if(typeof file.name!=='string'||!file.name||file.name.length>180||/[\\/\x00-\x1f]/.test(file.name)||file.name==='.'||file.name==='..'||/[. ]$/.test(file.name)||/[:<>"|?*]/.test(file.name)||/^(con|prn|aux|nul|com[0-9]|lpt[0-9])(?:\.|$)/i.test(file.name))throw new Error('文件名不受支持');
     const old=this.db.prepare('SELECT json FROM upload_files WHERE id=? LIMIT 1').get(file.id);
     if(old&&JSON.stringify(JSON.parse(String(old.json)))!==JSON.stringify(file))throw new Error('附件 ID 冲突');

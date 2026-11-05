@@ -1,3 +1,4 @@
+import {videoMime} from './video.js';
 import {createHash,randomUUID} from 'node:crypto';
 import {mkdirSync,readFileSync,writeFileSync,renameSync,existsSync} from 'node:fs';
 import {join} from 'node:path';
@@ -16,7 +17,7 @@ export function imageMime(bytes:Buffer):string|undefined{
 export function imageBytes(payload:ImagePayload):Buffer{
   if(!payload||!/^[a-f0-9]{64}$/.test(payload.id??'')||typeof payload.data!=='string'||payload.data.length>Math.ceil(MAX_IMAGE_BYTES/3)*4||!/^[A-Za-z0-9+/]*={0,2}$/.test(payload.data))throw new Error('Invalid image payload');
   const bytes=Buffer.from(payload.data,'base64');
-  if(bytes.length>MAX_IMAGE_BYTES||!imageMime(bytes)||imageMime(bytes)!==payload.mime||createHash('sha256').update(bytes).digest('hex')!==payload.id)throw new Error('Invalid image content or hash');
+  if(bytes.length>MAX_IMAGE_BYTES||!(imageMime(bytes)??videoMime(bytes))||(imageMime(bytes)??videoMime(bytes))!==payload.mime||createHash('sha256').update(bytes).digest('hex')!==payload.id)throw new Error('Invalid image content or hash');
   return bytes;
 }
 export class MediaStore {
@@ -27,7 +28,7 @@ export class MediaStore {
   }
   put(sessionId:string,bytes:Buffer,name:string):ImageRef{
     if(bytes.length>MAX_IMAGE_BYTES)throw new Error('图片超过单张 16 MB 上限');
-    const mime=imageMime(bytes);if(!mime)throw new Error('仅支持 PNG、JPEG、GIF、WebP 图片');
+    const mime=imageMime(bytes)??videoMime(bytes);if(!mime)throw new Error('仅支持 PNG、JPEG、GIF、WebP 图片及 MP4、MOV、WebM 视频');
     const id=createHash('sha256').update(bytes).digest('hex'),file=join(this.root,id);
     if(!existsSync(file)){const temp=join(this.root,randomUUID()+'.tmp');writeFileSync(temp,bytes,{mode:0o600});renameSync(temp,file);}
     name=String(name||'图片').replace(/[\x00-\x1f]/g,'').slice(0,180);

@@ -17,15 +17,18 @@
     "setup": "node scripts/setup.mjs",
     "questions:install": "node scripts/install-question-hook.mjs",
     "smoke:live": "node --import tsx scripts/smoke-live.ts",
+    "smoke:studio": "node --import tsx scripts/smoke-studio.ts",
     "desktop": "npm run setup && npm run build && electron desktop/main.cjs"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.316",
+    "@mermaid-js/tiny": "12.3.0",
     "dompurify": "3.4.17",
     "markdown-it": "15.0.3",
     "sharp": "0.35.5",
     "werift": "0.26.0",
-    "ws": "8.22.1"
+    "ws": "8.22.1",
+    "zod": "4.6.7"
   },
   "devDependencies": {
     "@highlightjs/cdn-assets": "11.12.0",

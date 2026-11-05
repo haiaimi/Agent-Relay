@@ -332,3 +332,10 @@ dialog::backdrop { background: #0009; backdrop-filter: none; }
 @media(max-width:760px){.topbar .language-toggle{padding:5px;font-size:10px;}.filters{gap:1px;}.filters button{padding:7px 9px;}}
 
 .message.user.delivery-pending .message-label { display: block; font-size: 11px; margin-bottom: 6px; }
+ .studio-link{margin:0 16px 12px;text-decoration:none}
+
+.video-card { width: 100%; max-width: min(480px,calc(360px * var(--video-ratio,1.7778))); min-width: 0; align-self: flex-start; border-radius: 10px; overflow: hidden; background: #000; }
+.video-card video { display: block; width: 100%; height: auto; aspect-ratio: var(--video-ratio,16 / 9); object-fit: contain; }
+.video-fallback { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 10px; color: var(--ink); background: var(--surface); font-size: 12px; }
+.video-fallback button, .video-fallback a { color: var(--link); }
+.attachment-draft video { width: 64px; height: 48px; object-fit: contain; }

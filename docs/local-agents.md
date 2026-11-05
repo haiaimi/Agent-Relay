@@ -13,9 +13,15 @@ npm ci
 npm run desktop
 ```
 
-Windows 也可以运行 `scripts/start-desktop.ps1`。这是独立 Electron 窗口，不是浏览器管理页。窗口可以切换中文 / English，勾选 Codex、Claude，以及添加 Grok、DeepSeek、MiMo 或自定义 API 服务。第一次会生成缺失的基础配置；已有配置不覆盖。
+Windows 也可以运行 `scripts/start-desktop.ps1`。这是独立 Electron 窗口，不是浏览器管理页。主窗口直接显示游戏团队工作室，支持填写工程路径及通过原生文件夹对话框选择本机目录。上方「工作台 → Agent 与模型设置」打开本机设置窗口，可切换中文 / English，勾选 Codex、Claude，以及添加 Grok、DeepSeek、MiMo 或自定义 API 服务。第一次会生成缺失的基础配置；已有配置不覆盖。
 
-桌面窗口显示本机连接工具是否运行，并提供“启动连接工具”和“打开会话网页”。已有实例运行时不会再开第二个；关闭窗口不停止后台连接工具或任务。服务器连接与允许的工程目录仍由 `bridge.config.json` 配置，服务器连接密钥来自本机 `.env` 的 `BRIDGE_TOKEN`。桌面窗口本身不需要云端账号。
+桌面启动时复用已有本机连接，未运行时启动后台连接。团队工作室和会话均在独立窗口中显示；Agent 设置窗口显示连接状态，并可启动连接或切换回主窗口。已有实例运行时不会再开第二个；关闭窗口不停止后台连接工具或任务。服务器连接与允许的工程目录仍由 `bridge.config.json` 配置，服务器连接密钥来自本机 `.env` 的 `BRIDGE_TOKEN`。桌面不新增云端账号；工作室沿用 Relay 鉴权。若本机存在已有 PHONE_TOKEN，将仅向配置的 Relay 登录并保留 HttpOnly 会话 Cookie，密钥不暴露给界面；无法恢复时显示正常访问密钥登录表单。可运行 `scripts/install-desktop-shortcut.ps1` 创建桌面快捷方式。
+
+### 会话中的模型选择
+
+会话工作台里的 Codex 模型与思考强度先保存在连接程序，显示为“已保存，下一条从 Relay 发送时生效”。保存不依赖对应的 Codex 桌面窗口，也不会启动新的会话写入者。当前轮使用原设置；刷新、切会话或连接程序重启后仍保留预设。从 Relay 续聊时使用现有窗口或独立后台执行，启动确认后才消费本次预设；等待启动确认期间新保存的选择属于再下一轮。
+
+模型必须在本机返回的目录中，强度必须受该模型支持。原生桌面、CLI 或 IDE 中直接发起的其他操作不等于从 Relay 续聊；网页不能据此承诺替所有外部窗口修改设置。结果不明的发送不会自动重发。
 
 ### 配置服务与模型
 
@@ -54,6 +60,8 @@ API 执行每轮最多 24 个模型步骤，单次命令最多 30 秒，回复�
 - [MiMo 首次调用 API](https://mimo.mi.com/docs/zh-CN/quick-start/summary/first-api-call)
 
 ## English
+
+The standalone window opens the studio; its workspace menu opens agent/model settings. Codex model preferences are persisted for the next turn sent through Relay, even when no matching desktop window is open. Refreshing or restarting preserves the preference; acknowledged turn startup consumes it. Existing native desktop or IDE turns remain under their own owner.
 
 Run `npm ci`, then `npm run desktop` from the repository. On Windows, `scripts/start-desktop.ps1` also opens the independent Electron window. Select Chinese or English, enable native Codex / Claude, and add API agents. Closing the window leaves the bridge and running tasks alone. An existing bridge is reused. Relay identity, project roots, and `BRIDGE_TOKEN` still use `bridge.config.json` and `.env`.
 

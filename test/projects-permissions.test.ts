@@ -14,6 +14,7 @@ import {BridgeStore} from '../src/bridge/store.js';
 import {AgentRuntime} from '../src/bridge/runtime.js';
 import {validateAction} from '../src/shared/protocol.js';
 import {assertProjectPath} from '../src/shared/security.js';
+import {STUDIO_ROLES} from '../src/relay/studio.js';
 
 const pause=(ms=10)=>new Promise(r=>setTimeout(r,ms));
 async function until(fn:()=>boolean){for(let i=0;i<150;i++){if(fn())return;await pause();}throw Error('Fixture did not reach expected state');}
@@ -124,6 +125,8 @@ test('authenticated web project creation publishes the new root before starting 
     assert.equal((await post('/api/actions',a)).status,401);assert.equal(existsSync(a.projectPath),false);
     await post('/api/login',{token:phone});const created=await post('/api/actions',a);assert.equal(created.status,200);const project=created.value.project;
     assert.ok(relay.store.hosts()[0].projects.some(p=>p.id===project.id));assert.equal((await post('/api/actions',a)).value.project.id,project.id);assert.equal(bridge.store.projects().length,1);
+    const studio=await post('/api/studio/project',{name:'指定路径的游戏团队',hostId:'pc',projectId:project.id,workspaceIndex:0,roles:STUDIO_ROLES.map(([role])=>({role,enabled:true,provider:'codex',instructions:'',tools:''})),permissionMode:'request',concurrency:1,reviewPlan:true});
+    assert.equal(studio.status,200);assert.equal(studio.value.project.projectId,project.id);assert.equal(relay.store.hosts()[0].projects.find(p=>p.id===studio.value.project.projectId)?.path,project.path);
     const started=await post('/api/actions',{id:randomUUID(),type:'start',hostId:'pc',projectId:project.id,provider:'codex',permissionMode:'full',text:'wait'});assert.equal(started.status,200);
     assert.equal(relay.store.getSession(started.value.sessionId)?.cwd,project.path);assert.equal(relay.store.getSession(started.value.sessionId)?.permissionMode,'full');
   }finally{await bridge.close();await relay.close();rmSync(root,{recursive:true,force:true});}

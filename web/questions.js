@@ -22,7 +22,7 @@ export class QuestionPanel {
     const note=document.createElement('p');note.className='question-note';note.setAttribute('role','status');
     form.addEventListener('input',()=>this.drafts.set(card.id,Object.fromEntries(groups.map(({q,choices,free})=>[q.id,{choices:choices.filter(c=>c.checked).map(c=>c.value),free:free?.value??''}]))));
     if(card.status==='pending'){
-      const button=document.createElement('button');button.type='submit';button.className='question-submit';button.textContent='提交回答';button.disabled=!this.online();form.append(button);if(!this.online())note.textContent='电脑离线，连接恢复后可提交';
+      const button=document.createElement('button');button.type='submit';button.className='question-submit';button.textContent='提交回答';button.disabled=!this.online();form.append(button);if(!this.online())note.textContent=this.readOnlyNote?.()||'电脑离线，连接恢复后可提交';
       form.onsubmit=async event=>{
         event.preventDefault();if(this.submitting.has(card.id))return;const answers={};
         for(const {q,choices,free} of groups){const custom=free?.value.trim(),values=custom?[custom]:choices.filter(c=>c.checked).map(c=>c.value);if(!values.length){note.textContent='请回答所有问题后提交';return;}answers[q.id]=values;}

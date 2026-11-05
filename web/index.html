@@ -4,7 +4,7 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#0d1117"><meta name="description" content="你的电脑执行，随时随地掌握会话。">
   <script src="/theme.js"></script><script src="/i18n.js"></script>
-  <link rel="manifest" href="/manifest.webmanifest"><link rel="icon" type="image/svg+xml" href="/icon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/chatgpt.css">
+  <link rel="manifest" href="/manifest.webmanifest"><link rel="icon" type="image/svg+xml" href="/icon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/workspace-theme.css"><link rel="stylesheet" href="/chatgpt.css"><link rel="stylesheet" href="/workspace-nav.css"><link rel="stylesheet" href="/workspace-shell.css">
   <title>Agent Relay · 会话工作台</title><script src="/vendor/markdown-it.umd.min.js" defer></script><script src="/vendor/purify.min.js" defer></script><script src="/vendor/highlight.min.js" defer></script><script src="/app.js" type="module"></script>
 </head>
 <body>
@@ -21,17 +21,28 @@
   <div id="workspace" class="workspace" hidden>
     <aside class="sidebar" id="sidebar">
       <header class="brand"><img class="brand-symbol" src="/icon.svg" alt=""><div><strong>Agent Relay</strong><span>本地执行 · 随处连接</span></div><button class="icon mobile-only" id="close-sidebar" aria-label="关闭会话列表">×</button></header>
+      <nav class="app-nav" aria-label="工作空间"><a href="/" class="app-nav-item active" aria-current="page"><span aria-hidden="true">◫</span>会话工作台</a><a href="/studio" class="app-nav-item"><span aria-hidden="true">◈</span>游戏工作室</a></nav>
       <button id="new-session" class="primary new-session">＋ 新建会话 <span class="shortcut">N</span></button>
+      <div class="search-wrap" id="session-search-wrap"><input id="search" type="search" aria-label="搜索会话" placeholder="搜索标题或项目…"><span aria-hidden="true">⌕</span></div>
+      <details class="sidebar-filters" id="sidebar-filters"><summary><span id="filter-summary">筛选会话</span></summary>
       <div class="workspace-filters"><label class="sr-only" for="device-filter">工作设备</label><select id="device-filter"><option value="">全部工作设备</option></select><label class="sr-only" for="project-filter">Codex 项目</label><select id="project-filter"><option value="">全部项目</option></select><label class="sr-only" for="activity-filter">任务状态</label><select id="activity-filter"><option value="">全部状态</option><option value="active">正在运行 / 等待审批</option><option value="idle">已完成</option><option value="failed">失败 / 已停止</option></select></div>
-      <div class="search-wrap"><input id="search" type="search" aria-label="搜索会话" placeholder="搜索标题或项目…"><span aria-hidden="true">⌕</span></div>
       <nav class="filters" aria-label="会话类型"><button data-provider="all" class="active">全部</button><button data-provider="codex">Codex</button><button data-provider="claude">Claude</button><button data-provider="api">其他 Agent</button></nav>
-      <div class="list-heading"><span>最近会话</span><span id="session-count">0</span></div>
+      </details>
+      <div class="list-heading" id="session-list-heading"><span>最近会话</span><span id="session-count">0</span></div>
       <div id="session-list" class="session-list"></div>
+      <section id="studio-sidebar" class="studio-sidebar-pane" aria-label="工作室制作进度" hidden>
+        <label class="sr-only" for="studio-sidebar-team">工作室团队</label><select id="studio-sidebar-team" aria-label="工作室团队" disabled></select>
+        <button id="studio-sidebar-new" class="primary new-session" type="button" disabled>＋ 提出制作需求</button>
+        <div class="search-wrap"><input id="studio-sidebar-search" type="search" aria-label="搜索制作任务" placeholder="搜索需求或职能…"><span aria-hidden="true">⌕</span></div>
+        <div class="list-heading"><span>制作进度</span><span id="studio-sidebar-count">0</span></div>
+        <div id="studio-progress-list" class="studio-progress-list"><p class="studio-sidebar-empty">正在读取制作进度…</p></div>
+      </section>
       <footer class="sidebar-footer"><span id="connection"><i class="dot"></i>正在连接</span><button id="logout" class="text-button">退出</button></footer>
       <div id="sidebar-resize" class="sidebar-resize" role="separator" aria-label="调整侧边栏宽度" aria-orientation="vertical" aria-controls="sidebar" aria-valuemin="220" aria-valuemax="520" tabindex="0" title="拖拽调整宽度，双击恢复默认；方向键微调" hidden></div>
     </aside>
     <div id="drawer-edge" class="drawer-edge" aria-hidden="true"></div><button id="drawer-backdrop" class="drawer-backdrop" type="button" aria-label="关闭会话列表遮罩" hidden></button><main class="main">
-      <header class="topbar"><button id="open-sidebar" class="icon mobile-only" aria-label="打开会话列表">☰</button><div class="breadcrumb"><span class="device-caption">工作设备 /</span><span id="host-label">正在连接</span></div><button type="button" class="theme-toggle" data-theme-toggle aria-label="切换浅色模式"></button><button id="refresh" class="text-button" aria-label="刷新会话"><span aria-hidden="true">↻</span><span class="refresh-caption"> 刷新</span></button></header>
+      <header class="topbar"><button id="open-sidebar" class="icon mobile-only" aria-label="打开会话列表">☰</button><span id="workspace-name">会话工作台</span><div class="breadcrumb"><span class="device-caption">工作设备 /</span><span id="host-label">正在连接</span></div><button type="button" class="theme-toggle" data-theme-toggle aria-label="切换浅色模式"></button><button id="refresh" class="text-button" aria-label="刷新会话"><span aria-hidden="true">↻</span><span class="refresh-caption"> 刷新</span></button></header>
+      <div id="session-view" class="workspace-pane">
       <section id="welcome" class="welcome">
         <p class="eyebrow">CONNECTED TO YOUR OWN COMPUTER</p><h1>下一步，<br><span>从这里开始。</span></h1><p class="muted">电脑负责执行，你负责方向。<br>选择一个历史会话，或从新的想法开始。</p>
         <div id="host-cards" class="host-cards"></div><button id="welcome-new" class="primary">发起新会话 ↗</button>
@@ -42,6 +53,7 @@
         <div id="timeline" class="timeline" aria-live="polite"><div id="older" class="history-loader" role="status" aria-live="polite" hidden>下拉查看更早消息</div><p id="history-note" class="history-note"></p><div id="messages"></div><div id="question-cards"></div></div>
         <div class="composer-wrap"><button id="jump-latest" class="jump-latest" type="button" aria-label="回到最新对话" title="回到最新对话" aria-controls="timeline" hidden><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 5v14m-6-6 6 6 6-6"/></svg></button><div id="agent-activity" class="agent-activity" role="status" aria-live="polite" hidden><i class="activity-dot" aria-hidden="true"></i><span id="activity-label" class="activity-label"></span><span id="activity-detail" class="activity-detail"></span></div><div id="command-menu" class="command-menu" role="listbox" aria-label="命令自动补全" hidden></div><div id="attachment-preview" class="attachment-preview" aria-label="待发送附件" hidden></div><form id="composer"><label class="sr-only" for="prompt">发送消息</label><textarea id="prompt" maxlength="32000" rows="1" aria-autocomplete="list" aria-controls="command-menu" aria-expanded="false" placeholder="消息或 / 命令…"></textarea><div class="composer-toolbar"><button id="attach-button" class="attach-button" type="button" aria-label="添加附件"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 4v16M4 12h16"/></svg></button><button id="permission-toggle" class="permission-toggle" type="button" aria-label="会话权限" aria-haspopup="dialog"><span id="permission-preview">本机权限</span><svg viewBox="0 0 12 12" aria-hidden="true" focusable="false"><path d="m3 4.5 3 3 3-3"/></svg></button><span class="composer-spacer"></span><button id="settings-toggle" type="button" class="settings-toggle" aria-label="选择模型与思考强度" aria-haspopup="dialog"><span id="settings-preview">模型与强度</span><span aria-hidden="true"> ⚙</span></button><div class="composer-bottom"><button id="stop-task" type="button" class="stop-task" aria-label="停止当前任务" title="停止当前任务，保留会话记录" hidden><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="6" y="6" width="12" height="12" rx="2"/></svg></button><button id="send-button" type="submit" class="send" aria-label="发送消息" disabled><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 19V5m-6 6 6-6 6 6"/></svg></button></div></div></form><p id="composer-note" class="composer-note">在本地电脑中执行</p></div>
       </section>
+      </div><section id="studio-view" class="workspace-pane" aria-label="游戏工作室" hidden><iframe id="studio-frame" title="游戏工作室"></iframe><div id="studio-loading" class="workspace-loading" role="status">正在打开工作室…</div></section>
     </main>
   </div>
   <dialog id="session-settings" class="session-settings permission-menu" aria-labelledby="settings-title"><div class="dialog-heading"><h2 id="settings-title">模型与思考强度</h2><button id="settings-close" type="button" class="icon" aria-label="关闭会话设置">×</button></div><div class="settings-field"><label for="model-select">模型</label><select id="model-select" aria-label="模型"><option value="" disabled>选择模型…</option></select></div><div class="settings-field"><label for="effort-select">思考强度</label><select id="effort-select" aria-label="思考强度"><option value="default">使用模型推荐强度</option></select></div><p id="model-hint" class="fine">切换后下一轮生效</p><p id="pending-settings" class="fine"></p><div class="settings-project" hidden><p id="session-project" class="folder"></p><p id="session-folder" class="folder"></p></div><p id="settings-input-note" class="muted" hidden></p></dialog>

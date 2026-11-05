@@ -53,6 +53,8 @@ test('phone uploads raw HTTP files through relay, resumes agents and downloads s
   assert.throws(()=>new FileStore(join(root,'relay'),relay.store.db).read('test|'+result.sessionId,legacy.id));
   assert.equal(await (await request('/api/files/'+legacy.id+'?sessionId='+encodeURIComponent(result.sessionId))).text(),'legacy-content');
   const own=await upload('private.txt',Buffer.from('private'),result.sessionId);
+  const recording=Buffer.concat([Buffer.from([0,0,0,24]),Buffer.from('ftypisom'),Buffer.from([0,0,0,0]),Buffer.from('isommp42'),Buffer.from('video-fixture')]),video=await upload('motion.mp4',recording,result.sessionId);assert.equal(video.mime,'video/mp4');assert.equal(bridge.runtime.files.read('test|'+result.sessionId,video.id).file.mime,'video/mp4');
+  assert.equal((await request('/api/files/'+video.id+'?sessionId='+encodeURIComponent(result.sessionId))).headers.get('content-type'),'video/mp4');
   const second=await action({type:'start',hostId:'test',provider:'codex',projectId:'work',text:'normal'});
   await assert.rejects((await peer(second.sessionId)).read('file',own.id),/不属于/);
   assert.notEqual((await request('/api/files/'+own.id+'?sessionId='+encodeURIComponent(second.sessionId))).status,200);

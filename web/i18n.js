@@ -1,5 +1,6 @@
 (() => {
   const words={
+    '会话视频':'Conversation video','视频无法播放，请重试或下载':'Video could not play. Retry or download it.','下载视频':'Download video','重试':'Retry',
     '正在后台保存模型设置…':'Saving model settings in the background…','模型设置未保存':'Model settings were not saved','你 · 正在发送':'You · Sending','你 · 发送待确认':'You · Delivery unconfirmed','你 · 发送失败':'You · Send failed','消息尚未发送':'Message was not sent','发送结果待确认，请查看会话，勿重复发送':'Delivery unconfirmed. Check the conversation before sending again',
     '回到最新对话':'Jump to latest messages',
     '后台任务':'Background task',

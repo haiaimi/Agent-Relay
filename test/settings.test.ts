@@ -6,6 +6,7 @@ import {randomUUID} from 'node:crypto';import {createServer} from 'node:net';imp
 import {CodexDesktop} from '../src/bridge/codex-desktop.js';
 import {TranscriptSettings,codexSettings,claudeSettings} from '../src/bridge/settings.js';
 import {AgentRuntime} from '../src/bridge/runtime.js';import {BridgeStore} from '../src/bridge/store.js';
+import type {Session} from '../src/shared/protocol.js';
 // @ts-ignore Browser module is exercised as shipped.
 import {settingsPresentation,findModel,modelName} from '../web/session-settings.js';
 
@@ -67,4 +68,72 @@ test('desktop current settings override stale history without starting or resumi
     assert.equal(frames.filter(f=>f.method==='thread-follower-read-model-settings')[0].version,1);
     assert.equal(frames.some(f=>['thread/start','thread/resume','turn/start','thread-follower-start-turn'].includes(f.method)),false);
   }finally{await runtime.close();store.close();await new Promise<void>(r=>server.close(()=>r()));rmSync(root,{recursive:true,force:true});}
+});
+
+function nativeModelFixture(){
+  const root=mkdtempSync(join(tmpdir(),'relay-native-model-')),data=join(root,'data'),store=new BridgeStore(data),desktop=new CodexDesktop('');
+  const nativeId=randomUUID(),session:Session={id:'pc:codex:'+nativeId,hostId:'pc',provider:'codex',nativeId,cwd:root,title:'native model test',updatedAt:1,status:'idle',managed:false,model:'old',effort:'high'};
+  const config={hostId:'pc',name:'PC',relayUrl:'ws://unused',dataDir:data,projects:[{id:'p',name:'P',path:root}],codexHome:join(root,'empty'),claudeHome:join(root,'empty')};
+  const make=()=>{
+    const runtime=new AgentRuntime(config,store,()=>{},()=>{},undefined,desktop);
+    runtime.models=async()=>[{id:'old',name:'Old',efforts:['high']},{id:'new',name:'New',efforts:['low','high'],defaultEffort:'low'}];
+    runtime.history.list=()=>[{...session}];runtime.history.get=()=>({...session});runtime.history.page=async()=>({messages:[],cursor:null,source:'fixture'});runtime.history.settings=()=>({model:'old',effort:'high',settingsSource:'transcript'});
+    runtime.history.refreshSessionStatus=async()=>{};runtime.history.asyncQuestions=()=>[];return runtime;
+  };
+  return {root,store,desktop,session,make};
+}
+
+test('an idle native Codex saves model preferences without a desktop or writer and retains them through refresh and restart',async()=>{
+  const f=nativeModelFixture();let runtime=f.make();
+  f.desktop.owner=async()=>{throw Error('Saving preferences must not discover a desktop owner');};
+  f.desktop.setModel=async()=>{throw Error('Saving preferences must not mutate the desktop');};
+  runtime.codex.start=async()=>{throw Error('Saving preferences must not start a writer');};
+  try{
+    const changed=await runtime.handle({id:randomUUID(),type:'set-model',sessionId:f.session.id,model:'new',effort:'default'});
+    assert.deepEqual(changed,{ok:true,queued:true,model:'new',effort:'default'});
+    assert.equal(runtime.list()[0].model,'old');assert.equal(runtime.list()[0].nextModel,'new');
+    await assert.rejects(runtime.handle({id:randomUUID(),type:'set-model',sessionId:f.session.id,model:'unavailable'}),/模型不在/);
+    await runtime.close();runtime=f.make();f.desktop.readSettings=async()=>undefined;
+    await runtime.handle({id:randomUUID(),type:'history',sessionId:f.session.id});
+    const current=runtime.list()[0];assert.equal(current.model,'old');assert.equal(current.nextModel,'new');assert.equal(current.nextEffort,'default');
+    assert.equal(f.store.sessions()[0].nextModel,'new');
+  }finally{await runtime.close();f.store.close();rmSync(f.root,{recursive:true,force:true});}
+});
+
+test('saved native model settings reach the existing owner, reset default effort explicitly and survive uncertain delivery',async()=>{
+  const f=nativeModelFixture(),runtime=f.make(),sent:any[]=[];f.desktop.owner=async()=>randomUUID();
+  let uncertain=true;
+  f.desktop.startTurn=async(thread,id,text,input,settings)=>{sent.push(settings);if(uncertain)throw Error('Delivery outcome unknown');return {turnId:randomUUID()};};
+  runtime.codex.start=async()=>{throw Error('Must not open a second writer');};
+  try{
+    await runtime.handle({id:randomUUID(),type:'set-model',sessionId:f.session.id,model:'new',effort:'default'});
+    await assert.rejects(runtime.handle({id:randomUUID(),type:'send',sessionId:f.session.id,text:'fixture'}),/unknown/);
+    assert.equal(runtime.list()[0].nextModel,'new');assert.equal(sent.length,1);
+    uncertain=false;await runtime.handle({id:randomUUID(),type:'send',sessionId:f.session.id,text:'explicit next send'});
+    assert.deepEqual(sent[1],{model:'new',effort:null});assert.equal(runtime.list()[0].nextModel,undefined);assert.equal(runtime.list()[0].model,'new');
+  }finally{await runtime.close();f.store.close();rmSync(f.root,{recursive:true,force:true});}
+});
+
+test('a newer model selection saved during native turn acknowledgement belongs to the following turn',async()=>{
+  const f=nativeModelFixture(),runtime=f.make();f.desktop.owner=async()=>randomUUID();
+  let release!:(value:{turnId:string})=>void;const gate=new Promise<{turnId:string}>(r=>release=r);
+  f.desktop.startTurn=async()=>gate;
+  try{
+    await runtime.handle({id:randomUUID(),type:'set-model',sessionId:f.session.id,model:'new',effort:'low'});
+    const send=runtime.handle({id:randomUUID(),type:'send',sessionId:f.session.id,text:'fixture'});
+    await new Promise(r=>setImmediate(r));
+    await runtime.handle({id:randomUUID(),type:'set-model',sessionId:f.session.id,model:'old',effort:'high'});
+    release({turnId:randomUUID()});await send;
+    assert.equal(runtime.list()[0].nextModel,'old');assert.equal(runtime.list()[0].nextEffort,'high');
+  }finally{release?.({turnId:randomUUID()});await runtime.close();f.store.close();rmSync(f.root,{recursive:true,force:true});}
+});
+
+test('saved native model settings are also used by standalone resume when the desktop is closed',async()=>{
+  const f=nativeModelFixture(),runtime=f.make(),calls:any[]=[];
+  runtime.codex.start=async()=>{};runtime.codex.call=async(method,params)=>{calls.push({method,params});if(method==='thread/resume')return {model:params.model};if(method==='turn/start')return {turn:{id:randomUUID()}};throw Error('Unexpected RPC');};
+  try{
+    await runtime.handle({id:randomUUID(),type:'set-model',sessionId:f.session.id,model:'new',effort:'low'});
+    await runtime.handle({id:randomUUID(),type:'send',sessionId:f.session.id,text:'fixture'});
+    assert.equal(calls.find(c=>c.method==='thread/resume').params.model,'new');assert.equal(calls.find(c=>c.method==='turn/start').params.effort,'low');assert.equal(f.store.sessions()[0].nextModel,undefined);
+  }finally{await runtime.close();f.store.close();rmSync(f.root,{recursive:true,force:true});}
 });

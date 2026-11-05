@@ -86,6 +86,21 @@ test('active writer rejection queues the message without failing a native Codex 
   }finally{await runtime.close();store.close();rmSync(root,{recursive:true,force:true});}
 });
 
+test('idle writer conflicts retain a single queued message without fake running events or busy retries',async()=>{
+ const root=mkdtempSync(join(tmpdir(),'relay-idle-writer-')),store=new BridgeStore(join(root,'data')),events:RelayEvent[]=[],desktop=new CodexDesktop('');
+ const session:Session={id:'pc:codex:native',hostId:'pc',provider:'codex',nativeId:'native',cwd:root,title:'native',updatedAt:1,status:'idle',statusOrigin:'native',managed:false};store.save(session);
+ const runtime=new AgentRuntime({relayUrl:'ws://localhost',hostId:'pc',name:'PC',dataDir:join(root,'data'),projects:[{id:'p',name:'P',path:root}],codexHome:join(root,'empty'),claudeHome:join(root,'empty')},store,()=>{},e=>events.push(e),undefined,desktop);
+ let resumes=0;runtime.history.list=()=>[session];runtime.history.refreshSessionStatus=async()=>{};desktop.available=()=>false;runtime.codex.start=async()=>{};
+ runtime.codex.call=async(method:string)=>{if(method==='thread/resume'){resumes++;throw Error('thread native already has an active writer');}throw Error('Unexpected '+method);};
+ try{
+  const a={id:randomUUID(),type:'send' as const,sessionId:session.id,text:'keep exactly once'};assert.equal((await runtime.handle(a)).queued,true);
+  await runtime.drainInputs();await runtime.drainInputs();assert.equal(resumes,1);assert.deepEqual(store.queued().map(x=>x.id),[a.id]);
+  assert.equal(events.some(e=>e.type==='status'&&e.data.status==='running'),false);assert.equal(runtime.list()[0].status,'idle');
+  desktop.available=()=>true;desktop.owner=async()=>randomUUID();desktop.startTurn=async()=>({turnId:randomUUID()});
+  await runtime.drainInputs();assert.equal(store.queued().length,0);assert.equal(events.filter(e=>e.type==='status'&&e.data.status==='running').length,1);
+ }finally{await runtime.close();store.close();rmSync(root,{recursive:true,force:true});}
+});
+
 
 test('send and queued followups await fresh native status instead of reusing a stale running snapshot',async()=>{
  const root=mkdtempSync(join(tmpdir(),'relay-fresh-send-')),store=new BridgeStore(join(root,'data')),desktop=new CodexDesktop(''),nativeId=randomUUID(),sent:string[]=[];

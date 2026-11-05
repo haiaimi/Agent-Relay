@@ -46,6 +46,8 @@ export function reconcileChildren(parent,children){
 export class HistoryPager {
   generation=0;sessionId=null;cursor=null;initialized=false;olderLoaded=false;active=null;
   reset(sessionId){this.generation++;this.sessionId=sessionId;this.cursor=null;this.initialized=false;this.olderLoaded=false;this.active=null;}
+  snapshot(){return {cursor:this.cursor,initialized:this.initialized,olderLoaded:this.olderLoaded};}
+  restore(value){if(!value?.initialized||value.cursor!==null&&(!Number.isSafeInteger(value.cursor)||value.cursor<0))return false;this.cursor=value.cursor;this.initialized=true;this.olderLoaded=!!value.olderLoaded;return true;}
   begin(older=false){
     if(!this.sessionId||this.active||older&&(!this.initialized||this.cursor===null))return null;
     return this.active={sessionId:this.sessionId,generation:this.generation,older,cursor:older?this.cursor:undefined};

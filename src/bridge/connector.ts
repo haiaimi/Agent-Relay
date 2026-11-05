@@ -22,7 +22,7 @@ export function startBridge(config:BridgeConfig,token:string){
   const send=(message:unknown)=>{if(ready&&socket?.readyState===WebSocket.OPEN)socket.send(JSON.stringify(message));};
   function publish(sessions:Session[]){
     if(!ready)return;
-    const changed=sessions.filter(s=>{const text=JSON.stringify(s);if(fingerprints.get(s.id)===text)return false;fingerprints.set(s.id,text);return true;});
+    const changed=sessions.filter(s=>!config.service||s.managed&&s.projectId?.startsWith('brainstorm-')).filter(s=>{const text=JSON.stringify(s);if(fingerprints.get(s.id)===text)return false;fingerprints.set(s.id,text);return true;});
     for(let i=0;i<changed.length;i+=500)send({type:'sessions',sessions:changed.slice(i,i+500)});
   }
   function drain(){
@@ -58,7 +58,7 @@ export function startBridge(config:BridgeConfig,token:string){
   }
   async function sync(){
     if(syncing||stopped)return;syncing=true;
-    try{publish(runtime.list());void runtime.drainInputs().catch(err=>console.error('Queued input failed:',(err as Error).message));const projects=runtime.projects(),fingerprint=JSON.stringify([projects,runtime.agents.catalog()]);if(ready&&projectFingerprint!==fingerprint){projectFingerprint=fingerprint;send({type:'projects',projects,agents:runtime.agents.catalog()});}}catch(err){console.error('History inventory failed:',(err as Error).message);}finally{syncing=false;}
+    try{publish(runtime.list());void runtime.drainInputs().catch(err=>console.error('Queued input failed:',(err as Error).message));const projects=runtime.projects(),fingerprint=JSON.stringify([projects,runtime.agents.catalog()]);if(ready&&projectFingerprint!==fingerprint){projectFingerprint=fingerprint;send({type:'projects',projects:config.service?projects.filter(p=>p.id.startsWith('brainstorm-')):projects,agents:runtime.agents.catalog()});}}catch(err){console.error('History inventory failed:',(err as Error).message);}finally{syncing=false;}
   }
   async function action(value:unknown){
     let id='';
@@ -66,7 +66,7 @@ export function startBridge(config:BridgeConfig,token:string){
       const command=validateAction(value);id=command.id;
       if(command.sessionId&&!command.sessionId.startsWith(config.hostId+':'))throw new Error('Session belongs to another computer');
       if(command.type==='direct'){if(command.relay&&!command.iceServers?.length)throw new Error('缺少加密中转配置');const result=await direct.accept(runtime.directScope(command),command.offer!,command.relay?command.iceServers:undefined);send({type:'result',id,result});return;}
-      if(command.type==='asset'||command.type==='file'||command.type==='upload'){
+      if(command.type==='asset'||command.type==='file'||command.type==='upload'||command.type==='studio-artifact'||command.type==='studio-video'){
         const result=await runtime.handle(command);send({type:'result',id,result});return;
       }
       if(command.type==='history'||command.type==='models'||command.type==='commands'){
@@ -74,7 +74,7 @@ export function startBridge(config:BridgeConfig,token:string){
       }
       const previous=store.begin(id,command);
       if(!previous.fresh){const result=previous.result;send(result?.error?{type:'result',id,error:result.error}:{type:'result',id,result});return;}
-      try{const result=await runtime.handle(command);if(command.type==='create-project')await sync();store.finish(id,result);send({type:'result',id,result});}
+      try{const result=await runtime.handle(command);if(['create-project','prepare-workspace','prepare-brainstorm'].includes(command.type))await sync();store.finish(id,result);send({type:'result',id,result});}
       catch(err){store.finish(id,{error:(err as Error).message});throw err;}
     }catch(err){send({type:'result',id,error:(err as Error).message});}
   }
@@ -84,7 +84,7 @@ export function startBridge(config:BridgeConfig,token:string){
     let lastActivity=Date.now();
     const watchdog=setInterval(()=>{if(Date.now()-lastActivity>70_000)socket?.terminate();},15_000);
     socket.on('ping',()=>{lastActivity=Date.now();});
-    socket.on('open',()=>socket!.send(JSON.stringify({type:'hello',host:{id:config.hostId,name:config.name,hostname:hostname(),platform:`${platform()} ${arch()}`,projects:config.projects,agents:runtime.agents.catalog(),capabilities:{createProject:true,permissions:true}}})));
+    socket.on('open',()=>socket!.send(JSON.stringify({type:'hello',host:{service:config.service,id:config.hostId,name:config.name,hostname:hostname(),platform:`${platform()} ${arch()}`,projects:config.projects,agents:runtime.agents.catalog(),capabilities:{createProject:true,permissions:true,studioWorkspaces:true,studioArtifacts:true,brainstorm:true}}})));
     socket.on('message',raw=>{
       lastActivity=Date.now();
       try{

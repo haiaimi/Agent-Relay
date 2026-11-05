@@ -1,6 +1,11 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {orderedMessages,acceptsStatusEvent,HistoryPager,reconcileChildren,timelineWithQuestions} from '../web/timeline.js';
+test('cached history restores the oldest loaded cursor without changing request ownership, and a late old request stays invalid',()=>{
+  const pager=new HistoryPager();pager.reset('a');const old=pager.begin()!;pager.complete(old,100);const older=pager.begin(true)!;pager.complete(older,50);const saved=pager.snapshot();
+  pager.reset('b');const b=pager.begin()!;pager.reset('a');const latest=pager.begin()!;assert.equal(pager.restore(saved),true);assert.equal(pager.current(latest),true);assert.equal(pager.current(b),false);assert.equal(pager.complete(b,0),false);
+  pager.complete(latest,100);assert.equal(pager.cursor,50);assert.equal(pager.begin(true)!.cursor,50);assert.equal(pager.restore({initialized:true,cursor:-1}),false);
+});
 test('question cards remain at the original turn after answering and newer messages arrive',()=>{
   const messages=[{id:'before',timestamp:100},{id:'later',timestamp:300}],card={id:'q',createdAt:200,status:'pending',source:'async:call'};
   const ids=(rows:any[])=>rows.map(m=>m.id);

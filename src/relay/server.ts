@@ -1,3 +1,4 @@
+import {streamStudioVideo} from './studio-video.js';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
@@ -6,15 +7,39 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { RelayStore } from './store.js';
 import { equalSecret, requireSecret, makeCookie, validCookie } from '../shared/security.js';
 import { validateAction, type Host, type Session, type RelayEvent, type Action } from '../shared/protocol.js';
-import {BRIDGE_FRAME_BYTES,MediaStore} from '../shared/media.js';
+import {BRIDGE_FRAME_BYTES,MediaStore,imageBytes} from '../shared/media.js';
 import {FileStore,MAX_UPLOAD_BYTES,uploadId} from '../shared/files.js';
 import {validDirectSdp} from '../shared/direct.js';
 import {turnCredentials,type TurnConfig} from './turn.js';
+import {serveVideo} from './video.js';
 import {ImagePreviews} from './previews.js';
+import {StudioPreviews} from './studio-previews.js';
+import {Brainstorms} from './brainstorm.js';
+import {Studio} from './studio.js';
 
 interface Options { dataDir: string; phoneToken: string; bridgeToken: string; publicOrigin?: string;turn?:TurnConfig }
 function publicAgents(value:any){if(value===undefined)return undefined;if(!Array.isArray(value)||value.length>32)throw Error('Invalid agent catalog');return value.map(a=>{if(!/^[a-zA-Z0-9_-]{1,60}$/.test(a.id)||!['codex','claude','api'].includes(a.provider)||typeof a.name!=='string'||a.name.length>80)throw Error('Invalid agent');return {id:a.id,provider:a.provider,name:a.name,configured:a.configured!==false,tools:a.tools===true,revision:typeof a.revision==='string'?a.revision.slice(0,64):undefined};});}
 const staticFiles: Record<string,[string,string]> = {
+  '/studio-delivery-media.js':['studio-delivery-media.js','text/javascript; charset=utf-8'],
+  '/conversation-cache.js':['conversation-cache.js','text/javascript; charset=utf-8'],
+  '/studio-sidebar.js':['studio-sidebar.js','text/javascript; charset=utf-8'],
+  '/workspace-shell.js':['workspace-shell.js','text/javascript; charset=utf-8'],
+  '/workspace-shell.css':['workspace-shell.css','text/css; charset=utf-8'],
+  '/studio':['index.html','text/html; charset=utf-8'],
+  '/studio-brainstorm.js':['studio-brainstorm.js','text/javascript; charset=utf-8'],
+  '/refresh.js':['refresh.js','text/javascript; charset=utf-8'],
+  '/diagrams.js':['diagrams.js','text/javascript; charset=utf-8'],
+  '/studio-review.js':['studio-review.js','text/javascript; charset=utf-8'],
+  '/studio-viewport.js':['studio-viewport.js','text/javascript; charset=utf-8'],
+  '/studio-avatar.js':['studio-avatar.js','text/javascript; charset=utf-8'],
+  '/workspace-theme.css':['workspace-theme.css','text/css; charset=utf-8'],
+  '/workspace-nav.css':['workspace-nav.css','text/css; charset=utf-8'],
+  '/studio-scene.js':['studio-scene.js','text/javascript; charset=utf-8'],
+  '/studio-chat.js':['studio-chat.js','text/javascript; charset=utf-8'],
+  '/studio-media.js':['studio-media.js','text/javascript; charset=utf-8'],
+  '/studio.js':['studio.js','text/javascript; charset=utf-8'],
+  '/studio-projects.js':['studio-projects.js','text/javascript; charset=utf-8'],
+  '/studio.css':['studio.css','text/css; charset=utf-8'],
   '/agent-ui.js':['agent-ui.js','text/javascript; charset=utf-8'],
   '/i18n.js':['i18n.js','text/javascript; charset=utf-8'],
   '/':['index.html','text/html; charset=utf-8'], '/app.js':['app.js','text/javascript; charset=utf-8'],
@@ -23,11 +48,13 @@ const staticFiles: Record<string,[string,string]> = {
     '/composer.js':['composer.js','text/javascript; charset=utf-8'],
   '/timeline.js':['timeline.js','text/javascript; charset=utf-8'],
   '/operations.js':['operations.js','text/javascript; charset=utf-8'],
+  '/video.js':['video.js','text/javascript; charset=utf-8'],
   '/direct.js':['direct.js','text/javascript; charset=utf-8'],
   '/questions.js':['questions.js','text/javascript; charset=utf-8'],
   '/attachments.js':['attachments.js','text/javascript; charset=utf-8'], '/drawer.js':['drawer.js','text/javascript; charset=utf-8'],
   '/style.css':['style.css','text/css; charset=utf-8'], '/chatgpt.css':['chatgpt.css','text/css; charset=utf-8'], '/theme.js':['theme.js','text/javascript; charset=utf-8'], '/glass.css':['glass.css','text/css; charset=utf-8'], '/glass-optics.css':['glass-optics.css','text/css; charset=utf-8'],
   '/glass-gpu.js':['glass-gpu.js','text/javascript; charset=utf-8'], '/glass-renderer.js':['glass-renderer.js','text/javascript; charset=utf-8'], '/glass-init.js':['glass-init.js','text/javascript; charset=utf-8'],
+  '/vendor/mermaid.tiny.js':['vendor/mermaid.tiny.js','text/javascript; charset=utf-8'],
   '/vendor/markdown-it.umd.min.js':['vendor/markdown-it.umd.min.js','text/javascript; charset=utf-8'], '/vendor/purify.min.js':['vendor/purify.min.js','text/javascript; charset=utf-8'], '/vendor/highlight.min.js':['vendor/highlight.min.js','text/javascript; charset=utf-8'],
   '/wallpaper.jpg':['wallpaper.jpg','image/jpeg'], '/wallpaper-fallback.webp':['wallpaper-fallback.webp','image/webp'],
   '/manifest.webmanifest':['manifest.webmanifest','application/manifest+json'],
@@ -35,9 +62,9 @@ const staticFiles: Record<string,[string,string]> = {
   '/icon-192.png':['icon-192.png','image/png'], '/icon-512.png':['icon-512.png','image/png']
 };
 const json = (res: ServerResponse, status: number, value: unknown) => { res.writeHead(status, {'Content-Type':'application/json; charset=utf-8'}); res.end(JSON.stringify(value)); };
-async function body(req: IncomingMessage): Promise<any> {
+async function body(req: IncomingMessage,limit=64_000): Promise<any> {
   let text='';
-  for await (const chunk of req) { text+=chunk; if(Buffer.byteLength(text)>64_000) throw new Error('Request too large'); }
+  for await (const chunk of req) { text+=chunk; if(Buffer.byteLength(text)>limit) throw new Error('Request too large'); }
   return JSON.parse(text || '{}');
 }
 export function createRelay(options: Options) {
@@ -50,6 +77,7 @@ export function createRelay(options: Options) {
   const files=new FileStore(options.dataDir,store.db);
   const media=new MediaStore(options.dataDir,store.db);
   const previews=new ImagePreviews(options.dataDir);
+  const studioPreviews=new StudioPreviews(store.db,media);
   const assetRequests=new Map<string,Promise<void>>(),assetActive=new Set<Promise<void>>();
   // Coalesce duplicate cold reads and bound concurrent large frames on the bridge.
   function assetRequest(key:string,load:()=>Promise<void>){
@@ -63,7 +91,8 @@ export function createRelay(options: Options) {
   const negotiations=new Map<string,number>();
   const bridges = new Map<string,WebSocket>();
   const viewers = new Set<ServerResponse>();
-  const pending = new Map<string,{resolve:(value:any)=>void; reject:(err:Error)=>void; host:string; timer:NodeJS.Timeout}>();
+  const brainstormBridges=new Map<string,WebSocket>();
+  const pending = new Map<string,{socket:WebSocket;resolve:(value:any)=>void; reject:(err:Error)=>void; host:string; timer:NodeJS.Timeout}>();
   const attempts = new Map<string,{count:number; until:number}>();
   const auth = (req:IncomingMessage) => validCookie((req.headers.cookie ?? '').split(';').map(x=>x.trim()).find(x=>x.startsWith('relay_session='))?.slice(14) ?? '', options.phoneToken);
   function emit(type: string, data: any, seq?: number) {
@@ -71,23 +100,36 @@ export function createRelay(options: Options) {
     for(const res of viewers) { if(res.writableLength>1024*1024) res.destroy(); else res.write(message); }
   }
   function remote(host: string, action: Action,timeoutMs=90_000): Promise<any> {
-    const socket=bridges.get(host);
+    const projectId=action.projectId??(action.sessionId?store.getSession(action.sessionId)?.projectId:undefined),uploadScope=action.upload?.scope.slice(host.length+1)??'';
+    const brain=action.type==='prepare-brainstorm'||projectId?.startsWith('brainstorm-')||uploadScope.startsWith('project:brainstorm-')||store.getSession(uploadScope)?.projectId?.startsWith('brainstorm-');
+    const socket=brain?(brainstormBridges.get(host)??bridges.get(host)):bridges.get(host);
     if(!socket || socket.readyState!==WebSocket.OPEN) return Promise.reject(new Error('本地电脑离线，请上线后重试'));
     return new Promise((resolve,reject)=>{
       const timer=setTimeout(()=>{pending.delete(action.id);reject(new Error('电脑响应超时；操作不会自动重发，请检查会话状态'));},timeoutMs);
-      pending.set(action.id,{resolve,reject,host,timer});
+      pending.set(action.id,{resolve,reject,host,timer,socket});
       socket.send(JSON.stringify({type:'action',action}));
     });
   }
+  const inspectVisual=async(hostId:string,sessionId:string,path:string)=>{
+    if(!store.hosts().find(h=>h.id===hostId)?.capabilities?.studioArtifacts)throw Error('请升级工作电脑连接程序以读取本轮原画');
+    const knownHash=studioPreviews.knownHash(sessionId,path);
+    let payload=await remote(hostId,{id:randomUUID(),type:'studio-artifact',sessionId,artifactPath:path,...knownHash?{artifactHash:knownHash}:{}});
+    if(payload?.unchanged===true){if(!knownHash||payload.id!==knownHash)throw Error('原画版本核对不匹配');payload=media.payload(sessionId,knownHash);}
+    const bytes=imageBytes(payload);await previews.image(bytes,payload.mime);media.putPayload(sessionId,payload);return {payload,sha256:payload.id};
+  };
+  const studio=new Studio(store,remote,host=>bridges.get(host)?.readyState===WebSocket.OPEN,()=>emit('studio',{}),files,inspectVisual);
+  const brains=new Brainstorms(store,studio,remote,host=>bridges.get(host)?.readyState===WebSocket.OPEN,()=>emit('studio',{}),files,media);
   const server=createServer(async(req,res)=>{
     res.setHeader('Cache-Control','no-store'); res.setHeader('X-Content-Type-Options','nosniff');
     res.setHeader('Referrer-Policy','no-referrer'); res.setHeader('X-Frame-Options','DENY');
-    res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data: blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
+    res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
     try {
       const url=new URL(req.url ?? '/', 'http://localhost');
       if(req.method==='GET' && url.pathname==='/healthz') return json(res,200,{ok:true});
       if(req.method==='GET' && staticFiles[url.pathname]) {
-        const [file,mime]=staticFiles[url.pathname]; const content=await readFile(fileURLToPath(new URL(`../../web/${file}`,import.meta.url)));
+        const embedded=url.pathname==='/studio'&&url.searchParams.get('embedded')==='1';
+        if(embedded){res.setHeader('X-Frame-Options','SAMEORIGIN');res.setHeader('Content-Security-Policy',String(res.getHeader('Content-Security-Policy')).replace("frame-ancestors 'none'","frame-ancestors 'self'"));}
+        const [mapped,mime]=staticFiles[url.pathname],file=embedded?'studio.html':mapped; const content=await readFile(fileURLToPath(new URL(`../../web/${file}`,import.meta.url)));
         res.writeHead(200,{'Content-Type':mime}); return res.end(content);
       }
       if(req.method==='POST') {
@@ -110,6 +152,39 @@ export function createRelay(options: Options) {
         return json(res,200,{ok:true});
       }
       if(!auth(req)) return json(res,401,{error:'请先登录'});
+      if(req.method==='GET'&&url.pathname==='/api/studio')return json(res,200,{...studio.state(),brainstorms:brains.list()});
+      if(req.method==='GET'&&url.pathname==='/api/studio/channels')return json(res,200,studio.channels(url.searchParams.get('runId')??''));
+      if(req.method==='POST'&&url.pathname==='/api/studio/brainstorm')return json(res,200,{topic:await brains.create(await body(req))});
+      if(req.method==='GET'&&url.pathname==='/api/studio/brainstorm')return json(res,200,brains.detail(url.searchParams.get('topicId')??''));
+      if(req.method==='POST'&&url.pathname==='/api/studio/brainstorm/send')return json(res,200,await brains.send(await body(req)));
+      if(req.method==='POST'&&url.pathname==='/api/studio/brainstorm/settings')return json(res,200,await brains.settings(await body(req)));
+      if(req.method==='POST'&&url.pathname==='/api/studio/brainstorm/launch')return json(res,200,await brains.launch(await body(req)));
+      if(req.method==='POST'&&url.pathname==='/api/studio/project')return json(res,200,{project:studio.saveProject(await body(req,256_000))});
+      if(req.method==='POST'&&url.pathname==='/api/studio/toolchain')return json(res,200,{project:studio.saveToolchain(await body(req))});
+      if(req.method==='POST'&&url.pathname==='/api/studio/run')return json(res,200,{run:studio.createRun(await body(req))});
+      if(req.method==='POST'&&url.pathname==='/api/studio/command')return json(res,200,{run:await studio.command(await body(req))});
+      if(['GET','HEAD'].includes(req.method??'')&&url.pathname==='/api/studio/video'){const target=studio.visualArtifact(url.searchParams.get('runId')??'',url.searchParams.get('taskId')??'',Number(url.searchParams.get('index')??'-1'),'video');try{await streamStudioVideo(req,res,target,remote);}catch(error){if(res.headersSent)res.destroy();else throw error;}return;}
+      if(req.method==='GET'&&url.pathname==='/api/studio/artifact'){
+        const target=studio.visualArtifact(url.searchParams.get('runId')??'',url.searchParams.get('taskId')??'',Number(url.searchParams.get('index')??'-1'));
+        const run=studio.runs().find(r=>r.id===url.searchParams.get('runId'))!,task=run.tasks.find(t=>t.id===url.searchParams.get('taskId'))!,isPreview=url.searchParams.get('preview')==='1';
+        const key=JSON.stringify([run.id,task.id,task.actionId,task.finishedAt,run.tasks.find(t=>t.kind==='visual-review')?.reviewId,target.sessionId,target.path]);
+        const image=await studioPreviews.get(key,target.sessionId,async()=>{
+          let value:{payload:any;sha256:string}|undefined;
+          await assetRequest('studio-preview:'+key,async()=>{value=await inspectVisual(target.hostId,target.sessionId,target.path);});
+          // Coalescing is owned by StudioPreviews; the limiter shares the
+          // existing bridge budget with other large media reads.
+          const payload=value!.payload;return {bytes:imageBytes(payload),mime:payload.mime,name:payload.name,sha256:payload.id};
+        },!isPreview||url.searchParams.get('refresh')==='1');
+        const preview=isPreview?await previews.image(image.bytes,image.mime):{bytes:image.bytes,mime:image.mime,hash:image.sha256};
+        res.setHeader('Content-Security-Policy',"default-src 'none'; sandbox");res.writeHead(200,{'Content-Type':preview.mime,'Content-Length':preview.bytes.length,'X-Asset-Source':image.source,'X-Content-Sha256':preview.hash,'X-Visual-Sha256':image.sha256,'Content-Disposition':"inline; filename*=UTF-8''"+encodeURIComponent(image.name)});return res.end(preview.bytes);
+      }
+      if(req.method==='POST'&&url.pathname==='/api/studio/chat')return json(res,200,await studio.chat(await body(req)));
+      if(req.method==='GET'&&url.pathname==='/api/studio/group')return json(res,200,studio.group(url.searchParams.get('runId')??'',url.searchParams.get('before')??undefined));
+      if(req.method==='POST'&&url.pathname==='/api/studio/group')return json(res,200,await studio.groupChat(await body(req)));
+      if(req.method==='GET'&&url.pathname.startsWith('/api/studio/files/')){
+        const result=studio.file(url.searchParams.get('runId')??'',url.pathname.slice('/api/studio/files/'.length));
+        res.setHeader('Content-Security-Policy',"default-src 'none'; sandbox");res.writeHead(200,{'Content-Type':result.file.mime,'Content-Length':result.bytes.length,'X-Content-Sha256':result.file.sha256,'Content-Disposition':"attachment; filename*=UTF-8''"+encodeURIComponent(result.file.name)});return res.end(result.bytes);
+      }
       if(req.method==='POST'&&url.pathname==='/api/uploads'){
         if(req.headers['content-type']!=='application/octet-stream')return json(res,415,{error:'请上传原始文件'});
         const hostId=url.searchParams.get('hostId')??'',sessionId=url.searchParams.get('sessionId'),projectId=url.searchParams.get('projectId'),name=url.searchParams.get('name')??'',id=url.searchParams.get('id')??randomUUID();
@@ -130,6 +205,7 @@ export function createRelay(options: Options) {
         try{result=files.read(scope,id);}catch{
           source='workstation';await assetRequest('file:'+scope+':'+id,async()=>{const payload=await remote(session.hostId,{id:randomUUID(),type:'file',sessionId,fileId:id});if(payload?.scope!==scope||payload?.file?.id!==id)throw new Error('附件范围不匹配');files.import(payload);});result=files.read(scope,id);
         }
+        if(result.file.mime.startsWith('video/')){serveVideo(req,res,result.bytes,result.file.mime,result.file.sha256,source);return;}
         const content=url.searchParams.get('preview')==='1'&&result.file.mime.startsWith('image/')?await previews.image(result.bytes,result.file.mime):{bytes:result.bytes,mime:result.file.mime,hash:result.file.sha256};
         res.setHeader('Content-Security-Policy',"default-src 'none'; sandbox");
         res.writeHead(200,{'Content-Type':content.mime,'Content-Length':content.bytes.length,'X-Asset-Source':source,'X-Content-Sha256':content.hash,'Content-Disposition':(content.mime.startsWith('image/')?'inline':'attachment')+"; filename*=UTF-8''"+encodeURIComponent(result.file.name)});return res.end(content.bytes);
@@ -147,6 +223,7 @@ export function createRelay(options: Options) {
           source='workstation';await assetRequest('image:'+sessionId+':'+id,async()=>{const payload=await remote(session.hostId,{id:randomUUID(),type:'asset',sessionId,assetId:id});if(payload?.id!==id)throw new Error('图片编号不匹配');media.putPayload(sessionId,payload);});image=media.read(sessionId,id);
         }
         if(!image)return json(res,404,{error:'图片已不存在或无法读取'});
+        if(image.mime.startsWith('video/')){serveVideo(req,res,image.bytes,image.mime,id,source);return;}
         const content=url.searchParams.get('preview')==='1'?await previews.image(image.bytes,image.mime):{bytes:image.bytes,mime:image.mime,hash:id};
         res.setHeader('Content-Security-Policy',"default-src 'none'; sandbox");
         res.writeHead(200,{'Content-Type':content.mime,'Content-Length':content.bytes.length,'X-Asset-Source':source,'X-Content-Sha256':content.hash,'Content-Disposition':"inline; filename*=UTF-8''"+encodeURIComponent(image.name)});return res.end(content.bytes);
@@ -208,7 +285,7 @@ export function createRelay(options: Options) {
       }
       if(req.method==='POST' && url.pathname==='/api/actions') {
         const value=await body(req); const action=validateAction(value);
-        if(action.type==='history'||action.type==='asset'||action.type==='file'||action.type==='models'||action.type==='commands'||action.type==='upload'||action.type==='direct') return json(res,400,{error:'Use the dedicated endpoint'});
+        if(action.type==='history'||action.type==='asset'||action.type==='file'||action.type==='models'||action.type==='commands'||action.type==='upload'||action.type==='direct'||action.type==='prepare-workspace'||action.type==='prepare-brainstorm'||action.type==='studio-artifact'||action.type==='studio-video') return json(res,400,{error:'Use the dedicated endpoint'});
         const host=['start','create-project'].includes(action.type) ? value.hostId : store.getSession(action.sessionId!)?.hostId;
         if(typeof host!=='string' || !store.hosts().some(h=>h.id===host)) return json(res,404,{error:'电脑或会话不存在'});
         if(!bridges.has(host)) return json(res,409,{error:'本地电脑离线'});
@@ -228,7 +305,7 @@ export function createRelay(options: Options) {
     wss.handleUpgrade(req,socket,head,ws=>wss.emit('connection',ws));
   });
   wss.on('connection',(ws:WebSocket)=>{
-    let hostId=''; let alive=true;
+    let hostId='';let service=false;let alive=true;
     const helloTimer=setTimeout(()=>ws.close(1008,'Hello required'),5000);
     ws.on('pong',()=>{alive=true;});
     const heartbeat=setInterval(()=>{if(!alive) return ws.terminate();alive=false;ws.ping();},25_000);
@@ -237,9 +314,11 @@ export function createRelay(options: Options) {
         const msg=JSON.parse(raw.toString());
         if(msg.type==='hello' && !hostId) {
           if(!/^[a-zA-Z0-9_-]{1,60}$/.test(msg.host?.id ?? '') || typeof msg.host.name!=='string' || msg.host.name.length>100 || !Array.isArray(msg.host.projects) || msg.host.projects.length>100) throw new Error('Invalid host');
-          if(bridges.has(msg.host.id)) throw new Error('Host already connected');
-          hostId=msg.host.id; clearTimeout(helloTimer);bridges.set(hostId,ws);
-          const host:Host={id:hostId,name:msg.host.name,hostname:typeof msg.host.hostname==='string'?msg.host.hostname.slice(0,100):undefined,platform:typeof msg.host.platform==='string'?msg.host.platform.slice(0,80):undefined,projects:msg.host.projects,online:true,lastSeen:Date.now(),agents:publicAgents(msg.host.agents),capabilities:{createProject:msg.host.capabilities?.createProject===true,permissions:msg.host.capabilities?.permissions===true}}; store.host(host); emit('state',{});
+          service=msg.host.service==='brainstorm';if(msg.host.service!==undefined&&!service)throw Error('Invalid bridge service');
+          const connections=service?brainstormBridges:bridges;if(connections.has(msg.host.id))throw Error('Host already connected');
+          if(service&&!store.hosts().some(h=>h.id===msg.host.id))throw Error('Connect the main computer bridge first');
+          hostId=msg.host.id;clearTimeout(helloTimer);connections.set(hostId,ws);
+          const host:Host={id:hostId,name:msg.host.name,hostname:typeof msg.host.hostname==='string'?msg.host.hostname.slice(0,100):undefined,platform:typeof msg.host.platform==='string'?msg.host.platform.slice(0,80):undefined,projects:msg.host.projects,online:true,lastSeen:Date.now(),agents:publicAgents(msg.host.agents),capabilities:{createProject:msg.host.capabilities?.createProject===true,permissions:msg.host.capabilities?.permissions===true,studioWorkspaces:msg.host.capabilities?.studioWorkspaces===true,studioArtifacts:msg.host.capabilities?.studioArtifacts===true,brainstorm:msg.host.capabilities?.brainstorm===true}};const prior=store.hosts().find(h=>h.id===hostId);store.host(service?{...prior!,capabilities:{...prior!.capabilities,brainstorm:true}}:{...host,projects:[...host.projects,...(prior?.projects??[]).filter(p=>p.id.startsWith('brainstorm-')&&!host.projects.some(x=>x.id===p.id))],capabilities:{...host.capabilities,brainstorm:host.capabilities?.brainstorm||brainstormBridges.has(hostId)}});emit('state',{});
           ws.send(JSON.stringify({type:'welcome'}));return;
         }
         if(!hostId) throw new Error('Hello required');
@@ -260,14 +339,16 @@ export function createRelay(options: Options) {
           if(s.state!=='syncing'||s.done%20===0)emit('state',{});
         }else if(msg.type==='projects'){
           if(!Array.isArray(msg.projects)||msg.projects.length>500||msg.projects.some((p:any)=>typeof p.id!=='string'||typeof p.name!=='string'||typeof p.path!=='string'||(p.roots!==undefined&&(!Array.isArray(p.roots)||p.roots.length>100||p.roots.some((r:unknown)=>typeof r!=='string')))))throw new Error('Invalid projects');
-          const prior=store.hosts().find(h=>h.id===hostId)!;store.host({...prior,projects:msg.projects,agents:publicAgents(msg.agents),lastSeen:Date.now()});emit('state',{});
+          const prior=store.hosts().find(h=>h.id===hostId)!;const incoming=service?msg.projects.filter((p:any)=>p.id.startsWith('brainstorm-')):msg.projects,retained=prior.projects.filter(p=>service?!p.id.startsWith('brainstorm-'):p.id.startsWith('brainstorm-'));store.host({...prior,projects:[...incoming,...retained.filter(p=>!incoming.some((x:any)=>x.id===p.id))],agents:service?prior.agents:publicAgents(msg.agents),lastSeen:Date.now()});emit('state',{});
         }else if(msg.type==='sessions') {
           if(!Array.isArray(msg.sessions) || msg.sessions.length>2000) throw new Error('Invalid session batch');
-          for(const session of msg.sessions as Session[]) {
+          const accepted:Session[]=[];for(const session of msg.sessions as Session[]) {
             if(session.hostId!==hostId || session.id!==`${hostId}:${session.provider}:${session.nativeId}` || !['codex','claude','api'].includes(session.provider) || typeof session.updatedAt!=='number') throw new Error('Invalid session owner');
-            store.session(session);
+            if(service&&(!session.managed||!session.projectId?.startsWith('brainstorm-')))throw Error('Invalid brainstorming session');
+            const prior=store.getSession(session.id);if(!service&&brainstormBridges.has(hostId)&&prior?.managed&&prior.projectId?.startsWith('brainstorm-'))continue;
+            store.session(session);accepted.push(session);
           }
-          emit('sessions',{sessions:msg.sessions});emit('state',{incremental:true});
+          emit('sessions',{sessions:accepted});emit('state',{incremental:true});
         } else if(msg.type==='event') {
           const e=msg.event as RelayEvent;
           if(e.hostId!==hostId || !e.sessionId?.startsWith(hostId+':') || !store.getSession(e.sessionId) || typeof e.id!=='string') throw new Error('Invalid event owner');
@@ -275,16 +356,16 @@ export function createRelay(options: Options) {
           ws.send(JSON.stringify({type:'ack',id:e.id}));
         } else if(msg.type==='result') {
           const wait=pending.get(msg.id);
-          if(wait?.host===hostId) {clearTimeout(wait.timer);pending.delete(msg.id);msg.error ? wait.reject(new Error(msg.error)) : wait.resolve(msg.result);}
+          if(wait?.host===hostId&&wait.socket===ws) {clearTimeout(wait.timer);pending.delete(msg.id);msg.error ? wait.reject(new Error(msg.error)) : wait.resolve(msg.result);}
         }
       } catch(err) { ws.close(1008,(err as Error).message.slice(0,120)); }
     });
     ws.on('close',()=>{
       clearTimeout(helloTimer);clearInterval(heartbeat);
-      if(bridges.get(hostId)===ws) {bridges.delete(hostId);emit('state',{});}
-      for(const [id,p] of pending) if(p.host===hostId) {clearTimeout(p.timer);p.reject(new Error('电脑连接中断；操作不会自动重发'));pending.delete(id);}
+      const connections=service?brainstormBridges:bridges;if(connections.get(hostId)===ws){connections.delete(hostId);if(service){const prior=store.hosts().find(h=>h.id===hostId);if(prior)store.host({...prior,capabilities:{...prior.capabilities,brainstorm:false}});}emit('state',{});}
+      for(const [id,p] of pending) if(p.socket===ws) {clearTimeout(p.timer);p.reject(new Error('电脑连接中断；操作不会自动重发'));pending.delete(id);}
     });
     ws.on('error',()=>{});
   });
-  return {server,store, async close(){for(const p of pending.values()){clearTimeout(p.timer);p.reject(new Error('Relay stopping'));}pending.clear();for(const res of viewers)res.end();for(const ws of wss.clients)ws.terminate();wss.close();await new Promise<void>(resolve=>server.close(()=>resolve()));store.close();}};
+  return {server,store,studio,brains, async close(){for(const p of pending.values()){clearTimeout(p.timer);p.reject(new Error('Relay stopping'));}pending.clear();await studio.close();for(const res of viewers)res.end();for(const ws of wss.clients)ws.terminate();wss.close();await new Promise<void>(resolve=>server.close(()=>resolve()));store.close();}};
 }

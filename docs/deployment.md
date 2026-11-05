@@ -133,13 +133,13 @@ npm run bridge
 确认前台连接正常后，退出前台 bridge，在项目根目录 PowerShell 执行：
 
 ```powershell
-Start-Process powershell.exe -WindowStyle Hidden -ArgumentList '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "scripts/start-bridge.ps1"'
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install-startup.ps1
+npm run build
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install-background-service.ps1
 ```
 
-首条隐藏启动守护循环；第二条在当前用户 Startup 创建快捷方式，登录后运行，不是系统开机即执行的服务。守护程序使用构建后的 `dist/`，有单实例保护、异常退出重启，日志在 `.data/bridge-*.log`。
+安装器创建当前用户的 `AgentRelay-<路径哈希>` 计划任务，登录后以隐藏窗口启动独立守护程序，不需要管理员权限。它分别监督主 bridge 和脑爆 bridge，使用构建后的 `dist/`，具有单实例保护和异常退出重启。关闭桌面窗口或 Codex 客户端不会停止守护任务；电脑休眠、关机或退出用户登录仍会断线。旧版 Startup 快捷方式如仍存在，应只移除它自己的快捷方式，避免重复启动。
 
-停止守护循环并避免自动拉起：先创建 `.data/bridge-service.stop`，再结束对应 bridge 与守护进程；结束 bridge 会停止它启动的任务，应先等任务结束。下次显式启动会清除停止标记。移除登录自启动时，仅删除 Startup 中的 `Agent Relay Bridge.lnk` 快捷方式。
+停止守护循环并避免自动拉起：创建 `.data/background-service.stop`。该标记不主动终止现有工作进程；先检查执行中的任务、审批、排队及未确认操作，等待空闲，再按确切 PID 和工程启动路径停止对应进程。不要批量结束所有 Node/Codex 进程。重新运行安装器会清除停止标记并启用计划任务；移除自启动时删除本工程对应的计划任务。
 
 ## 5. 更新、回退和备份
 

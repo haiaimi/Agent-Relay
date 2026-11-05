@@ -1,5 +1,9 @@
 import {connect,type Socket} from 'node:net';
 import {randomUUID} from 'node:crypto';
+import {createHash} from 'node:crypto';
+import {homedir,tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {lstatSync,realpathSync} from 'node:fs';
 import {SteerDeliveryError} from './claude-steer.js';
 import type {PermissionMode} from '../shared/protocol.js';
 import {codexPermissions} from './permissions.js';
@@ -7,6 +11,15 @@ import {codexSettings,type SessionSettings} from './settings.js';
 
 const MAX_FRAME=32*1024*1024;
 const uuid=/^[a-f0-9]{8}-[a-f0-9-]{27}$/i;
+export function codexIpcPath(home=process.env.CODEX_HOME??join(homedir(),'.codex')){
+  if(process.platform==='win32')return '\\\\.\\pipe\\codex-ipc';
+  const dir=join(home,'ipc'),primary=join(dir,'ipc.sock'),uid=process.getuid?.();
+  const owned=(path:string)=>{try{const s=lstatSync(path);return s.isSocket()&&s.uid===uid;}catch{return false;}};
+  const legacy=join(tmpdir(),'codex-ipc',uid?`ipc-${uid}.sock`:'ipc.sock');
+  if(owned(primary))return primary;if(owned(legacy))return legacy;
+  if(Buffer.byteLength(primary)>(process.platform==='linux'?107:103)&&uid!==undefined)try{return join('/tmp',`codex-ipc-${uid}`,createHash('sha256').update(realpathSync(dir)).digest('hex'),'ipc.sock');}catch{}
+  return primary;
+}
 // Each IPC method has its own version; the native router checks it during
 // client discovery, before forwarding. A wrong version looks like no owner.
 const methodVersions:Record<string,number>={initialize:0,'thread-owner-discovery':1,'thread-follower-steer-turn':1,'thread-follower-start-turn':2,'thread-follower-submit-user-input':1,'thread-follower-interrupt-turn':3,'thread-follower-update-thread-settings':2,'thread-follower-read-model-settings':1,'thread-follower-command-approval-decision':1,'thread-follower-file-approval-decision':1};
@@ -24,7 +37,7 @@ export class CodexDesktop {
   private settingsReads=new Map<string,Promise<SessionSettings|undefined>>();
   onRequests?:(threadId:string,requests:any[])=>void;
   onSettings?:(threadId:string,settings:SessionSettings)=>void;
-  constructor(private readonly pipePath=process.platform==='win32'?'\\\\.\\pipe\\codex-ipc':undefined){}
+  constructor(private readonly pipePath=codexIpcPath()){}
   available(threadId:string):boolean {
     const cached=this.owners.get(threadId);
     if(!cached||Date.now()-cached.at>15000)void this.owner(threadId).catch(()=>{});
@@ -57,7 +70,7 @@ export class CodexDesktop {
     if(typeof result?.turnId!=='string')throw new SteerDeliveryError('Codex 引导结果未确认，请查看本地会话，勿重复点击',true);
     return result;
   }
-  async startTurn(threadId:string,id:string,text:string,input:any[],settings:{model?:string;effort?:string}={}):Promise<{turnId:string}>{
+  async startTurn(threadId:string,id:string,text:string,input:any[],settings:{model?:string;effort?:string|null}={}):Promise<{turnId:string}>{
     const owner=await this.owner(threadId);
     if(!owner)throw new Error('未找到本地 Codex 窗口；消息尚未投递');
     const reply=await this.request('thread-follower-start-turn',{

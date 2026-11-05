@@ -36,23 +36,56 @@ export function setupSidebarResize(workspace,sidebar,handle){
   window.addEventListener('resize',()=>{finish(true);render();});window.addEventListener('blur',()=>finish(true));media.addEventListener('change',()=>{finish(true);render();});render();
 }
 export function setupDrawer(sidebar,backdrop,edge,open,close){
-  const media=matchMedia('(max-width:760px)');let gesture=null,suppressClick=false;
-  function set(isOpen){sidebar.classList.remove('dragging');sidebar.style.removeProperty('--drawer-offset');sidebar.style.removeProperty('--drawer-progress');sidebar.classList.toggle('open',!!isOpen);backdrop.hidden=!media.matches;backdrop.style.removeProperty('opacity');open.setAttribute('aria-expanded',String(!!isOpen));}
+  const media=matchMedia('(max-width:760px)'),surfaces=new WeakSet();let gesture=null,suppressClick=false,lastTouch=-Infinity;
+  const prevent=e=>{if(e.cancelable!==false)e.preventDefault();};
+  function release(g){if(g?.kind==='pointer'&&g.target.hasPointerCapture?.(g.id))g.target.releasePointerCapture(g.id);}
+  function set(isOpen){const old=gesture;gesture=null;release(old);sidebar.classList.remove('dragging');sidebar.style.removeProperty('--drawer-offset');sidebar.style.removeProperty('--drawer-progress');sidebar.classList.toggle('open',!!isOpen);backdrop.hidden=!media.matches;backdrop.style.removeProperty('opacity');open.setAttribute('aria-expanded',String(!!isOpen));}
+  function move(e,x,y){
+    const g=gesture;if(!g)return;const dx=x-g.x,dy=y-g.y;
+    if(!g.active){
+      if(Math.abs(dy)>10&&!horizontalIntent(dx,dy)){gesture=null;release(g);return;}
+      if(!horizontalIntent(dx,dy)||(!g.open&&dx<0))return;
+      g.active=true;if(g.kind==='pointer')g.target.setPointerCapture?.(g.id);sidebar.classList.add('dragging');backdrop.hidden=false;
+    }
+    prevent(e);g.offset=dragOffset(g.open?0:-g.width,dx,g.width);const progress=String(1+g.offset/g.width);sidebar.style.setProperty('--drawer-offset',g.offset+'px');sidebar.style.setProperty('--drawer-progress',progress);backdrop.style.opacity=progress;
+  }
+  function finish(e,x,cancelled=false){const g=gesture;if(!g)return;if(g.active){prevent(e);suppressClick=true;set(cancelled?g.open:drawerOpens(g.offset,g.width,(x-g.x)/Math.max(1,performance.now()-g.time)));}else{gesture=null;release(g);}}
   open.onclick=()=>set(true);close.onclick=()=>set(false);backdrop.onclick=()=>set(false);
   document.addEventListener('keydown',e=>{if(e.key==='Escape'&&sidebar.classList.contains('open'))set(false);});
   window.addEventListener('pointerdown',e=>{
-    suppressClick=false;
-    if(!media.matches||e.button!==0||!e.isPrimary||e.target.closest('input,textarea,select,dialog'))return;
-    const isOpen=sidebar.classList.contains('open');if(isOpen?!sidebar.contains(e.target):e.clientX>28||!edge.contains(e.target))return;
-    gesture={id:e.pointerId,x:e.clientX,y:e.clientY,time:performance.now(),width:sidebar.getBoundingClientRect().width,open:isOpen,active:false,target:e.target,offset:isOpen?0:-sidebar.getBoundingClientRect().width};
+    // Touch Events own fingers, including Safari's edge gesture. Never run a
+    // second pointer controller for the same touch or its emulated mouse input.
+    if(e.pointerType==='touch'||performance.now()-lastTouch<800)return;
+    suppressClick=false;if(!media.matches||e.button!==0||!e.isPrimary||e.target.closest('input,textarea,select,dialog'))return;
+    const isOpen=sidebar.classList.contains('open');if(isOpen?!sidebar.contains(e.target)&&e.target!==backdrop:e.clientX>32||!edge.contains(e.target))return;
+    const width=sidebar.getBoundingClientRect().width;gesture={kind:'pointer',id:e.pointerId,x:e.clientX,y:e.clientY,time:performance.now(),width,open:isOpen,active:false,target:e.target,offset:isOpen?0:-width};
   });
-  window.addEventListener('pointermove',e=>{
-    const g=gesture;if(!g||g.id!==e.pointerId)return;const dx=e.clientX-g.x,dy=e.clientY-g.y;
-    if(!g.active){if(Math.abs(dy)>10&&!horizontalIntent(dx,dy)){gesture=null;return;}if(!horizontalIntent(dx,dy))return;g.active=true;g.target.setPointerCapture?.(e.pointerId);sidebar.classList.add('dragging');backdrop.hidden=false;}
-    e.preventDefault();g.offset=dragOffset(g.open?0:-g.width,dx,g.width);sidebar.style.setProperty('--drawer-offset',g.offset+'px');sidebar.style.setProperty('--drawer-progress',String(1+g.offset/g.width));backdrop.style.opacity=String(1+g.offset/g.width);
-  },{passive:false});
-  function finish(e,cancelled=false){const g=gesture;if(!g||e.pointerId!==g.id)return;gesture=null;if(g.active){e.preventDefault();suppressClick=true;set(cancelled?g.open:drawerOpens(g.offset,g.width,(e.clientX-g.x)/Math.max(1,performance.now()-g.time)));}}
-  window.addEventListener('pointerup',e=>finish(e));window.addEventListener('pointercancel',e=>finish(e,true));
-  document.addEventListener('click',e=>{if(suppressClick){e.preventDefault();e.stopImmediatePropagation();}},{capture:true});
-  media.addEventListener('change',()=>set(false));set(false);return {close:()=>set(false)};
+  window.addEventListener('pointermove',e=>{if(gesture?.kind==='pointer'&&gesture.id===e.pointerId)move(e,e.clientX,e.clientY);},{passive:false});
+  window.addEventListener('pointerup',e=>{if(gesture?.kind==='pointer'&&gesture.id===e.pointerId)finish(e,e.clientX);});
+  window.addEventListener('pointercancel',e=>{if(gesture?.kind==='pointer'&&gesture.id===e.pointerId)finish(e,e.clientX,true);});
+  function connect(win){
+    if(surfaces.has(win))return;surfaces.add(win);
+    win.addEventListener('touchstart',e=>{
+      lastTouch=performance.now();suppressClick=false;if(gesture)set(gesture.open);
+      if(!media.matches||e.touches.length!==1)return;
+      const isOpen=sidebar.classList.contains('open'),target=e.target;
+      if(target.closest(isOpen?'input,textarea,select,dialog':'input,textarea,select,button,a,video,pre,dialog,.tabs,[data-no-drawer]'))return;
+      if(isOpen&&(win!==window||!sidebar.contains(target)&&target!==backdrop))return;
+      const p=e.touches[0],width=sidebar.getBoundingClientRect().width;
+      gesture={kind:'touch',surface:win,id:p.identifier??0,x:p.clientX,y:p.clientY,time:performance.now(),width,open:isOpen,active:false,target,offset:isOpen?0:-width};
+      // Cancelling touchmove is too late for Safari's page-back snapshot.
+      // Reserve the page edges at touchstart; interior vertical scrolling and
+      // taps on controls keep their native behavior.
+      if(p.clientX<=32||p.clientX>=win.innerWidth-24)prevent(e);
+    },{capture:true,passive:false});
+    win.addEventListener('touchmove',e=>{
+      const g=gesture;if(g?.kind!=='touch'||g.surface!==win)return;
+      if(e.touches.length!==1){set(g.open);return;}
+      const p=e.touches[0];if((p.identifier??0)!==g.id)return;move(e,p.clientX,p.clientY);
+    },{capture:true,passive:false});
+    const end=(e,cancelled)=>{const g=gesture;if(g?.kind!=='touch'||g.surface!==win)return;const p=[...e.changedTouches].find(p=>(p.identifier??0)===g.id);if(p)finish(e,p.clientX,cancelled);};
+    win.addEventListener('touchend',e=>end(e,false),{capture:true,passive:false});win.addEventListener('touchcancel',e=>end(e,true),{capture:true,passive:false});
+    win.document.addEventListener('click',e=>{if(suppressClick){prevent(e);e.stopImmediatePropagation();}},{capture:true});
+  }
+  set(false);connect(window);media.addEventListener('change',()=>set(false));window.addEventListener('blur',()=>set(sidebar.classList.contains('open')));return {close:()=>set(false),open:()=>set(true),connect};
 }

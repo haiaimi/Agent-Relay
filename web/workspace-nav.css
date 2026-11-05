@@ -1,0 +1,7 @@
+/* The two workspaces are peers, with the same navigation on both pages. */
+.app-nav{display:flex;flex-direction:column;gap:4px;margin:0 0 18px;padding:0;flex-shrink:0}
+.app-nav .app-nav-item{display:flex;align-items:center;justify-content:flex-start;gap:10px;min-height:44px;padding:10px 12px;border:0;border-radius:10px;background:transparent;color:var(--muted);font-size:14px;font-weight:500;text-decoration:none;text-align:left}
+.app-nav .app-nav-item>span{width:20px;text-align:center;font-size:20px}
+.app-nav .app-nav-item:hover{color:var(--ink);background:var(--surface-hover);text-decoration:none}
+.app-nav .app-nav-item.active{color:var(--ink);background:var(--surface)}
+.app-nav .app-nav-item:focus-visible{outline:2px solid var(--focus);outline-offset:2px}

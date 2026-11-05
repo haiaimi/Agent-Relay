@@ -1,9 +1,11 @@
+import {studioVideo} from './studio-video.js';
 import { randomUUID } from 'node:crypto';
+import {DatabaseSync} from 'node:sqlite';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { query, type Query, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import { CodexRpc } from './codex.js';
-import {CodexDesktop} from './codex-desktop.js';
+import {CodexDesktop,codexIpcPath} from './codex-desktop.js';
 import { NativeHistory, itemMessage } from './history.js';
 import { BridgeStore } from './store.js';
 import {claudeSteerSessions,steerClaude,SteerDeliveryError} from './claude-steer.js';
@@ -16,6 +18,9 @@ import { sessionKey, type Session, type Action, type Project, type RelayEvent, t
 import {QuestionBroker} from './questions.js';
 import {normalizeQuestions} from '../shared/questions.js';
 import {codexPermissions,claudePermissions} from './permissions.js';
+import {prepareBrainstorm,brainProject,brainstormTools,brainstormInstructions} from './brainstorm.js';
+import {studioArtifact} from './studio-artifact.js';
+import {prepareStudioWorkspace} from './studio-workspace.js';
 import {createLocalProject} from './projects.js';
 import {toolActivity} from './activity.js';
 import {codexSettings,claudeSettings,type SessionSettings} from './settings.js';
@@ -26,7 +31,7 @@ import {ApiAgentRun} from './api-agent.js';
 const codexWriterConflict=(error:unknown)=>/already has an active writer/i.test((error as Error)?.message??'');
 
 export interface BridgeConfig {
-  relayUrl:string;hostId:string;name:string;dataDir:string;projects:Project[];
+  projectSourceDataDir?:string;service?:'brainstorm';relayUrl:string;hostId:string;name:string;dataDir:string;projects:Project[];
   codexCommand?:string;codexArgs?:string[];claudeCommand?:string;syncIntervalSeconds?:number;
   codexHome?:string;claudeHome?:string;discoverCodexProjects?:boolean;syncHistory?:boolean;
 }
@@ -47,6 +52,7 @@ export class AgentRuntime {
   private closed=false;
   private busy=new Set<string>();
   private nativeStarts=new Map<string,number>();
+  private nativeWriterWait=new Map<string,number>();
   private cancelled=new Set<string>();
   private stopping=new Set<string>();
   private catalogs=new Map<Provider,{at:number;models:AgentModel[]}>();
@@ -62,7 +68,7 @@ export class AgentRuntime {
   readonly files:FileStore;
   readonly codex:CodexRpc;
   readonly questions:QuestionBroker;
-  constructor(readonly config:BridgeConfig,readonly store:BridgeStore,readonly onSessions:(sessions:Session[])=>void,readonly onEvent:(e:RelayEvent)=>void,private readonly claudeQuery:typeof query=query,readonly codexDesktop=new CodexDesktop()){
+  constructor(readonly config:BridgeConfig,readonly store:BridgeStore,readonly onSessions:(sessions:Session[])=>void,readonly onEvent:(e:RelayEvent)=>void,private readonly claudeQuery:typeof query=query,readonly codexDesktop=new CodexDesktop(codexIpcPath(config.codexHome))){
     this.agents=new AgentRegistry(config.dataDir);
     this.media=new MediaStore(config.dataDir,store.db);
     this.questions=new QuestionBroker(card=>{
@@ -139,7 +145,8 @@ export class AgentRuntime {
   private canStop(s:Session):boolean{
     return ['running','waiting'].includes(s.status)&&(s.managed?this.busy.has(s.id)||this.claude.has(s.id)||this.turns.has(s.nativeId):s.provider==='codex'&&this.codexDesktop.available(s.nativeId));
   }
-  projects():Project[]{return [...this.config.projects.map(p=>({...p,source:p.source??'configured' as const,roots:p.roots??[p.path]})),...this.store.projects(),...(this.config.discoverCodexProjects===false?[]:this.history.projectIndex.projects)];}
+  private sharedProjects():Project[]{if(this.config.service!=='brainstorm'||!this.config.projectSourceDataDir)return [];let db:DatabaseSync|undefined;try{db=new DatabaseSync(join(this.config.projectSourceDataDir,'bridge.sqlite'),{readOnly:true});return db.prepare('SELECT json FROM local_projects').all().map(r=>JSON.parse(String(r.json))).filter(p=>!p.id.startsWith('brainstorm-'));}catch{return [];}finally{db?.close();}}
+  projects():Project[]{return [...this.sharedProjects(),...this.config.projects.map(p=>({...p,source:p.source??'configured' as const,roots:p.roots??[p.path]})),...this.store.projects(),...(this.config.discoverCodexProjects===false?[]:this.history.projectIndex.projects)];}
   private roots():string[]{return this.projects().flatMap(p=>p.roots??[p.path]).filter(Boolean);}
   private save(s:Session){if(this.closed)return;s.updatedAt=Date.now();s.pendingIds=this.store.queued().filter(a=>a.sessionId===s.id).map(a=>a.id);s.pendingCount=s.pendingIds.length;s.canSteer=this.canSteer(s);s.canStop=this.canStop(s);s.canSetPermissions=s.managed||s.provider==='codex'||!this.history.claudeIsRunning(s.nativeId);this.managed.set(s.id,s);this.store.save(s);this.onSessions([s]);}
   private event(s:Session,type:RelayEvent['type'],data:Record<string,any>){if(this.closed)return;if(type==='message'&&!data.images&&imageSources(data).length)data=messageImages(this.media,s.id,s.cwd,data as any,data);const event:RelayEvent={id:randomUUID(),hostId:this.config.hostId,sessionId:s.id,type,data,at:Date.now()};this.store.event(event);this.onEvent(event);}
@@ -266,6 +273,7 @@ export class AgentRuntime {
       if(handled.has(a.sessionId!))continue;handled.add(a.sessionId!);let s=this.get(a.sessionId!);
       if(s.provider==='codex'&&!s.managed&&!this.busy.has(s.id)){await this.history.refreshSessionStatus(s.id);this.list();s=this.get(s.id);}
       if(s.provider==='claude'&&!s.managed){const live=this.history.claudeLiveStatus(s.nativeId);s.status=live??'idle';if(live&&live!=='idle'&&!claudeSteerSessions(this.claudeHome()).has(s.nativeId))continue;}
+      if((this.nativeWriterWait.get(s.id)??0)>Date.now()&&!this.codexDesktop.available(s.nativeId))continue;
       if(this.stopping.has(s.id)||this.steering.has(s.id)||this.busy.has(s.id)||['running','waiting'].includes(s.status))continue;
       this.store.inputState(a.id,'dispatching');
       try{await this.handle(a,true);this.store.inputState(a.id,'sent');}catch(e){
@@ -292,6 +300,8 @@ export class AgentRuntime {
   async handle(action:Action,fromQueue=false):Promise<any>{
     if(action.type==='start')this.agents.enabled(action.provider!,action.agentId);
     if(action.type==='send'){const current=this.get(action.sessionId!);if(!action.text?.trimStart().startsWith('/'))this.agents.enabled(current.provider,current.agentId);}
+    if(action.type==='prepare-brainstorm'){const p=this.projects().find(p=>p.id===action.projectId);if(!p)throw Error('工程不存在');const source=assertProjectPath((p.roots??[p.path])[action.workspaceIndex??0],this.roots());return {project:prepareBrainstorm(this.store,this.config.dataDir,action.workspaceId!,source)};}
+    if(action.type==='prepare-workspace'){const project=this.projects().find(p=>p.id===action.projectId);if(!project)throw Error('工程不在本机允许范围内');assertProjectPath((project.roots??[project.path])[action.workspaceIndex??0],this.roots());const workspace=await prepareStudioWorkspace(this.store,this.config.dataDir,project,action.workspaceIndex??0,action.workspaceId!,action.includeCaptures);for(const id of action.attachmentIds??[])this.files.link(this.config.hostId+'|project:'+project.id,this.config.hostId+'|project:'+workspace.project.id,id);return {workspace};}
     if(action.type==='create-project')return {project:createLocalProject(this.store,action)};
     if(action.type==='set-permissions'){
       const s=this.get(action.sessionId!);assertProjectPath(s.cwd,this.roots());const mode=action.permissionMode!;
@@ -313,8 +323,10 @@ export class AgentRuntime {
       else assertProjectPath(this.get(scope).cwd,this.roots());
       return {file:this.files.import(payload)};
     }
-    if(['start','send'].includes(action.type)&&action.attachmentIds?.length){if(action.text?.trimStart().startsWith('/'))throw new Error('附件请随普通消息发送，不能与 / 命令混用');this.attached(action);}
+    if(['start','send'].includes(action.type)&&action.attachmentIds?.length){if(action.text?.trimStart().startsWith('/'))throw new Error('附件请随普通消息发送，不能与 / 命令混用');this.attached(action);if(action.type==='send'){const session=this.get(action.sessionId!);if(session.projectId?.startsWith('studio-'))for(const id of action.attachmentIds)this.files.link(this.config.hostId+'|'+session.id,this.config.hostId+'|project:'+session.projectId,id);}}
     if(action.type==='models')return {models:await this.models(action.provider!,action.agentId)};
+    if(action.type==='studio-video'){const s=this.get(action.sessionId!),project=this.store.projects().find(p=>p.id===s.projectId);if(!project)throw Error('视频只能从已登记的工作副本读取');return studioVideo(s,action.artifactPath!,project.path,action.videoOffset,action.videoLength,action.videoVersion);}
+    if(action.type==='studio-artifact'){const s=this.get(action.sessionId!),project=this.store.projects().find(p=>p.id===s.projectId);if(!project)throw Error('原画只能从已登记的需求工作副本读取');assertProjectPath(s.cwd,[project.path]);return studioArtifact(this.media,s,action.artifactPath!,project.path,action.artifactHash);}
     if(action.type==='asset'){this.get(action.sessionId!);return this.media.payload(action.sessionId!,action.assetId!);}
     if(action.type==='file'){const scope=this.directScope(action),{file,bytes}=this.files.read(scope,action.fileId!);return {scope,file,data:bytes.toString('base64')};}
     if(action.type==='commands'){const s=this.get(action.sessionId!);assertProjectPath(s.cwd,this.roots());return {commands:await this.commands(s)};}
@@ -409,14 +421,20 @@ export class AgentRuntime {
         finally{this.busy.delete(s.id);}
       }
       if(s.provider==='codex'&&!s.managed&&await this.codexDesktop.owner(s.nativeId)){
-        await this.checkModel(s.provider,action.model,action.effort);
+        const pendingModel=s.nextModel,pendingEffort=s.nextEffort,model=action.model??pendingModel,effort=action.effort??pendingEffort;
+        await this.checkModel(s.provider,model,effort);
         this.busy.add(s.id);
         try{
-          const prepared=this.attached(action),effort=action.effort??s.nextEffort;
+          const prepared=this.attached(action);
           if(s.nextPermissionMode)await this.codexDesktop.setPermissions(s.nativeId,s.nextPermissionMode,s.cwd);
-          await this.codexDesktop.startTurn(s.nativeId,action.id,prepared.text,prepared.input,{model:action.model??s.nextModel,...effort?{effort:effort==='default'?undefined:effort}:{}});
+          await this.codexDesktop.startTurn(s.nativeId,action.id,prepared.text,prepared.input,{model,...effort?{effort:effort==='default'?null:effort}:{}});
           this.nativeStarts.set(s.id,Date.now());
-          if(s.nextPermissionMode)s.permissionMode=s.nextPermissionMode;s.nextPermissionMode=undefined;s.nextModel=undefined;s.nextEffort=undefined;s.statusOrigin='native';this.status(s,'running');
+          this.nativeSettings.set(s.id,{...this.nativeSettings.get(s.id),...model&&{model},...effort&&{effort},settingsSource:'desktop'});
+          if(s.nextPermissionMode)s.permissionMode=s.nextPermissionMode;s.nextPermissionMode=undefined;
+          // A preference saved while start-turn was awaiting acknowledgement
+          // belongs to the following turn, not the one we just submitted.
+          if(s.nextModel===pendingModel&&s.nextEffort===pendingEffort){s.nextModel=undefined;s.nextEffort=undefined;}
+          s.statusOrigin='native';this.status(s,'running');
           this.event(s,'message',{id:action.id,role:'user',text:action.text!,files:prepared.files.map(f=>f.file)});
           return {ok:true,sessionId:s.id,native:true};
         }catch(error){
@@ -431,9 +449,10 @@ export class AgentRuntime {
       const s=this.get(action.sessionId!);assertProjectPath(s.cwd,this.roots());
       const model=action.model??s.nextModel??s.model;
       await this.checkModel(s.provider,model,action.effort,s.agentId);
-      if(this.busy.has(s.id)||['running','waiting'].includes(s.status)){s.nextModel=model;s.nextEffort=action.effort??(action.model&&action.model!==s.model?'default':s.nextEffort??s.effort);this.save(s);return {ok:true,queued:true,model:s.nextModel,effort:s.nextEffort};}
+      // Native conversations may have no open desktop owner. Store a durable
+      // next-turn preference without opening a writer or depending on its UI.
+      if(s.provider==='codex'&&!s.managed||this.busy.has(s.id)||['running','waiting'].includes(s.status)){s.nextModel=model;s.nextEffort=action.effort??(action.model&&action.model!==s.model?'default':s.nextEffort??s.effort);this.save(s);return {ok:true,queued:true,model:s.nextModel,effort:s.nextEffort};}
       const chosenEffort=action.effort??(action.model&&action.model!==s.model?'default':s.nextEffort??s.effort);
-      if(s.provider==='codex'&&!s.managed){await this.codexDesktop.setModel(s.nativeId,model,chosenEffort);this.nativeSettings.set(s.id,{...this.nativeSettings.get(s.id),model,effort:chosenEffort,settingsSource:'desktop'});}
       const updated={...s,model,effort:chosenEffort==='default'&&s.managed?undefined:chosenEffort,nextModel:undefined,nextEffort:undefined};this.save(updated);return {ok:true,model:updated.model,effort:updated.effort};
     }
     if(action.type==='history'){
@@ -479,7 +498,7 @@ export class AgentRuntime {
       this.flush();this.status(s,'interrupted');return {ok:true};
       }finally{this.stopping.delete(s.id);}
     }
-    let session:Session;
+    let session:Session;let nativeResume=false;
     if(action.type==='start'){
       const project=this.projects().find(x=>x.id===action.projectId);if(!project)throw new Error('Project is not allowed by the local configuration');
       const workspace=(project.roots??[project.path])[action.workspaceIndex??0];if(!workspace)throw new Error('Unknown workspace in this project');
@@ -494,13 +513,13 @@ export class AgentRuntime {
       if(session.provider==='api'){session.agentId=action.agentId;session.agentName=this.agents.get(action.agentId).name;}
       session.settingsSource='agent';this.save(session);
     } else {
-      session=this.get(action.sessionId!);assertProjectPath(session.cwd,this.roots());
+      session=this.get(action.sessionId!);nativeResume=session.provider==='codex'&&!session.managed;assertProjectPath(session.cwd,this.roots());
       if(this.busy.has(session.id)||['running','waiting'].includes(session.status))throw new Error('Session is already running; wait or stop it before sending another turn');
       if(session.provider==='claude'&&!session.managed&&this.history.claudeIsRunning(session.nativeId))throw new Error('This Claude session is open in another local process. End that process before resuming here.');
       await this.checkModel(session.provider,action.model,action.effort,session.agentId);const pickedEffort=action.effort??session.nextEffort??session.effort;session={...session,managed:true,statusOrigin:'relay',permissionMode:session.nextPermissionMode??session.permissionMode??'request',nextPermissionMode:undefined,model:action.model??session.nextModel??session.model,effort:pickedEffort==='default'?undefined:pickedEffort,nextModel:undefined,nextEffort:undefined};this.save(session);
     }
     if(this.busy.has(session.id))throw new Error('A turn is already starting');
-    this.busy.add(session.id);this.cancelled.delete(session.id);this.status(session,'running');
+    this.busy.add(session.id);this.cancelled.delete(session.id);if(!nativeResume)this.status(session,'running');
     const prepared=this.attached(action);for(const f of prepared.files)this.files.link(prepared.scope,this.config.hostId+'|'+session.id,f.file.id);
     const userId=action.id;
     if(session.provider==='api'){
@@ -512,11 +531,13 @@ export class AgentRuntime {
         if(!this.loaded.has(session.nativeId)) {const restored=await this.codex.call('thread/resume',{threadId:session.nativeId,excludeTurns:true,cwd:session.cwd,model:session.model,...(({approvalPolicy,approvalsReviewer,sandbox})=>({approvalPolicy,approvalsReviewer,sandbox}))(codexPermissions(session.permissionMode,session.cwd))});session.model=restored.model??session.model;this.save(session);this.loaded.add(session.nativeId);}
         if(this.cancelled.has(session.id))return {ok:true,sessionId:session.id,interrupted:true};
         const result=await this.codex.call('turn/start',{threadId:session.nativeId,model:session.model,effort:session.effort,clientUserMessageId:userId,input:prepared.input,...(({approvalPolicy,approvalsReviewer,sandboxPolicy})=>({approvalPolicy,approvalsReviewer,sandboxPolicy}))(codexPermissions(session.permissionMode,session.cwd))});
+        if(nativeResume){this.nativeWriterWait.delete(session.id);this.status(session,'running');}
         this.event(session,'message',{id:userId,role:'user',text:action.text!,files:prepared.files.map(f=>f.file)});
         if(['running','waiting'].includes(session.status))this.turns.set(session.nativeId,result.turn.id);
         if(this.cancelled.has(session.id))await this.codex.call('turn/interrupt',{threadId:session.nativeId,turnId:result.turn.id});
       } catch(err) {
         if(action.type==='send'&&codexWriterConflict(err)){
+          this.nativeWriterWait.set(session.id,Date.now()+60000);
           const native=this.history.list(true).find(s=>s.id===session.id);
           session.managed=false;session.statusOrigin='native';session.title=native?.title??session.title;
           this.status(session,native?.statusOrigin==='native'?native.status:'idle');
@@ -526,7 +547,7 @@ export class AgentRuntime {
         this.status(session,'failed');this.event(session,'error',{message:(err as Error).message});throw err;
       }
       finally {this.busy.delete(session.id);}
-    } else {this.event(session,'message',{id:userId,role:'user',text:action.text!,files:prepared.files.map(f=>f.file)});const run=this.runClaude(session,prepared.text,action.type!=='start',userId,prepared.files.length?prepared.content:undefined);this.claudeRuns.set(session.id,run);void run.finally(()=>{if(this.claudeRuns.get(session.id)===run)this.claudeRuns.delete(session.id);});}
+    } else {this.event(session,'message',{id:userId,role:'user',text:action.text!,files:prepared.files.map(f=>f.file)});const run=this.runClaude(session,prepared.text,action.type!=='start',userId,prepared.files.length?prepared.content:undefined,action.brainstormContext);this.claudeRuns.set(session.id,run);void run.finally(()=>{if(this.claudeRuns.get(session.id)===run)this.claudeRuns.delete(session.id);});}
     return {ok:true,sessionId:session.id};
   }
   private async runApi(s:Session,runner:ApiAgentRun,prepared:ReturnType<AgentRuntime['attached']>){
@@ -541,13 +562,13 @@ export class AgentRuntime {
     }catch(e){this.flush();if(!runner.controller.signal.aborted)this.event(s,'error',{message:(e as Error).message});this.status(s,runner.controller.signal.aborted?'interrupted':'failed');}
     finally{this.questions.cancelSession(s.id);this.busy.delete(s.id);for(const p of this.approvals.values())if(p.sessionId===s.id)p.resolve(false);}
   }
-  private async runClaude(s:Session,text:string,resume:boolean,userId:string,content?:any[]){
+  private async runClaude(s:Session,text:string,resume:boolean,userId:string,content?:any[],brainstormContext?:string){
     const controller=new AbortController();
     let finished:Session['status']|undefined;
     try {
       const executable=this.claudeExecutable();
       async function* prompt():AsyncGenerator<SDKUserMessage>{yield {type:'user',uuid:userId as `${string}-${string}-${string}-${string}-${string}`,session_id:s.nativeId,parent_tool_use_id:null,message:{role:'user',content:content??text}};}
-      const active=this.claudeQuery({prompt:prompt(),options:{cwd:s.cwd,model:s.model,effort:s.effort as 'low'|'medium'|'high'|'xhigh'|'max'|undefined,pathToClaudeCodeExecutable:executable,abortController:controller,...claudePermissions(s.permissionMode),allowDangerouslySkipPermissions:true,permissionPrompts:'host',includePartialMessages:true,env:{...process.env,AGENT_RELAY_MANAGED:'1'},settingSources:['user','project','local'],...(resume?{resume:s.nativeId}:{sessionId:s.nativeId}),canUseTool:async(name,input,context)=>{
+      const active=this.claudeQuery({prompt:prompt(),options:{...(brainProject.test(s.projectId??'')?{systemPrompt:{type:'preset' as const,preset:'claude_code' as const,append:brainstormInstructions+'\n当前项目组上下文：\n'+(brainstormContext??'')},tools:['AskUserQuestion'],allowedTools:['mcp__brainstorm__project_context','mcp__brainstorm__generate_image','mcp__brainstorm__propose_task'],mcpServers:{brainstorm:brainstormTools(s,this.media,this.config.codexCommand??'codex',this.config.codexArgs,controller.signal,m=>{this.flush();this.event(s,'message',m);},this.store)}}:{}),cwd:s.cwd,model:s.model,effort:s.effort as 'low'|'medium'|'high'|'xhigh'|'max'|undefined,pathToClaudeCodeExecutable:executable,abortController:controller,...claudePermissions(s.permissionMode),allowDangerouslySkipPermissions:true,permissionPrompts:'host',includePartialMessages:true,env:{...process.env,AGENT_RELAY_MANAGED:'1'},settingSources:['user','project','local'],...(resume?{resume:s.nativeId}:{sessionId:s.nativeId}),canUseTool:async(name,input,context)=>{
         if(name==='AskUserQuestion'){
           const questions=normalizeQuestions(input.questions,'claude');this.status(s,'waiting');
           const answers=await this.questions.ask(s.id,'claude:'+context.toolUseID,questions,context.signal);

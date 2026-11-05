@@ -13,10 +13,10 @@ export function imageSources(raw:unknown):Source[]{
   const found:Source[]=[];
   const text=(value:string)=>{
     if(value.includes('](')||value.includes('![')){
-      const visit=(tokens:any[])=>{for(const t of tokens){if(t.type==='image')found.push({path:t.attrGet('src'),name:t.content||'图片'});else if(t.type==='link_open'){const href=t.attrGet('href')??'';if(!/^[a-z][a-z0-9+.-]*:/i.test(href.replace(/^[a-z]:[\\/]/i,''))&&/\.(?:png|jpe?g|gif|webp)$/i.test(href))found.push({path:href});}if(t.children)visit(t.children);}};
+      const visit=(tokens:any[])=>{for(const t of tokens){if(t.type==='image')found.push({path:t.attrGet('src'),name:t.content||'图片'});else if(t.type==='link_open'){const href=t.attrGet('href')??'';if(!/^[a-z][a-z0-9+.-]*:/i.test(href.replace(/^[a-z]:[\\/]/i,''))&&/\.(?:png|jpe?g|gif|webp|mp4|m4v|mov|webm)$/i.test(href))found.push({path:href});}if(t.children)visit(t.children);}};
       visit(parser.parse(value,{}));
     }
-    for(const match of value.matchAll(/^\s*(?:## .+?\.(?:png|jpe?g|gif|webp):|\-\s*\[Image[^\]]*\]:)\s*(.+)$/gim))found.push({path:match[1].trim()});
+    for(const match of value.matchAll(/^\s*(?:## .+?\.(?:png|jpe?g|gif|webp|mp4|m4v|mov|webm):|\-\s*\[Image[^\]]*\]:)\s*(.+)$/gim))found.push({path:match[1].trim()});
     for(const match of value.matchAll(/<image\b[^>]*\bpath="([^"]+)"/gi))found.push({path:match[1]});
   };
   const walk=(value:any,depth=0,scanText=true)=>{
@@ -36,26 +36,26 @@ export function imageSources(raw:unknown):Source[]{
       else if(typeof value.savedPath==='string')found.push({path:value.savedPath});
       else if(typeof value.path==='string')found.push({path:value.path});
     }
-    if(['localImage','local_image','image','input_image','image_url','imageView','image_view'].includes(type)){
+    if(['localImage','local_image','image','input_image','image_url','imageView','image_view','video','input_video','local_video','localVideo','video_url'].includes(type)){
       if(typeof value.path==='string')found.push({path:value.path});
-      const url=value.url??value.image_url?.url??value.image_url;
+      const url=value.url??value.video_url?.url??value.video_url??value.image_url?.url??value.image_url;
       if(typeof url==='string')found.push(url.startsWith('data:')?{data:url}:{path:url});
       if(value.source?.type==='base64'&&typeof value.source.data==='string')found.push({data:`data:${value.source.media_type};base64,${value.source.data}`});
       else if(value.source?.type==='url'&&typeof value.source.url==='string')found.push({path:value.source.url});
       if(typeof value.data==='string'&&typeof value.mimeType==='string')found.push({data:`data:${value.mimeType};base64,${value.data}`});
     }
     // Traverse content/results, not opaque base64 strings or raw generated tool code.
-    for(const [key,child] of Object.entries(value))if(!['data','image_url','url','path','savedPath','source','input','arguments','command','revisedPrompt'].includes(key)&&!(key==='result'&&['imageGeneration','image_generation_call'].includes(type)))walk(child,depth+1,scanText);
+    for(const [key,child] of Object.entries(value))if(!['data','image_url','video_url','url','path','savedPath','source','input','arguments','command','revisedPrompt'].includes(key)&&!(key==='result'&&['imageGeneration','image_generation_call'].includes(type)))walk(child,depth+1,scanText);
   };
   walk(raw);return found.slice(0,40);
 }
 
-export function imageSafeText(text:string):string{return text.replace(/data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/=]+/gi,'[图片内容仅通过设备直传]');}
+export function imageSafeText(text:string):string{return text.replace(/data:(?:image|video)\/[a-z0-9.+-]+;base64,[a-z0-9+/=]+/gi,'[图片内容仅通过设备直传]');}
 export function imageSafeJson(value:unknown):string{
   return JSON.stringify(value,(_key,item)=>{
     if(['b64_json','image_base64','imageData','image_data'].includes(_key))return '[图片内容仅通过设备直传]';
     if(typeof item==='string')return imageSafeText(item);
-    if(item&&typeof item==='object'&&!Array.isArray(item)&&(['image','input_image','output_image'].includes(item.type)||String(item.mimeType??item.mime??item.media_type??'').startsWith('image/'))){
+    if(item&&typeof item==='object'&&!Array.isArray(item)&&(['image','input_image','output_image','video','input_video'].includes(item.type)||String(item.mimeType??item.mime??item.media_type??'').match(/^(image|video)\//))){
       return Object.fromEntries(Object.entries(item).map(([key,v])=>[key,['data','b64_json','image_base64'].includes(key)?'[图片内容仅通过设备直传]':v]));
     }
     return item;
@@ -72,7 +72,7 @@ export function messageImages(store:MediaStore,sessionId:string,cwd:string,messa
       let bytes:Buffer,key='';
       if(source.data){
         key=createHash('sha256').update(source.data).digest('hex');const prior=memo.get(key);if(prior){store.link(sessionId,prior);if(!seen.has(prior.id!)){images.push(prior);seen.add(prior.id!);}continue;}
-        const match=/^data:image\/(?:png|jpe?g|gif|webp);base64,([A-Za-z0-9+/\s]*={0,2})$/i.exec(source.data);
+        const match=/^data:(?:image\/(?:png|jpe?g|gif|webp)|video\/(?:mp4|quicktime|webm));base64,([A-Za-z0-9+/\s]*={0,2})$/i.exec(source.data);
         if(!match)throw new Error('内嵌图片格式不支持');
         if(match[1].length>Math.ceil(MAX_IMAGE_BYTES/3)*4+1024)throw new Error('图片超过单张 16 MB 上限');bytes=Buffer.from(match[1],'base64');
       }else{
