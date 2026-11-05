@@ -27,6 +27,7 @@ const staticFiles: Record<string,[string,string]> = {
   '/studio-delivery-media.js':['studio-delivery-media.js','text/javascript; charset=utf-8'],
   '/conversation-cache.js':['conversation-cache.js','text/javascript; charset=utf-8'],
   '/studio-sidebar.js':['studio-sidebar.js','text/javascript; charset=utf-8'],
+  '/studio-stage-guide.js':['studio-stage-guide.js','text/javascript; charset=utf-8'],
   '/studio-attention.js':['studio-attention.js','text/javascript; charset=utf-8'],
   '/studio-api.js':['studio-api.js','text/javascript; charset=utf-8'],
   '/studio-repairs.js':['studio-repairs.js','text/javascript; charset=utf-8'],
@@ -76,7 +77,7 @@ async function body(req: IncomingMessage,limit=64_000): Promise<any> {
   return JSON.parse(text || '{}');
 }
 export function createRelay(options: Options) {
-  const uiRevision=createHash('sha256').update(['studio.js','studio-task-focus.js','studio-repairs.js','studio-attention.js','studio.css','studio.html','workspace-shell.js','app.js'].map(file=>readFileSync(fileURLToPath(new URL(`../../web/${file}`,import.meta.url)))).reduce((all,part)=>Buffer.concat([all,part]),Buffer.alloc(0))).digest('hex');
+  const uiRevision=createHash('sha256').update(['studio-stage-guide.js','studio.js','studio-task-focus.js','studio-repairs.js','studio-attention.js','studio.css','studio.html','workspace-shell.js','app.js'].map(file=>readFileSync(fileURLToPath(new URL(`../../web/${file}`,import.meta.url)))).reduce((all,part)=>Buffer.concat([all,part]),Buffer.alloc(0))).digest('hex');
   if(options.turn)turnCredentials(options.turn);
   requireSecret(options.phoneToken,'PHONE_TOKEN'); requireSecret(options.bridgeToken,'BRIDGE_TOKEN');
   if (equalSecret(options.phoneToken, options.bridgeToken)) throw new Error('Use separate phone and bridge secrets');
@@ -201,6 +202,7 @@ export function createRelay(options: Options) {
         const preview=isPreview?await previews.image(image.bytes,image.mime):{bytes:image.bytes,mime:image.mime,hash:image.sha256};
         res.setHeader('Content-Security-Policy',"default-src 'none'; sandbox");res.writeHead(200,{'Content-Type':preview.mime,'Content-Length':preview.bytes.length,'X-Asset-Source':image.source,'X-Content-Sha256':preview.hash,'X-Visual-Sha256':image.sha256,'Content-Disposition':"inline; filename*=UTF-8''"+encodeURIComponent(image.name)});return res.end(preview.bytes);
       }
+      if(req.method==='POST'&&url.pathname==='/api/studio/guidance')return json(res,200,await studio.guideTask(await body(req)));
       if(req.method==='POST'&&url.pathname==='/api/studio/chat')return json(res,200,await studio.chat(await body(req)));
       if(req.method==='GET'&&url.pathname==='/api/studio/group')return json(res,200,studio.group(url.searchParams.get('runId')??'',url.searchParams.get('before')??undefined));
       if(req.method==='POST'&&url.pathname==='/api/studio/group')return json(res,200,await studio.groupChat(await body(req)));

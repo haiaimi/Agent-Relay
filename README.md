@@ -1,5 +1,7 @@
 # Agent Relay
 
+游戏工作室支持在任务详情直接补充当前阶段指引，沿用原会话和工作副本；未启动阶段先保存，执行中使用已有引导通道。渲染验收先核对真实路径，无 receiver 的 Voxel 不再套用旧 UV2 门禁。见 [阶段指引与渲染验收](docs/studio-stage-guidance.md)。
+
 **中文** | [English](README.en.md)
 
 在自己的电脑运行 Codex / Claude Code，通过自己的服务器和手机网页管理会话，或组织策划、美术、程序和 QA 协作制作游戏。

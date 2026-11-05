@@ -19,17 +19,47 @@ const plan=(tasks:any[])=>'```STUDIO_PLAN\n'+JSON.stringify({tasks})+'\n```';
 const task=(id:string,dependencies:string[]=[],role='engineering')=>({id,title:id,role,brief:'实现 '+id,acceptance:'实际检查 '+id,dependencies});
 const result=(outcome='done',summary='已完成')=>'```STUDIO_RESULT\n'+JSON.stringify({outcome,summary,artifacts:[{path:'game/test.tscn',description:'可运行入口'}],checks:['执行实际检查：通过']})+'\n```';
 const turn=()=>new Promise(resolve=>setImmediate(resolve));
+
+test('stage guidance saves undispatched context without releasing dependencies and is idempotent',async()=>{
+  const f=await fixture();try{
+    f.studio.saveProject({...f.project,reviewPlan:false});f.studio.createRun({workflow:'general',projectId:f.project.id,title:'当前阶段',brief:'保持依赖'});await f.settle();f.finish(f.run().planner,plan([task('a'),task('b',['a'])]));await f.settle();
+    const request={id:randomUUID(),runId:f.run().id,taskId:'b',expectedSessionId:null,text:'按真实 Voxel 路径验收，UV2 记不适用，保留质量失败'};
+    const count=f.actions.length;assert.equal((await f.studio.guideTask(request)).status,'saved');assert.equal(f.actions.length,count);assert.equal(f.run().tasks[1].status,'queued');assert.deepEqual(f.run().tasks[1].dependencies,['a']);
+    assert.deepEqual(await f.studio.guideTask(request),f.run().directions![0]);assert.equal(f.run().directions!.length,1);await assert.rejects(f.studio.guideTask({...request,text:'其他内容'}),/其他内容/);
+    f.finish(f.run().tasks[0],result());await f.settle();assert.match(f.actions.at(-1)!.text!,/按真实 Voxel 路径验收/);assert.match(f.actions.at(-1)!.text!,/不适用/);assert.match(f.actions.at(-1)!.text!,/不能因 Voxel 绕过真实失败/);
+  }finally{await f.close();}
+});
+
+test('stage guidance resumes the exact blocked task, retains upstream and does not accept failures',async()=>{
+  const f=await fixture();try{
+    f.studio.saveProject({...f.project,reviewPlan:false});f.studio.createRun({workflow:'general',projectId:f.project.id,title:'原会话',brief:'质量不免验'});await f.settle();f.finish(f.run().planner,plan([task('a'),task('b',['a'])]));await f.settle();f.finish(f.run().tasks[0],result());await f.settle();f.finish(f.run().tasks[1],result('blocked','真实性能回退'));await f.settle();
+    const r=f.run(),t=r.tasks[1],upstream=JSON.stringify(r.tasks[0]),request={id:randomUUID(),runId:r.id,taskId:t.id,expectedSessionId:t.sessionId,text:'先核对当前渲染路径，保留性能失败。'};
+    const receipt=await f.studio.guideTask(request);assert.equal(receipt.status,'delivered');assert.equal(f.run().tasks[1].sessionId,t.sessionId);assert.equal(f.run().tasks[1].status,'running');assert.equal(JSON.stringify(f.run().tasks[0]),upstream);assert.notEqual(f.run().status,'accepted');assert.match(f.actions.at(-1)!.text!,/渲染验收适用性/);
+    const count=f.actions.length;await f.studio.guideTask(request);assert.equal(f.actions.length,count);await assert.rejects(f.studio.guideTask({...request,id:randomUUID(),expectedSessionId:'foreign'}),/会话已变化/);
+  }finally{await f.close();}
+});
+
+test('running stage guidance steers its acknowledged queued input without another writer; uncertainty never resends',async()=>{
+  const f=await fixture();try{
+    f.studio.saveProject({...f.project,reviewPlan:false});f.studio.createRun({workflow:'general',projectId:f.project.id,title:'执行中指引',brief:'原 Agent'});await f.settle();f.finish(f.run().planner,plan([task('a')]));await f.settle();
+    let r=f.run(),t=r.tasks[0];const request={id:randomUUID(),runId:r.id,taskId:t.id,expectedSessionId:t.sessionId,text:'按当前方案继续，保留原分支'};
+    const before=f.actions.filter(a=>a.type==='start').length;assert.equal((await f.studio.guideTask(request)).status,'delivered');const send=f.actions.find(a=>a.id===request.id)!,steer=f.actions.at(-1)!;assert.equal(send.type,'send');assert.equal(steer.type,'steer');assert.equal(steer.queuedId,request.id);assert.equal(steer.sessionId,t.sessionId);assert.equal(f.actions.filter(a=>a.type==='start').length,before);
+    f.setSteerError(true);assert.equal((await f.studio.guideTask({...request,id:randomUUID(),text:'排队仍须可追溯'})).status,'queued');
+    f.setSendError(true);const uncertain={...request,id:randomUUID(),text:'不重复投递'};await assert.rejects(f.studio.guideTask(uncertain),/timeout/);const count=f.actions.length;await assert.rejects(f.studio.guideTask(uncertain),/尚未确认/);assert.equal(f.actions.length,count);assert.equal(f.run().directions!.at(-1)!.status,'uncertain');
+    const s=f.store.getSession(t.sessionId!)!;f.store.session({...s,status:'waiting',questionCount:1});await assert.rejects(f.studio.guideTask({...request,id:randomUUID()}),/待确认问题/);assert.equal(f.actions.length,count);
+  }finally{await f.close();}
+});
 const skipRequest=(run:any,t:any,reason='保留角度问题，先交给独立 QA 检查')=>({op:'skip-task',runId:run.id,taskId:t.id,feedback:reason,expectedActionId:t.actionId??null,expectedFinishedAt:t.finishedAt??null});
 const selectedFlow=(stages:string[],approvals={})=>({template:'custom',stages,approvals:{plan:false,design:false,visual:false,scene:false,final:false,...approvals}});
 async function fixture(prepareFailure=false,inspectVisual:()=>Promise<{sha256:string}>=async()=>({sha256:'a'.repeat(64)})){
-  const dir=mkdtempSync(join(tmpdir(),'relay-studio-')),store=new RelayStore(dir),actions:Action[]=[],files=new FileStore(dir,store.db);let online=true;
+  const dir=mkdtempSync(join(tmpdir(),'relay-studio-')),store=new RelayStore(dir),actions:Action[]=[],files=new FileStore(dir,store.db);let online=true,sendError=false,steerError=false;
   store.host({id:'workstation',name:'工作电脑',capabilities:{studioWorkspaces:true},online:true,lastSeen:Date.now(),projects:[{id:'game',name:'Game',path:dir}],agents:[{id:'codex',provider:'codex',name:'Codex'},{id:'claude',provider:'claude',name:'Claude'}]});
-  const studio=new Studio(store,async(_host,action)=>{if(action.type==='prepare-workspace'){if(prepareFailure)throw Error('Git preparation failed');return {workspace:workspace(action.workspaceId!,dir)};}actions.push(action);if(action.type==='history')return {messages:[],questions:[]};if(action.type==='upload')return {file:action.upload!.file};if(action.type==='set-permissions')return {ok:true,queued:false,permissionMode:action.permissionMode};if(action.type==='send'){const s=store.getSession(action.sessionId!)!;store.session({...s,status:'running'});return {ok:true,sessionId:action.sessionId,queued:s.status==='running'};}if(action.type==='stop')return {ok:true};const nativeId=randomUUID(),session:Session={id:'workstation:'+action.provider+':'+nativeId,hostId:'workstation',provider:action.provider!,nativeId,title:'工作室任务',cwd:dir,projectId:action.projectId??store.getSession(action.sessionId!)?.projectId,updatedAt:Date.now(),status:'running',managed:true};store.session(session);return {sessionId:session.id};},()=>online,()=>{},files,inspectVisual);
+  const studio=new Studio(store,async(_host,action)=>{if(action.type==='prepare-workspace'){if(prepareFailure)throw Error('Git preparation failed');return {workspace:workspace(action.workspaceId!,dir)};}actions.push(action);if(action.type==='steer'){if(steerError)throw Error('steer timeout');return {ok:true,steered:true};}if(action.type==='send'&&sendError)throw Error('send receipt timeout');if(action.type==='history')return {messages:[],questions:[]};if(action.type==='upload')return {file:action.upload!.file};if(action.type==='set-permissions')return {ok:true,queued:false,permissionMode:action.permissionMode};if(action.type==='send'){const s=store.getSession(action.sessionId!)!;store.session({...s,status:'running'});return {ok:true,sessionId:action.sessionId,queued:s.status==='running'};}if(action.type==='stop')return {ok:true};const nativeId=randomUUID(),session:Session={id:'workstation:'+action.provider+':'+nativeId,hostId:'workstation',provider:action.provider!,nativeId,title:'工作室任务',cwd:dir,projectId:action.projectId??store.getSession(action.sessionId!)?.projectId,updatedAt:Date.now(),status:'running',managed:true};store.session(session);return {sessionId:session.id};},()=>online,()=>{},files,inspectVisual);
   const project=studio.saveProject({name:'测试团队',hostId:'workstation',projectId:'game',workspaceIndex:0,roles:roles(),permissionMode:'request',concurrency:1,reviewPlan:true});
   const run=()=>studio.runs()[0];
   const settle=async()=>{await studio.tick();await turn();await studio.tick();await turn();};
   const finish=(t:any,output:string,status:Session['status']='idle')=>{const s=store.getSession(t.sessionId)!;assert.ok(s);store.event({id:randomUUID(),hostId:s.hostId,sessionId:s.id,type:'message',data:{id:randomUUID(),role:'assistant',text:output},at:Date.now()});store.session({...s,status,updatedAt:Date.now()});};
-  return {dir,store,studio,project,actions,files,run,finish,settle,setOnline:(v:boolean)=>{online=v;},async close(){await studio.close();store.close();rmSync(dir,{recursive:true,force:true});}};
+  return {dir,store,studio,project,actions,files,run,finish,settle,setOnline:(v:boolean)=>{online=v;},setSendError:(v:boolean)=>{sendError=v;},setSteerError:(v:boolean)=>{steerError=v;},async close(){await studio.close();store.close();rmSync(dir,{recursive:true,force:true});}};
 }
 test('producer skip releases the next QA with failure evidence, remains durable and is not acceptance',async()=>{
   const f=await fixture();try{

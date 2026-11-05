@@ -1,6 +1,7 @@
 import {withShowcase,videoPath} from './studio-showcase.js';
 import {normalizeProductionFlow,productionFlowInstructions,productionRoleIds,ProductionPlanError} from './studio-flow.js';
 import {validateToolchain,validateBlockers,toolchainInstructions,type StudioToolchain,type StudioBlocker} from './studio-tools.js';
+import {renderingInstructions} from './studio-rendering.js';
 import {createHash,randomUUID} from 'node:crypto';
 import {continuationSnapshot,continuationInstructions,type StudioContinuation} from './studio-continuation.js';
 import {modelConnectionFailure,pendingProducerInput,handoffContext,MODEL_RETRIES,MODEL_RETRY_MS,type StudioRecovery} from './studio-recovery.js';
@@ -44,7 +45,8 @@ interface RoleChat {role:string;actionId:string;sessionId?:string;error?:string;
 interface SkipBlocker {kind:'receipt'|'active'|'queue'|'state'|'dependency';title:string;message:string;sessionId?:string;taskId?:string;canStop?:boolean;canCancelQueue?:boolean}
 export interface StudioRun {chatPermissions?:Partial<Record<string,PermissionMode>>}
 export interface StudioRun {continuation?:StudioContinuation}
-export interface StudioRun {recordVideo?:boolean;autoAccepted?:boolean;id:string;projectId:string;title:string;brief:string;status:'planning'|'plan-review'|'executing'|'delivery'|'review'|'accepted'|'cancelled';paused:boolean;tasks:Task[];planner:Task;delivery?:Task;workflow?:SceneWorkflow;createdAt:number;updatedAt:number;revision:number;feedback?:string;log:{id?:string;at:number;text:string;taskId?:string;taskTitle?:string;sessionId?:string;role?:string;skip?:TaskSkip;handoff?:{id:string;role:string;title:string;summary?:string;artifacts?:Artifact[]}[]}[];attachments?:FileRef[];workspace?:{status:'queued'|'preparing'|'ready'|'blocked';actionId?:string;value?:StudioWorkspace;error?:string};chats?:RoleChat[];guidance?:{id:string;role:string;text:string;files:FileRef[];at:number;sessionId:string}[]}
+export interface StageDirection {id:string;taskId:string;text:string;sessionId?:string;at:number;status:'saved'|'sending'|'delivered'|'queued'|'uncertain';error?:string}
+export interface StudioRun {directions?:StageDirection[];recordVideo?:boolean;autoAccepted?:boolean;id:string;projectId:string;title:string;brief:string;status:'planning'|'plan-review'|'executing'|'delivery'|'review'|'accepted'|'cancelled';paused:boolean;tasks:Task[];planner:Task;delivery?:Task;workflow?:SceneWorkflow;createdAt:number;updatedAt:number;revision:number;feedback?:string;log:{id?:string;at:number;text:string;taskId?:string;taskTitle?:string;sessionId?:string;role?:string;skip?:TaskSkip;handoff?:{id:string;role:string;title:string;summary?:string;artifacts?:Artifact[]}[]}[];attachments?:FileRef[];workspace?:{status:'queued'|'preparing'|'ready'|'blocked';actionId?:string;value?:StudioWorkspace;error?:string};chats?:RoleChat[];guidance?:{id:string;role:string;text:string;files:FileRef[];at:number;sessionId:string}[]}
 const roleIds=new Set<string>(STUDIO_ROLES.map(r=>r[0]));
 const text=(v:unknown,max:number,label:string,optional=false)=>{if(typeof v!=='string'||v.length>max||(!optional&&!v.trim()))throw Error('请填写有效的'+label);return v.trim();};
 function structured(output:string,kind:'plan'|'result'):any{
@@ -506,6 +508,42 @@ export class Studio {
     }
     return {post};
   }
+  async guideTask(v:any){const job=this.guideTaskAction(v);this.launches.add(job);try{return await job;}finally{this.launches.delete(job);}}
+  private async guideTaskAction(v:any){
+    const r=this.run(v.runId),p=this.project(r.projectId),t=this.allTasks(r).find(t=>t.id===v.taskId);
+    if(typeof v.id!=='string'||!uploadId.test(v.id))throw Error('无效指引 ID');
+    const body=text(v.text,8000,'当前阶段指引');
+    r.directions??=[];
+    const old=r.directions.find(d=>d.id===v.id);
+    if(old){if(old.taskId!==v.taskId||old.text!==body||(old.sessionId??null)!==(v.expectedSessionId??null))throw Error('指引 ID 已用于其他内容');if(['sending','uncertain'].includes(old.status))throw Error('这条指引的投递尚未确认，请核对原会话，不会重复发送');return old;}
+    if(!t||t.kind||!['queued','blocked','running'].includes(t.status)||['accepted','cancelled'].includes(r.status))throw Error('请选择尚未结束的制作任务，审批请使用确认或退回入口');
+    if((t.sessionId??null)!==(v.expectedSessionId??null))throw Error('当前阶段会话已变化，请刷新后指引');
+    if(r.workspace?.status!=='ready')throw Error('工作副本尚未就绪');
+    const session=t.sessionId?this.store.getSession(t.sessionId):undefined;
+    if(t.sessionId&&(!session||session.hostId!==p.hostId||session.projectId!==this.execution(r).id))throw Error('执行会话不属于当前工作副本');
+    if(session?.questionCount||session?.status==='waiting')throw Error('请先在本页回答待确认问题或批准操作；指引不能代替审批');
+    if(t.sessionId&&!this.online(p.hostId))throw Error('工作电脑离线，请上线后投递指引');
+    if(t.sessionId&&!this.dependenciesReady(r,t))throw Error('前置步骤或制作人审批未完成');
+    const direction:StageDirection={id:v.id,taskId:t.id,text:body,sessionId:t.sessionId,at:Date.now(),status:t.sessionId?'sending':'saved'};
+    r.directions.push(direction);r.directions=r.directions.slice(-100);
+    // An undispatched stage gets context only. Its dependency/approval graph stays intact.
+    if(!t.sessionId)t.feedback=[t.feedback,'制作人当前阶段指引：'+body].filter(Boolean).join('\n').slice(-12000);
+    this.saveRun(r,'制作人指引：'+t.title+'\n'+body,t);
+    if(!t.sessionId)return direction;
+    try{
+      const receipt=await this.chat({id:v.id,runId:r.id,role:t.role,sessionId:t.sessionId,text:body});
+      if(receipt.ok!==true&&receipt.sessionId!==t.sessionId)throw Error('指引投递回执未确认');
+      let queued=!!receipt.queued,steerError:string|undefined;
+      if(queued){
+        const steer:Action={id:randomUUID(),type:'steer',sessionId:t.sessionId,queuedId:v.id};
+        this.store.beginAction(steer.id,p.hostId,steer);
+        try{const result=await this.remote(p.hostId,steer);this.store.finishAction(steer.id,result);if(result.steered===true)queued=false;else steerError='即时引导未确认，消息保留在原会话队列，请核对执行记录';}
+        catch(e){steerError='即时引导未确认：'+(e as Error).message+'；请核对原会话，避免重复提交';}
+      }
+      const latest=this.run(r.id),saved=latest.directions!.find(d=>d.id===v.id)!;
+      saved.status=queued?'queued':'delivered';saved.error=steerError;this.saveRun(latest,queued?'阶段指引已排队，等待原 Agent 接收':'阶段指引已投递，沿用原任务和会话',this.allTasks(latest).find(x=>x.id===t.id));return saved;
+    }catch(e){const latest=this.run(r.id),saved=latest.directions!.find(d=>d.id===v.id)!;saved.status='uncertain';saved.error=(e as Error).message;this.saveRun(latest,'阶段指引投递未确认，请核对原会话');throw e;}
+  }
   async chat(v:any){const job=this.chatAction(v);this.launches.add(job);try{return await job;}finally{this.launches.delete(job);}}
   private async chatAction(v:any,groupContext=''){
     const r=this.run(v.runId),p=this.project(r.projectId),execution=this.execution(r),a=p.roles.find(a=>a.role===v.role&&a.enabled);
@@ -533,7 +571,7 @@ export class Studio {
     const sharedTools=p.toolchain?'\n团队共享工具环境（工作电脑上的路径，纯讨论不运行无关 DCC）：'+JSON.stringify(p.toolchain)+'\n':'';
     const playtestGuidance=`\n本机试玩与启动约定：当前需求 worktree 绝对路径：${execution.path}；独立分支：${r.workspace!.value!.branch}。用户问路径或怎么启动时，直接返回该 worktree、实际项目目录、已核实的场景入口/启动脚本/EXE，以及可复制的 Windows PowerShell 启动命令（含工作目录与必要参数），不能只说去找交付文档。用户明确要求“启动这个场景”“运行游戏”“打开试玩”时，可以直接调用本机工具启动已经存在的本需求场景或程序；这属于已授权的本机预览，不是修改制作成果。先读取交付说明、脚本和必要配置，核对实际新场景、指定引擎版本及路径；禁止切换源工程或把旧入口、其他需求、旧场景当成本次成果。若本次只有原画/模型或缺少可运行入口，如实说明并给出已有资产的预览方式，不编造启动命令、不自动补做场景。运行前核对相同 worktree/入口是否已有进程，避免重复启动；启动结果未知时先查 PID 和日志，不重复拉起。Windows 游戏窗口应可见，命令和日志不要遮挡用户。启动后报告真实命令、worktree、场景、PID、日志路径和实际就绪/失败证据；仅有进程不代表加载成功。允许必要的缓存和日志写在本需求工作副本，不改源码、正式资产、已确认配置或批准记录，不重新宣称 QA 通过；改动需要另行制作。\n`;
     const deliveryContext=afterDelivery?'\n这是已交付需求的后续讨论与本机试玩。回答制作人的追问，不修改工程源文件、已完成任务或验收记录，不重新输出制作结果或重新执行生产。明确要求的本机启动按下述试玩约定执行，不因“只读讨论”拒绝运行现有成果。需要改动时建议发起新制作需求。区分素材预览、真实游戏入口与目标设备实测，不将旧场景或展示视频当成新关卡已可玩。\n所选流程与实际交付：'+JSON.stringify({workflow:r.workflow?.selection,sourceTask:sourceTask?{id:sourceTask.id,title:sourceTask.title,summary:sourceTask.summary}:undefined,delivery:r.delivery?.summary,tasks:r.tasks.map(t=>({id:t.id,title:t.title,stage:t.stage,summary:t.summary?.slice(0,500),artifacts:t.artifacts?.slice(0,5)}))}).slice(0,6000):'';
-    const instruction=(task?'\n这是制作人对本任务的补充。按补充继续制作，完成后重新输出原要求的 '+(task===r.planner?'STUDIO_PLAN':'STUDIO_RESULT')+' 结构化代码块；验收必须基于补充后的实际结果。':'')+sharedTools+deliveryContext+playtestGuidance;
+    const instruction=(task?'\n这是制作人对本任务的补充。按补充继续制作，完成后重新输出原要求的 '+(task===r.planner?'STUDIO_PLAN':'STUDIO_RESULT')+' 结构化代码块；验收必须基于补充后的实际结果。':'')+sharedTools+deliveryContext+playtestGuidance+renderingInstructions;
     groupContext=groupContext.slice(0,Math.max(0,MAX_TEXT-body.length-r.brief.length-a.instructions.length-a.tools.length-sharedTools.length-deliveryContext.length-playtestGuidance.length-1500));
     const action:Action=targetSessionId?{id:v.id,type:'send',sessionId:targetSessionId,text:groupContext+(body||'请查看附件。')+instruction,attachmentIds:refs.map(f=>f.id)}:{id:v.id,type:'start',projectId:execution.id,workspaceIndex:0,provider:a.provider,agentId:a.agentId,model:a.model,effort:a.effort,permissionMode:r.chatPermissions?.[v.role]??p.permissionMode,text:`你是游戏团队的${STUDIO_ROLES.find(x=>x[0]===v.role)![1]}，与制作人直接对话。需求：${r.title}\n${r.brief}\n独立分支：${r.workspace!.value!.branch}\n工作目录：${execution.path}\n职责：${a.instructions}\n工具：${a.tools}${sharedTools}${deliveryContext}${playtestGuidance}\n默认只读讨论，不修改工程源文件；用户明确要求的本机启动可以按上述约定执行。制作人要求改动时，请说明${afterDelivery?'需要发起新的制作需求':'需要在对应制作任务会话中提出'}，以便后续 QA 重新验证。保护已有修改，遵循工程约定，不切换源工程或主干，不提交、推送或发布。视频或其他文件使用本机工具读取，无法读取须说明。\n制作人：${groupContext}${body||'请查看附件。'}`,attachmentIds:refs.map(f=>f.id)};
     const prior=this.store.beginAction(action.id,p.hostId,action);if(!prior.fresh){if(prior.result)return prior.result;throw Error('消息已接受，结果未确认；请核对聊天记录，不会重复发送');}
@@ -614,7 +652,7 @@ export class Studio {
     const contextNotes=`独立需求分支：${r.workspace!.value!.branch}\n当前工作副本：${this.execution(r).path}。源工程 ${r.workspace!.value!.sourcePath} 只用于识别，不在源目录执行或修改文件。任务说明中若提到源工程绝对路径，必须映射到当前工作副本；引擎子模块也使用副本内的 engine 目录。禁止切换或修改源工程 / 主干。\n制作人参考附件：${(r.attachments??[]).map(f=>f.name).join('、')||'无'}。图片随输入提供；视频和其他文件通过输入附带的本机路径读取，视频可用已有工具抽帧；工具不可用时明确报告，不能声称已经观看。\n团队群聊补充：\n${this.groupPosts(r.id).slice(-8).map(m=>'制作人 @'+m.roles.join(',')+': '+m.text+' [附件 '+m.files.map(f=>f.name).join(',')+']').join('\n').slice(-2500)}\n后续制作人补充：\n${(r.guidance??[]).slice(-12).map(g=>g.role+': '+g.text+' [附件 '+g.files.map(f=>f.name).join(',')+']').join('\n').slice(r.workflow?.kind==='scene'?-3000:-5000)}\n`;
     const resumeNote=t.resumeSessionId?['继续同一个任务、同一份工程与已有实现，从原代码续做，不另起一套玩法。先检查原会话记录、已有文件与验证结果，从未完成的步骤继续；不得重跑已完成的前置任务，也不得跳过制作人审批。','断点前的公开执行记录（可能不完整，须核对工程）：',(t.output??'').slice(-5000),''].join('\n'):'';
     const handoffNote=!t.resumeSessionId&&t.recovery?.handoff?`这是模型断连后的新会话接力，不是重做。原会话：${t.recovery.handoff.sessionId}。沿用本需求 worktree、分支、职责和已批准方向。先检查已有文件与日志，只继续未完成步骤；未知工具结果先核实，不重复启动进程、导出或发布，不重跑前置任务、不跳过审批。\n${t.recovery.handoff.context}\n`:'';
-    const common=`${handoffNote}${resumeNote}${contextNotes}${continuationInstructions(r.continuation)}${toolchainInstructions(p.toolchain,this.execution(r).path,r.workspace!.value!.sourcePath)}${sceneTaskInstructions(t,r.workflow)}【${role[1]}】${r.title} / ${t.title}\n你是游戏团队的${role[1]}。制作人需求：\n${r.title}\n${t.resumeSessionId?'制作人原始需求沿用本会话开头的完整说明；结合以下最新补充与已有工程续做。':r.brief}\n\n职能职责：${role[2]}\n补充说明：${a.instructions||'无'}\n本机工具 / 引擎 / DCC：${a.tools||'自行检查工程和已有工具；工具缺失必须报告，不得虚构生成或验收结果。'}\n工具在工作电脑后台执行。遵循工程约定，保护已有修改，不提交、推送或发布，除非制作人明确要求。所有职能共享当前工程；并发时只修改分配给自己的文件，发现冲突立即报告 blocked。将可持久化交付物保存到工程内，文档优先 .studio/${r.id}/${t.id}/，实际游戏资源遵循工程目录。\n${r.feedback?'制作人本轮返工意见（按本任务相关项执行，优先于旧任务说明中的冲突限制）：'+r.feedback+'\n':''}${t.feedback?'返工要求：'+t.feedback+'\n':''}`;
+    const common=`${renderingInstructions}${handoffNote}${resumeNote}${contextNotes}${continuationInstructions(r.continuation)}${toolchainInstructions(p.toolchain,this.execution(r).path,r.workspace!.value!.sourcePath)}${sceneTaskInstructions(t,r.workflow)}【${role[1]}】${r.title} / ${t.title}\n你是游戏团队的${role[1]}。制作人需求：\n${r.title}\n${t.resumeSessionId?'制作人原始需求沿用本会话开头的完整说明；结合以下最新补充与已有工程续做。':r.brief}\n\n职能职责：${role[2]}\n补充说明：${a.instructions||'无'}\n本机工具 / 引擎 / DCC：${a.tools||'自行检查工程和已有工具；工具缺失必须报告，不得虚构生成或验收结果。'}\n工具在工作电脑后台执行。遵循工程约定，保护已有修改，不提交、推送或发布，除非制作人明确要求。所有职能共享当前工程；并发时只修改分配给自己的文件，发现冲突立即报告 blocked。将可持久化交付物保存到工程内，文档优先 .studio/${r.id}/${t.id}/，实际游戏资源遵循工程目录。\n${r.feedback?'制作人本轮返工意见（按本任务相关项执行，优先于旧任务说明中的冲突限制）：'+r.feedback+'\n':''}${t.feedback?'返工要求：'+t.feedback+'\n':''}`;
     const scenePlan=r.workflow?.selection?productionFlowInstructions(r.workflow.selection):r.workflow?.kind==='scene'?`场景生产流程为强制约束：玩法与 LD 设计 requirements → 原画 concept → 制作人确认（系统节点）→ 资产规格 asset-spec → ${r.workflow.assetMode==='new'?'资产生产 assets → ':''}LA 正式搭建 assembly → 布光效果与程序集成 integration → QA。玩法策划与 LD 必须先完成 requirements 设计文档和布局，原画依赖这两项；不安排独立玩法原型制作。制作人确认后再做数值 balance 和程序 implementation；玩法实现统一交给程序，复用现有代码，只做一套。最终 integration 只接入和验证已有实现，不重复开发。每个任务明确 stage。角色匹配：requirements 玩法/LD/系统；balance 数值；implementation 程序；concept 原画；asset-spec 原画/模型/技术美术；assets 模型；assembly 场景美术；integration 程序/技术美术/UI/音频。原画至少交付一张实际存在的 PNG/JPEG/WebP/GIF 工程内图片供制作人查看；工具缺失必须 blocked，禁止用文字假装产图。不要输出人工确认任务，系统自动插入；系统会补齐缺失的必要制作阶段并校验依赖。${r.workflow.assetMode==='reuse'?'制作人指定复用范围：'+r.workflow.reuseReason+'，只核对已有视觉、编资产清单和搭建，不安排新资产生产。':'这次需要新场景 / 新资产，不能自行以复用为由跳过原画、确认与资产生产。'}\n`:'通用任务仅做代码、配置或讨论；涉及正式场景或美术资产生产时需要场景流程。\n';
     const exampleStage=r.workflow?.selection?.stages[0]??'requirements',exampleRole=r.workflow?.selection?productionRoleIds({...r.workflow.selection,stages:[r.workflow.selection.stages[0]]}).find(id=>p.roles.some(a=>a.enabled&&a.role===id)):'gameplay';
     if(t.id==='studio-plan'){const instructions=`${scenePlan}\n你现在只做只读分析和任务规划，不改动工程。${r.recordVideo?'系统会在制作末尾安排成果展示视频，不要重复输出录制任务。':''}可用职能：${p.roles.filter(a=>a.enabled&&a.role!=='director'&&(!r.workflow?.selection||productionRoleIds(r.workflow.selection).includes(a.role))).map(a=>a.role+' ('+STUDIO_ROLES.find(r=>r[0]===a.role)![1]+')').join(', ')}。按需求选择必要职能，不要为了凑人数安排无关工作。把文件责任写入 brief；同文件写入必须有依赖。${r.workflow?.selection?(r.workflow.selection.stages.includes('validation')?'QA 只安排在选定的 validation 阶段，不重复追加。':'制作人未选 QA，不安排或追加 QA 任务。'):'系统会追加最终独立 QA 任务。'}最后只输出一个 JSON 代码块：\n\`\`\`STUDIO_PLAN\n${JSON.stringify({tasks:[{id:"task-1",title:"任务名",role:exampleRole,stage:exampleStage,brief:"具体工作与文件责任",acceptance:"可检查的验收标准",dependencies:[]}]})}\n\`\`\``;return common.slice(0,Math.max(0,MAX_TEXT-instructions.length))+instructions;}

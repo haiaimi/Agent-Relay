@@ -13,6 +13,7 @@
 | 本地 Agent、模型和原生会话控制 | [本地 Agent](local-agents.md) |
 | 模块职责、状态与媒体传输约定 | [架构](architecture.md) |
 | 历史、附件与浏览器缓存 | [同步机制](synchronization.md) |
+| 当前阶段直接指引、Voxel / UV2 适用性 | [阶段指引与渲染验收](studio-stage-guidance.md) |
 | 排队、断线、工具和图片问题 | [故障排查](troubleshooting.md) |
 | 本次变更及验证边界 | [2026-11-05](validation-2026-11-05.md) |
 | 早期版本验证 | [2026-11-02](validation-2026-11-02.md) |
