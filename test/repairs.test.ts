@@ -28,6 +28,12 @@ test('repair rejects game targets and validates completion rather than treating 
   f.finish(job,{outcome:'no-change',cause:'真实交付缺少图片，不是 Relay 缺陷',commits:[],checks:[],pushed:false,deployed:false});await f.settle();assert.equal(f.repairs.list()[0].phase,'completed');assert.equal(f.repairs.list()[0].result.outcome,'no-change');
  }finally{await f.close();}
 });
+test('a blocked repair report stays stable across polling, and interrupted sessions cannot report completion',async()=>{
+ const f=fixture();try{
+  f.create();await f.settle();const job=f.repairs.list()[0];f.finish(job,{outcome:'blocked',cause:'需要补充复现',commits:[],checks:[],pushed:false});await f.settle();const saved=f.repairs.list()[0].updatedAt;await new Promise(r=>setTimeout(r,10));await f.repairs.tick();assert.equal(f.repairs.list()[0].updatedAt,saved);
+  f.finish(job,{});const session=f.store.getSession(job.sessionId!)!;f.store.session({...session,status:'interrupted'});await f.settle();assert.equal(f.repairs.list()[0].phase,'blocked');assert.match(f.repairs.list()[0].error!,/已中断/);
+ }finally{await f.close();}
+});
 test('ambiguous dispatch survives restart without retry; matching sessions require explicit verified binding',async()=>{
  let pendingResolve:(v:any)=>void=()=>{};const f=fixture(a=>new Promise(resolve=>pendingResolve=resolve));try{
   f.create();assert.equal(f.calls.length,1);pendingResolve({});await f.settle();const job=f.repairs.list()[0];assert.equal(job.phase,'unknown');await f.restart();await f.settle();assert.equal(f.calls.length,1);assert.equal(f.create().repair.id,job.id);assert.throws(()=>f.repairs.bind({id:job.id,sessionId:'game-host:codex:original'}),/核对/);assert.throws(()=>f.repairs.resolve({id:job.id}),/核对/);f.repairs.resolve({id:job.id,confirmedNotStarted:true});assert.equal(f.repairs.list()[0].phase,'blocked');
