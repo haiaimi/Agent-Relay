@@ -49,6 +49,8 @@
 
 ## 工程组成
 
+换电脑制作资产可执行 `npm run assets:setup`、`npm run assets:doctor`、`npm run assets:demo`：自动准备固定版本 Blender、隔离 Python 依赖与 FFmpeg，实际输出源模型、GLB、材质图、预览和本机视频。完整步骤、工作室工具配置、游戏仓库与定制引擎要求见 [资产管线与换机指南](docs/asset-pipeline.md)。
+
 这是完整工程，包含电脑端工具、服务器和网站，无需另找前端仓库。
 
 | 目录 | 内容 |

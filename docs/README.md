@@ -7,6 +7,7 @@
 | 安装、登录、桌面入口与快速开始 | [项目 README](../README.md)、[English](../README.en.md) |
 | 服务器、电脑端、自启动、升级与备份 | [部署指南](deployment.md) |
 | 多职能团队、流程选择、审批、脑爆和交付 | [游戏工作室](game-studio.md) |
+| 换机安装 Blender / Python、资产制作、导出与项目管线 | [资产管线与换机](asset-pipeline.md) |
 | 本地 Agent、模型和原生会话控制 | [本地 Agent](local-agents.md) |
 | 模块职责、状态与媒体传输约定 | [架构](architecture.md) |
 | 历史、附件与浏览器缓存 | [同步机制](synchronization.md) |

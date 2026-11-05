@@ -3,8 +3,12 @@ import {existsSync,statSync,readdirSync,readFileSync} from 'node:fs';
 import {resolve,join,delimiter,isAbsolute} from 'node:path';
 import {spawnSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
-const flags={pythonPaths:[],searchRoots:[],needs:[]},names={'--project':'project','--source':'source','--blender':'blender','--python':'python','--engine':'engine','--python-path':'pythonPaths','--search-root':'searchRoots','--needs':'needs'};
+import {fileURLToPath} from 'node:url';
+const flags={pythonPaths:[],searchRoots:[],needs:[]},names={'--project':'project','--source':'source','--blender':'blender','--python':'python','--engine':'engine','--python-path':'pythonPaths','--search-root':'searchRoots','--needs':'needs','--toolchain':'toolchain'};
 for(let i=2;i<process.argv.length;i++){const key=names[process.argv[i]],value=process.argv[++i];if(!key||!value||/[\0\r\n]/.test(value))throw Error('Invalid tool inventory argument');if(Array.isArray(flags[key]))flags[key].push(...(key==='needs'?value.split(','): [value]));else flags[key]=value;}
+// Machine paths are generated locally, never copied from another host or committed.
+const localConfig=flags.toolchain?resolve(flags.toolchain):fileURLToPath(new URL('../.data/asset-tools/studio-toolchain.json',import.meta.url));
+if(flags.toolchain||existsSync(localConfig)){const cfg=JSON.parse(readFileSync(localConfig,'utf8'));for(const k of ['blender','python','engine'])flags[k]??=process.env[{blender:'BLENDER_EXE',python:'PYTHON_EXE',engine:'GODOT_EXE'}[k]]||cfg[k];if(!flags.pythonPaths.length&&flags.python===cfg.python)flags.pythonPaths.push(...(cfg.pythonPaths??[]));flags.searchRoots.push(...(cfg.searchRoots??[]));}
 const project=resolve(flags.project??process.cwd()),source=flags.source?resolve(flags.source):undefined;
 const file=p=>{try{return !!p&&statSync(p).isFile();}catch{return false;}},dir=p=>{try{return !!p&&statSync(p).isDirectory();}catch{return false;}};
 const unique=values=>[...new Set(values.filter(Boolean))],roots=unique([project,join(project,'project'),source,source&&join(source,'project'),...flags.searchRoots.map(p=>resolve(p))]);

@@ -46,6 +46,8 @@ See the [documentation index](docs/README.md), [studio guide](docs/game-studio.m
 
 ## Repository layout
 
+For asset production on a new workstation, run `npm run assets:setup`, `npm run assets:doctor`, then `npm run assets:demo`. This prepares pinned Blender, isolated Python dependencies and FFmpeg, and produces an editable model, GLB, parameter maps, preview and local video. See the [asset pipeline and workstation guide](docs/asset-pipeline.md) (Chinese); game sources and custom engine builds remain in the game repository.
+
 This repository includes the workstation tool, relay server, and website.
 
 | Directory | Purpose |

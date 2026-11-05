@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "blender": "4.5.15",
+  "python": "3.11",
+  "downloadBase": "https://mirror.blender.org/release/Blender4.5/",
+  "checksumSource": "https://mirror.blender.org/release/Blender4.5/blender-4.5.15.sha256",
+  "platforms": {
+    "win32-x64": {
+      "file": "blender-4.5.15-windows-x64.zip",
+      "sha256": "52dd02fd74877fa08e74b67d7854cf32468a232c02aaa19b6844c91285574f8d"
+    },
+    "darwin-arm64": {
+      "file": "blender-4.5.15-macos-arm64.dmg",
+      "sha256": "bfbc0bda099d1ab7aef0992a584f872f58bed9bb491210ad45f9ca071aa2e688"
+    },
+    "darwin-x64": {
+      "file": "blender-4.5.15-macos-x64.dmg",
+      "sha256": "3801a97619292a012ede0e855ee705ae872a680474845297b777254f7f21ed78"
+    },
+    "linux-x64": {
+      "file": "blender-4.5.15-linux-x64.tar.xz",
+      "sha256": "0d2b8bb2efe97e6c8eb57de6b7322f8800e1984e3125b60decca5f6771e4773e"
+    }
+  }
+}
