@@ -5,6 +5,8 @@ import type {Action} from '../shared/protocol.js';
 import type {RelayStore} from './store.js';
 import type {Studio} from './studio.js';
 
+const acknowledged=(result:any,sessionId:string)=>!!result&&!result.error&&(!result.sessionId||result.sessionId===sessionId)&&(result.ok===true||result.sessionId===sessionId);
+
 // Compatibility for connected workers whose question callbacks still use only
 // desktop IPC. The ordinary send path already owns headless resume and queueing.
 export class QuestionAnswers {
@@ -23,7 +25,7 @@ export class QuestionAnswers {
       const request=JSON.parse(String(prior.request));
       if(prior.host_id!==host||request.type!=='send'||request.sessionId!==action.sessionId||!request.text.includes(text))throw Error('这张问题卡已有不同的回答投递记录，请先核对原会话');
       if(!prior.result)throw Error('回答投递结果尚未确认，请核对原会话；不会重复发送');
-      const result=JSON.parse(String(prior.result));if(result.error)throw Error(result.error);return {...result,answerFallback:true,replyActionId:id};
+      const result=JSON.parse(String(prior.result));if(!acknowledged(result,action.sessionId!))throw Error(result.error??'回答投递记录未确认');return {...result,ok:true,answerFallback:true,replyActionId:id};
     }
     if(card.status!=='pending')throw Error('问题已回答或已关闭，请刷新原会话；不会重复投递');
     const run=this.studio.runs().find(r=>[r.planner,...r.tasks,...r.delivery?[r.delivery]:[]].some(t=>t.sessionId===action.sessionId));
@@ -34,12 +36,12 @@ export class QuestionAnswers {
       result=await this.studio.chat({id,runId:run.id,role:task.role,sessionId:action.sessionId,text});
     }else{
       const send:Action={id,type:'send',sessionId:action.sessionId,text};this.store.beginAction(id,host,send);
-      result=await this.remote(host,send);this.store.finishAction(id,result);
+      result=await this.remote(host,send);if(!acknowledged(result,action.sessionId!))throw Error('回答投递结果未确认，请核对原会话');this.store.finishAction(id,result);
     }
-    return {...result,answerFallback:true,replyActionId:id};
+    return {...result,ok:true,answerFallback:true,replyActionId:id};
   }
   confirmed(host:string,action:Action,card:QuestionCard|undefined,result:any,startedAt:number){
-    if(action.type!=='answer'||!card||card.sessionId!==action.sessionId||!result?.ok)return;
+    if(action.type!=='answer'||!card||card.sessionId!==action.sessionId||!acknowledged(result,action.sessionId!))return;
     const event={id:randomUUID(),hostId:host,sessionId:action.sessionId,type:'question.resolved' as const,at:Date.now(),data:{...card,status:'answered',answers:action.answers,delivery:result.queued?'queued':'sent'}};
     this.store.event(event);this.changed(event);
     if(!result.answerFallback){

@@ -17,7 +17,7 @@ function fixture(remote?:(host:string,action:any)=>Promise<any>){
  store.session({id:sid,hostId:'pc',provider:'codex',nativeId:sid.split(':').at(-1)!,cwd:dir,title:'Original thread',status:'idle',updatedAt:Date.now()});
  const card={id:qid,sessionId:sid,source:'async:call_original',createdAt:Date.now(),status:'pending' as const,questions:normalizeQuestions([{title:'采用哪种方案？',options:['伸缩臂','控制台']}],'async').map(q=>({...q,sourceIndex:1}))};
  store.event({id:randomUUID(),sessionId:sid,type:'question',at:Date.now(),data:card});
- const service=new QuestionAnswers(store,{runs:()=>[],noteQuestionAnswer:(...v:any[])=>notes.push(v)} as any,async(host,a)=>{calls.push(a);return remote?remote(host,a):{ok:true,sessionId:sid,queued:false};},e=>events.push(e));
+ const service=new QuestionAnswers(store,{runs:()=>[],noteQuestionAnswer:(...v:any[])=>notes.push(v)} as any,async(host,a)=>{calls.push(a);return remote?remote(host,a):{sessionId:sid};},e=>events.push(e));
  const answer=()=>({id:randomUUID(),type:'answer' as const,sessionId:sid,questionId:qid,answers:{q0:['伸缩臂']}});
  return {dir,store,sid,qid,card,calls,events,notes,service,answer,close(){store.close();rmSync(dir,{recursive:true,force:true});}};
 }
