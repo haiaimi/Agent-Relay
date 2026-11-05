@@ -164,7 +164,7 @@ export class NativeHistory {
     const session=this.sessions.get(id),path=join(this.codexHome,'thread_history_1.sqlite');if(session?.provider!=='codex'||!existsSync(path))return [];
     const db=new DatabaseSync(path,{readOnly:true});
     try{
-      const prompts=db.prepare("SELECT rollout_ordinal,item_json FROM thread_items WHERE thread_id=? AND json_array_length(item_json,'$.questions')>0 ORDER BY rollout_ordinal DESC LIMIT 20").all(session.nativeId);if(!prompts.length)return [];
+      const prompts=db.prepare("SELECT rollout_ordinal,item_json FROM thread_items WHERE thread_id=? AND json_extract(item_json,'$.type')='agentMessage' AND json_array_length(item_json,'$.questions')>0 ORDER BY rollout_ordinal DESC LIMIT 20").all(session.nativeId);if(!prompts.length)return [];
       const users=db.prepare("SELECT rollout_ordinal,item_json FROM thread_items WHERE thread_id=? AND json_extract(item_json,'$.type')='userMessage' ORDER BY rollout_ordinal DESC LIMIT 300").all(session.nativeId);
       const answered=new Map<string,Set<number>>();let lastOrdinary=-1;
       for(const row of users){const item=JSON.parse(String(row.item_json)),text=(item.content??[]).filter((c:any)=>c.type==='text').map((c:any)=>c.text).join('\n'),match=/<send_user_message_question_reply>\s*([\s\S]*?)\s*<\/send_user_message_question_reply>/.exec(text);

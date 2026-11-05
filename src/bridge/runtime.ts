@@ -476,7 +476,7 @@ export class AgentRuntime {
         else await this.refreshNativeSettings(s,true);
       }
       this.onSessions([s]);
-      if(s.provider==='codex'&&!s.managed){void this.codexDesktop.watch(s.nativeId).catch(()=>{});this.syncAsyncQuestions(s);}
+      if(s.provider==='codex'){if(!s.managed)void this.codexDesktop.watch(s.nativeId).catch(()=>{});this.syncAsyncQuestions(s);}
       if(!this.history.get(action.sessionId!)&&this.managed.has(action.sessionId!))return {messages:[],cursor:null,source:'连接程序管理的实时会话',questions:this.questions.list(s.id),questionsAsOf:Date.now()};
       return {...await this.history.page(action.sessionId!,action.cursor),questions:this.questions.list(s.id),questionsAsOf:Date.now()};
     }

@@ -87,3 +87,10 @@ test('active async question answers queue without starting another writer when t
  let starts=0;f.runtime.codex.start=async()=>{starts++;throw Error('must not start');};
  try{const page=await f.runtime.handle({id:randomUUID(),type:'history',sessionId:s.id}),card=page.questions[0],result=await f.runtime.handle({id:randomUUID(),type:'answer',sessionId:s.id,questionId:card.id,answers:{q0:['A']}});assert.equal(result.queued,true);assert.equal(f.store.queued().length,1);assert.equal(starts,0);assert.equal(f.runtime.questions.list(s.id).length,0);assert.equal(f.events.findLast(e=>e.type==='question.resolved')?.data.delivery,'queued');}finally{await f.close();}
 });
+
+
+test('managed Codex history discovers asynchronous questions without a desktop follower or a second writer',async()=>{
+ const f=fixture(),nativeId=randomUUID(),s={id:'test:codex:'+nativeId,hostId:'test',provider:'codex' as const,nativeId,cwd:f.work,status:'running' as const,title:'managed async',updatedAt:Date.now(),managed:true};let watches=0;
+ f.runtime.history.get=()=>s;f.runtime.history.list=()=>[s];f.runtime.history.page=async()=>({messages:[],cursor:null,source:'fixture'});f.runtime.history.asyncQuestions=()=>[{sourceId:'call_managed',questions:normalizeQuestions([{title:'怎么继续？',options:['沿用现有方案']}],'async')}];f.runtime.codexDesktop.watch=async()=>{watches++;};
+ try{const page=await f.runtime.handle({id:randomUUID(),type:'history',sessionId:s.id,live:true});assert.equal(page.questions.length,1);assert.equal(page.questions[0].source,'async:call_managed');assert.equal(watches,0);assert.equal(f.store.queued().length,0);}finally{await f.close();}
+});

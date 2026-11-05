@@ -100,7 +100,7 @@ export class Brainstorms{
     const transcript=this.store.sessionEvents(t.sessionId!).filter(e=>e.type==='message'&&['user','assistant'].includes(e.data.role)&&e.at<=proposal.at).map(e=>({at:e.at,role:e.data.role,text:e.data.text}));
     const brief=text(proposal.brief,9000,'提案内容')+'\n\n【来自项目组头脑风暴】\n主题：'+t.title+'\n讨论编号：'+t.id+'\n提案编号：'+proposal.id+'\n讨论参考图随需求附上，仅作为方向参考；制作环节及审批按本需求配置执行，未另行配置时沿用默认场景流程。\n\n最近讨论背景：\n'+transcript.filter(m=>m.text).slice(-8).map(m=>(m.role==='user'?'制作人：':'Claude：')+m.text).join('\n').slice(-2200);
     this.store.db.exec('BEGIN IMMEDIATE');
-    try{const run=this.studio.createRun({projectId:t.projectId,title:proposal.title,brief:brief.slice(0,12000),workflow:v.workflow??proposal.workflow,reuseReason:v.reuseReason,flowConfig,recordVideo:v.recordVideo,attachmentIds:refs.map(f=>f.id)});const result={runId:run.id,topicId:t.id,proposalId:proposal.id,at:Date.now(),proposal,transcript,referenceIds:imageIds};this.store.db.prepare('INSERT INTO brainstorm_launches VALUES(?,?,?)').run(t.id,proposal.id,JSON.stringify(result));this.store.db.exec('COMMIT');this.changed();return result;}
+    try{const run=this.studio.createRun({projectId:t.projectId,title:proposal.title,brief:brief.slice(0,12000),workflow:v.workflow??proposal.workflow,reuseReason:v.reuseReason,flowConfig,autoAnswerQuestions:v.autoAnswerQuestions,recordVideo:v.recordVideo,attachmentIds:refs.map(f=>f.id)});const result={runId:run.id,topicId:t.id,proposalId:proposal.id,at:Date.now(),proposal,transcript,referenceIds:imageIds};this.store.db.prepare('INSERT INTO brainstorm_launches VALUES(?,?,?)').run(t.id,proposal.id,JSON.stringify(result));this.store.db.exec('COMMIT');this.changed();return result;}
     catch(e){this.store.db.exec('ROLLBACK');throw e;}
   }
 }

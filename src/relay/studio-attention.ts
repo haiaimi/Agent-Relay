@@ -32,7 +32,7 @@ export class StudioAttention {
     }
     return {questions:[...questions.values()].filter(q=>['pending','unknown'].includes(q.status)&&(!q.expiresAt||q.expiresAt>Date.now())),approvals:[...approvals.values()].filter(a=>a.expiresAt>Date.now())};
   }
-  read(id:string,refresh=false){
+  read(id:string,refresh=false,discover=false){
     const {run,entries}=this.context(id);
     if(refresh)for(const entry of entries){this.failures.delete(entry.sessionId!);this.checked.delete(entry.sessionId!);}
     const pending=entries.map(entry=>({...entry,sessionId:entry.sessionId!,online:this.isOnline(entry.hostId),waiting:this.store.getSession(entry.sessionId!)?.status==='waiting',syncFailures:this.failures.get(entry.sessionId!)??0,...this.pending(entry.sessionId!)})).filter(entry=>entry.questions.length||entry.approvals.length||entry.waiting);
@@ -40,7 +40,7 @@ export class StudioAttention {
     // Schedule it in the background; a disconnected computer must not delay UI.
     for(const entry of entries){const s=this.store.getSession(entry.sessionId!)!;
       const failures=this.failures.get(s.id)??0;
-      if(this.isOnline(entry.hostId)&&failures<5&&(s.status==='waiting'||s.questionCount||!s.managed&&['running','blocked'].includes(entry.status))&&!this.syncing.has(s.id)&&Date.now()-(this.checked.get(s.id)??0)>(failures?60_000:15_000))this.sync(entry.hostId,s.id);
+      if(this.isOnline(entry.hostId)&&failures<5&&(s.status==='waiting'||s.questionCount||discover&&['running','blocked'].includes(entry.status)||!s.managed&&['running','blocked'].includes(entry.status))&&!this.syncing.has(s.id)&&Date.now()-(this.checked.get(s.id)??0)>(failures?60_000:15_000))this.sync(entry.hostId,s.id);
     }
     return {runId:run.id,checkedAt:Date.now(),refreshing:entries.some(e=>this.syncing.has(e.sessionId!)),entries:pending};
   }

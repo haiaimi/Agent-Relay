@@ -16,7 +16,7 @@ export class QuestionAnswers {
     const row=this.store.db.prepare("SELECT json FROM events WHERE session_id=? AND json_extract(json,'$.data.id')=? AND json_extract(json,'$.type') IN ('question','question.resolved') ORDER BY seq DESC LIMIT 1").get(action.sessionId!,action.questionId!);
     return row?JSON.parse(String(row.json)).data:undefined;
   }
-  async fallback(host:string,action:Action,error:unknown){
+  async fallback(host:string,action:Action,error:unknown,automatic=false){
     if(action.type!=='answer'||!missingDesktopOwner(error)||this.store.getSession(action.sessionId!)?.provider!=='codex')throw error;
     const card=this.card(action);if(!card||card.sessionId!==action.sessionId||!card.source.startsWith('async:'))throw error;
     const {text}=asyncQuestionReply(card,action.answers),id=questionReplyId(action.sessionId!,card.source);
@@ -33,7 +33,7 @@ export class QuestionAnswers {
     if(run){
       if(['accepted','cancelled'].includes(run.status))throw Error('制作需求已结束，请在交付后讨论中继续，不能重开原生产任务');
       const task=[run.planner,...run.tasks,...run.delivery?[run.delivery]:[]].find(t=>t.sessionId===action.sessionId)!;
-      result=await this.studio.chat({id,runId:run.id,role:task.role,sessionId:action.sessionId,text});
+      result=await this.studio.chat({id,runId:run.id,role:task.role,sessionId:action.sessionId,text,automatic});
     }else{
       const send:Action={id,type:'send',sessionId:action.sessionId,text};this.store.beginAction(id,host,send);
       result=await this.remote(host,send);if(!acknowledged(result,action.sessionId!))throw Error('回答投递结果未确认，请核对原会话');this.store.finishAction(id,result);
@@ -42,11 +42,11 @@ export class QuestionAnswers {
   }
   confirmed(host:string,action:Action,card:QuestionCard|undefined,result:any,startedAt:number){
     if(action.type!=='answer'||!card||card.sessionId!==action.sessionId||!acknowledged(result,action.sessionId!))return;
-    const event={id:randomUUID(),hostId:host,sessionId:action.sessionId,type:'question.resolved' as const,at:Date.now(),data:{...card,status:'answered',answers:action.answers,delivery:result.queued?'queued':'sent'}};
+    const event={id:randomUUID(),hostId:host,sessionId:action.sessionId,type:'question.resolved' as const,at:Date.now(),data:{...card,status:'answered',automatic:result.automatic===true,decisionReason:result.decisionReason,answers:action.answers,delivery:result.queued?'queued':'sent'}};
     this.store.event(event);this.changed(event);
     if(!result.answerFallback){
       const text=card.source.startsWith('async:')?asyncQuestionReply(card,action.answers).text:card.questions.map(q=>q.question+'\n'+action.answers![q.id]?.join(', ')).join('\n\n');
-      this.studio.noteQuestionAnswer(action.id,action.sessionId!,text,startedAt);
+      this.studio.noteQuestionAnswer(action.id,action.sessionId!,text,startedAt,result.automatic===true);
     }
   }
 }

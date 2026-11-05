@@ -18,8 +18,10 @@ import {ImagePreviews} from './previews.js';
 import {StudioPreviews} from './studio-previews.js';
 import {Brainstorms} from './brainstorm.js';
 import {Studio} from './studio.js';
+import {questionReplyId} from '../shared/async-answers.js';
 import {QuestionAnswers} from './question-answers.js';
 import {StudioAttention} from './studio-attention.js';
+import {StudioAutoAnswers} from './studio-auto-answers.js';
 import {RelayRepairs} from './repairs.js';
 
 interface Options { dataDir: string; phoneToken: string; bridgeToken: string; publicOrigin?: string;turn?:TurnConfig }
@@ -135,6 +137,27 @@ export function createRelay(options: Options) {
   const questionAnswers=new QuestionAnswers(store,studio,remote,event=>{const session=questionState.refresh(event.sessionId!);if(session)emit('sessions',{sessions:[session]});emit('event',event,store.latestSeq());});
   const repairs=new RelayRepairs(store,studio,remote,host=>bridges.get(host)?.readyState===WebSocket.OPEN,()=>emit('studio',{}),options.publicOrigin,uiRevision);
   const attention=new StudioAttention(store,studio,remote,event=>emit('event',event,store.latestSeq()),host=>bridges.has(host),id=>repairs.sessionsFor(id));
+  // Human and automatic replies share the same durable delivery journal.
+  async function submitAnswer(host:string,action:Action,automatic=false,reason=''){
+    const prior=store.beginAction(action.id,host,action);
+    if(!prior.fresh){if(prior.result)return prior.result;throw Error('操作已接受，结果尚未确认；不会重复执行');}
+    const card=questionAnswers.card(action),startedAt=Date.now();
+    try{
+      if(automatic&&card?.status!=='pending')throw Error('问题已回答或关闭');
+      let result:any;try{result=await remote(host,action);}catch(error){result=await questionAnswers.fallback(host,action,error,automatic);}
+      if(automatic&&result?.queued&&card?.source.startsWith('async:')){
+        // Reuse the queued answer through the established active-turn steering
+        // route. Unknown steering retains the queue and is never sent twice.
+        const steer:Action={id:randomUUID(),type:'steer',sessionId:action.sessionId,queuedId:result.replyActionId??questionReplyId(action.sessionId!,card.source)};
+        store.beginAction(steer.id,host,steer);
+        try{const receipt=await remote(host,steer);store.finishAction(steer.id,receipt);if(receipt.steered===true)result={...result,queued:false};}
+        catch(error){store.finishAction(steer.id,{error:(error as Error).message,uncertain:true});}
+      }
+      if(automatic)result={...result,automatic:true,decisionReason:reason};
+      questionAnswers.confirmed(host,action,card,result,startedAt);store.finishAction(action.id,result);return result;
+    }catch(error){store.finishAction(action.id,{error:(error as Error).message});throw error;}
+  }
+  const autoAnswers=new StudioAutoAnswers(store,studio,attention,remote,(host,action,reason)=>submitAnswer(host,action,true,reason),host=>bridges.get(host)?.readyState===WebSocket.OPEN,()=>emit('studio',{}));
   const brains=new Brainstorms(store,studio,remote,host=>bridges.get(host)?.readyState===WebSocket.OPEN,()=>emit('studio',{}),files,media);
   const server=createServer(async(req,res)=>{
     res.setHeader('Cache-Control','no-store'); res.setHeader('X-Content-Type-Options','nosniff');
@@ -320,6 +343,7 @@ export function createRelay(options: Options) {
         if(!bridges.has(host)) return json(res,409,{error:'本地电脑离线'});
         const scope=host+'|'+(action.type==='start'?'project:'+action.projectId:action.sessionId);
         files.refs(scope,action.attachmentIds);
+        if(action.type==='answer'){try{const result=await submitAnswer(host,action);return json(res,result?.error?409:200,result);}catch(error){return json(res,409,{error:(error as Error).message});}}
         const prior=store.beginAction(action.id,host,action);
         if(!prior.fresh) return json(res,prior.result ? 200 : 409,prior.result ?? {error:'操作已接受，结果尚未确认；不会重复执行'});
         try { const card=questionAnswers.card(action),startedAt=Date.now();let result:any;try{result=await remote(host,action);}catch(error){result=await questionAnswers.fallback(host,action,error);}if(result.sessionId)for(const id of action.attachmentIds??[])files.link(scope,host+'|'+result.sessionId,id);questionAnswers.confirmed(host,action,card,result,startedAt);store.finishAction(action.id,result);return json(res,200,result); }
@@ -396,5 +420,5 @@ export function createRelay(options: Options) {
     });
     ws.on('error',()=>{});
   });
-  return {server,store,studio,brains,repairs, async close(){for(const p of pending.values()){clearTimeout(p.timer);p.reject(new Error('Relay stopping'));}pending.clear();await studio.close();await repairs.close();await attention.close();for(const res of viewers)res.end();for(const ws of wss.clients)ws.terminate();wss.close();await new Promise<void>(resolve=>server.close(()=>resolve()));store.close();}};
+  return {server,store,studio,brains,repairs, async close(){for(const p of pending.values()){clearTimeout(p.timer);p.reject(new Error('Relay stopping'));}pending.clear();await autoAnswers.close();await studio.close();await repairs.close();await attention.close();for(const res of viewers)res.end();for(const ws of wss.clients)ws.terminate();wss.close();await new Promise<void>(resolve=>server.close(()=>resolve()));store.close();}};
 }

@@ -1,5 +1,5 @@
 export interface UserQuestion {id:string;header:string;question:string;options:{label:string;description:string}[];multiSelect:boolean;allowOther:boolean;secret?:boolean;sourceIndex?:number}
-export interface QuestionCard {delivery?:'queued'|'sent';id:string;sessionId:string;questions:UserQuestion[];status:'pending'|'answered'|'cancelled'|'expired'|'unknown';answers?:Record<string,string[]>;createdAt:number;expiresAt?:number;source:string}
+export interface QuestionCard {automatic?:boolean;decisionReason?:string;delivery?:'queued'|'sent';id:string;sessionId:string;questions:UserQuestion[];status:'pending'|'answered'|'cancelled'|'expired'|'unknown';answers?:Record<string,string[]>;createdAt:number;expiresAt?:number;source:string}
 export function normalizeQuestions(raw:unknown,source:'codex'|'claude'|'async'):UserQuestion[]{
   if(!Array.isArray(raw)||!raw.length||raw.length>10)throw new Error('问题格式无效');
   const questions=raw.map((q,index)=>{
