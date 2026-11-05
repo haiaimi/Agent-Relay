@@ -154,6 +154,7 @@ export function createRelay(options: Options) {
       if(!auth(req)) return json(res,401,{error:'请先登录'});
       if(req.method==='GET'&&url.pathname==='/api/studio')return json(res,200,{...studio.state(),brainstorms:brains.list()});
       if(req.method==='GET'&&url.pathname==='/api/studio/channels')return json(res,200,studio.channels(url.searchParams.get('runId')??''));
+      if(req.method==='POST'&&url.pathname==='/api/studio/chat/settings')return json(res,200,await studio.chatSettings(await body(req)));
       if(req.method==='POST'&&url.pathname==='/api/studio/brainstorm')return json(res,200,{topic:await brains.create(await body(req))});
       if(req.method==='GET'&&url.pathname==='/api/studio/brainstorm')return json(res,200,brains.detail(url.searchParams.get('topicId')??''));
       if(req.method==='POST'&&url.pathname==='/api/studio/brainstorm/send')return json(res,200,await brains.send(await body(req)));

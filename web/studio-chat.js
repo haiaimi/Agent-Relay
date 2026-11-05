@@ -1,5 +1,6 @@
 import {displayUserMessage} from './message-text.js';
 import {setupReplyKeys} from './composer.js';
+import {SettingsWrites} from './operations.js';
 import {enhanceDiagrams} from './diagrams.js';
 import {pagedConversationCache} from './conversation-cache.js';
 import {AttachmentInput} from './attachments.js';
@@ -22,6 +23,19 @@ export function studioChat({snapshot,api,refresh,roleName,notify}){
   const key=()=>runId+':'+role,context=()=>{const p=team(),r=run();return p&&r?{key:key(),target:{hostId:p.hostId,...sessionId?{sessionId}:{projectId:r.workspace?.value?.project?.id}}}:null;};
   const files=new AttachmentInput($('chat-form'),$('chat-attach'),$('chat-files'),context,m=>{$('chat-error').textContent=m||'';},{clipboardFiles});
   const action=async value=>api('actions',{id:crypto.randomUUID(),sessionId,...value});
+  const permissionNames={request:'请求批准',auto:'帮我批准',full:'完全访问'},permissionErrors=new Map();
+  const permissionKey=()=>JSON.stringify([runId,role,sessionId||'']);
+  const permissionWrites=new SettingsWrites((key,patch)=>{const [runId,role,sessionId]=JSON.parse(key);return api('studio/chat/settings',{id:crypto.randomUUID(),runId,role,...sessionId?{sessionId}:{},...patch});},()=>{if($('chat-dialog').open)renderPermissions();},(key,patch,result)=>{
+    const [targetRun,targetRole,targetSession]=JSON.parse(key),r=snapshot().state.runs.find(r=>r.id===targetRun),s=snapshot().relay.sessions.find(s=>s.id===targetSession);if(r){r.chatPermissions??={};r.chatPermissions[targetRole]=result.permissionMode;}
+    if(s)Object.assign(s,result.queued?{nextPermissionMode:result.permissionMode}:{permissionMode:result.permissionMode,nextPermissionMode:undefined,permissionLabel:undefined});permissionErrors.delete(key);
+  },(key,e)=>{permissionErrors.set(key,e.message);if(key===permissionKey())$('chat-error').textContent='权限设置未确认：'+e.message+'；请核对当前权限后重新选择。';});
+  function renderPermissions(){
+    const row=$('chat-permission-row');row.hidden=role==='team';if(row.hidden||!run())return;
+    const r=run(),p=team(),s=snapshot().relay.sessions.find(s=>s.id===sessionId),pending=permissionWrites.pending(permissionKey()),mode=pending?.permissionMode??(sessionId?s?.nextPermissionMode??s?.permissionMode:r.chatPermissions?.[role]??p.permissionMode),select=$('chat-permission'),note=$('chat-permission-note');
+    select.value=permissionNames[mode]?mode:'';select.disabled=sending||r.status==='cancelled'||selection()?.archived||r.workspace?.status!=='ready'||!snapshot().relay.hosts.some(h=>h.id===p.hostId&&h.online&&h.capabilities?.permissions)||s?.canSetPermissions===false;
+    note.textContent=permissionErrors.has(permissionKey())?'权限未确认，请重新选择':pending?'正在保存权限…':s?.nextPermissionMode?'下一轮使用'+permissionNames[s.nextPermissionMode]+'；当前'+(permissionNames[s.permissionMode]||s.permissionLabel||'权限未读取'):mode==='full'?'允许访问本机文件和网络；已有批准卡片仍需单独处理':mode==='auto'?'由 Agent 自动审查；适用于当前会话及该职能新对话':mode==='request'?'需要批准时询问；适用于当前会话及该职能新对话':s?.permissionLabel||'当前权限未读取；可选择权限模式';
+  }
+  $('chat-permission').onchange=()=>{const mode=$('chat-permission').value;if(!permissionNames[mode])return;const key=permissionKey();permissionErrors.delete(key);$('chat-error').textContent='';void permissionWrites.set(key,{permissionMode:mode}).catch(()=>{});};
   const questions=new QuestionPanel($('chat-questions'),(card,answers)=>action({type:'answer',questionId:card.id,answers}),()=>snapshot().relay.hosts.some(h=>h.id===team()?.hostId&&h.online),notify);
   function saveDraft(){drafts.set(key(),$('chat-text').value);localStorage.setItem('studio-chat-draft:'+key(),$('chat-text').value);}
   $('chat-text').oninput=()=>{saveDraft();messageId=null;};
@@ -61,10 +75,12 @@ export function studioChat({snapshot,api,refresh,roleName,notify}){
     $('chat-submit').disabled=sending||finished||!ready;$('chat-attach').disabled=sending||finished||!ready;$('chat-text').disabled=sending||finished||!ready;
     $('chat-stop').hidden=archived||!s||!['running','waiting'].includes(s.status);$('chat-full').hidden=!sessionId;$('chat-full').href='/?sessionId='+encodeURIComponent(sessionId);
     $('chat-new').disabled=sending||r.status==='cancelled'||!ready||tasks(r).some(t=>t.role===role&&['starting','running'].includes(t.status));
+    renderPermissions();
     renderContext();renderTimeline();syncView();
     const unresolved=(r.chats??[]).find(c=>c.role===role&&!c.sessionId&&c.error&&!c.resolved);const recovery=$('chat-recovery');recovery.replaceChildren();if(unresolved){$('chat-error').textContent=unresolved.error+' 请先核对完整会话，系统不会自动重发。';const used=new Set(snapshot().state.runs.flatMap(x=>[...tasks(x).map(t=>t.sessionId),...(x.chats??[]).map(c=>c.sessionId)])),candidates=snapshot().relay.sessions.filter(s=>s.hostId===p.hostId&&s.projectId===r.workspace?.value?.project?.id&&s.updatedAt>=unresolved.startedAt&&!used.has(s.id));if(candidates.length){const select=el('select');select.setAttribute('aria-label','绑定未确认的角色会话');for(const s of candidates){const o=el('option','',s.title+' · '+s.provider);o.value=s.id;select.append(o);}const bind=el('button','quiet','核对后绑定会话');bind.onclick=async()=>{try{await api('studio/command',{runId,op:'bind-chat',actionId:unresolved.actionId,sessionId:select.value});await refresh(true);}catch(e){notify(e.message);}};recovery.append(select,bind);}const dismiss=el('button','quiet','核对会话未启动');let armed=false;dismiss.onclick=async()=>{if(!armed){armed=true;dismiss.textContent='确认未启动，解除等待';return;}try{await api('studio/command',{runId,op:'resolve-chat',actionId:unresolved.actionId,confirmedNotStarted:true});await refresh(true);}catch(e){notify(e.message);}};recovery.append(dismiss);}
   }
   function renderGroupHeader(r,p){
+    $('chat-permission-row').hidden=true;
     $('chat-title').textContent=r.title+' · 团队群聊';$('chat-branch').textContent=r.workspace?.value?.branch||'正在准备独立分支';
     const finished=r.status==='cancelled',ready=r.workspace?.status==='ready',recipient=$('chat-recipient');
     const options=[['','发到群里 · 仅记录'],...p.roles.filter(a=>a.enabled).map(a=>[a.role,'请 '+roleName(a.role)+' 回应'])],sig=JSON.stringify(options);if(recipient.dataset.options!==sig){const previous=recipient.value;recipient.replaceChildren(...options.map(([id,label])=>{const o=el('option','',label);o.value=id;return o;}));recipient.value=recipient.dataset.options?previous:'director';recipient.dataset.options=sig;}
@@ -140,7 +156,7 @@ export function studioChat({snapshot,api,refresh,roleName,notify}){
   $('chat-new').onclick=()=>{if(sending)return;cache.save();saveDraft();newConversation=true;sessionId='';reset();renderHeader();sessionId='';$('chat-session').value='';$('chat-status').textContent='下一条消息将开启新的角色对话';};
   $('chat-stop').onclick=async()=>{try{await action({type:'stop'});await refresh(true);renderHeader();}catch(e){notify(e.message);}};
   $('chat-form').onsubmit=async e=>{e.preventDefault();if(sending)return;const r=run(),p=team(),content=$('chat-text').value;if(selection()?.archived)return;if(!content.trim()&&!files.count)return;const target=context(),targetRole=role,targetRun=runId,targetSession=sessionId;messageId??=crypto.randomUUID();sending=true;renderHeader();$('chat-error').textContent='';
-    try{const ids=await files.upload(target),result=await api(targetRole==='team'?'studio/group':'studio/chat',{id:messageId,runId:targetRun,...targetRole==='team'?{roles:mentionedRoles(content,p.roles,roleName,$('chat-recipient').value)}:{role:targetRole,sessionId:targetSession||undefined},text:content,attachmentIds:ids});files.clear(target.key);$('chat-text').value='';saveDraft();messageId=null;newConversation=false;sessionId=result.sessionId||'';await refresh(true);renderHeader();signature='';await load();notify(targetRole==='team'?(result.post.deliveries.some(d=>d.status!=='sent')?'群消息已保存，请核对各角色的投递状态':'群消息已保存'+(result.post.roles.length?'，已请指定角色回应':'')):result.queued?'消息已排队，可在消息旁点“立即引导”':'消息已发送');}
+    try{const key=JSON.stringify([targetRun,targetRole,targetSession||'']);await permissionWrites.wait(key);if(permissionErrors.has(key))throw Error('权限设置未确认，请先核对权限');const ids=await files.upload(target),result=await api(targetRole==='team'?'studio/group':'studio/chat',{id:messageId,runId:targetRun,...targetRole==='team'?{roles:mentionedRoles(content,p.roles,roleName,$('chat-recipient').value)}:{role:targetRole,sessionId:targetSession||undefined},text:content,attachmentIds:ids});files.clear(target.key);$('chat-text').value='';saveDraft();messageId=null;newConversation=false;sessionId=result.sessionId||'';await refresh(true);renderHeader();signature='';await load();notify(targetRole==='team'?(result.post.deliveries.some(d=>d.status!=='sent')?'群消息已保存，请核对各角色的投递状态':'群消息已保存'+(result.post.roles.length?'，已请指定角色回应':'')):result.queued?'消息已排队，可在消息旁点“立即引导”':'消息已发送');}
     catch(e){$('chat-error').textContent=e.message;}finally{sending=false;renderHeader();}
   };
   setupReplyKeys($('chat-text'),$('chat-submit'));

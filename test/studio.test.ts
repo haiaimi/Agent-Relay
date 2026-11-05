@@ -24,7 +24,7 @@ const selectedFlow=(stages:string[],approvals={})=>({template:'custom',stages,ap
 async function fixture(prepareFailure=false,inspectVisual:()=>Promise<{sha256:string}>=async()=>({sha256:'a'.repeat(64)})){
   const dir=mkdtempSync(join(tmpdir(),'relay-studio-')),store=new RelayStore(dir),actions:Action[]=[],files=new FileStore(dir,store.db);let online=true;
   store.host({id:'workstation',name:'工作电脑',capabilities:{studioWorkspaces:true},online:true,lastSeen:Date.now(),projects:[{id:'game',name:'Game',path:dir}],agents:[{id:'codex',provider:'codex',name:'Codex'},{id:'claude',provider:'claude',name:'Claude'}]});
-  const studio=new Studio(store,async(_host,action)=>{if(action.type==='prepare-workspace'){if(prepareFailure)throw Error('Git preparation failed');return {workspace:workspace(action.workspaceId!,dir)};}actions.push(action);if(action.type==='upload')return {file:action.upload!.file};if(action.type==='send'){const s=store.getSession(action.sessionId!)!;store.session({...s,status:'running'});return {ok:true,sessionId:action.sessionId,queued:s.status==='running'};}if(action.type==='stop')return {ok:true};const nativeId=randomUUID(),session:Session={id:'workstation:'+action.provider+':'+nativeId,hostId:'workstation',provider:action.provider!,nativeId,title:'工作室任务',cwd:dir,projectId:action.projectId??store.getSession(action.sessionId!)?.projectId,updatedAt:Date.now(),status:'running',managed:true};store.session(session);return {sessionId:session.id};},()=>online,()=>{},files,inspectVisual);
+  const studio=new Studio(store,async(_host,action)=>{if(action.type==='prepare-workspace'){if(prepareFailure)throw Error('Git preparation failed');return {workspace:workspace(action.workspaceId!,dir)};}actions.push(action);if(action.type==='upload')return {file:action.upload!.file};if(action.type==='set-permissions')return {ok:true,queued:false,permissionMode:action.permissionMode};if(action.type==='send'){const s=store.getSession(action.sessionId!)!;store.session({...s,status:'running'});return {ok:true,sessionId:action.sessionId,queued:s.status==='running'};}if(action.type==='stop')return {ok:true};const nativeId=randomUUID(),session:Session={id:'workstation:'+action.provider+':'+nativeId,hostId:'workstation',provider:action.provider!,nativeId,title:'工作室任务',cwd:dir,projectId:action.projectId??store.getSession(action.sessionId!)?.projectId,updatedAt:Date.now(),status:'running',managed:true};store.session(session);return {sessionId:session.id};},()=>online,()=>{},files,inspectVisual);
   const project=studio.saveProject({name:'测试团队',hostId:'workstation',projectId:'game',workspaceIndex:0,roles:roles(),permissionMode:'request',concurrency:1,reviewPlan:true});
   const run=()=>studio.runs()[0];
   const settle=async()=>{await studio.tick();await turn();await studio.tick();await turn();};
@@ -208,6 +208,40 @@ async function acceptedDiscussionFixture(){
  }catch(e){await f.close();throw e;}
 }
 const productionSnapshot=(r:any)=>JSON.stringify({status:r.status,planner:r.planner,tasks:r.tasks,delivery:r.delivery,workspace:r.workspace,workflow:r.workflow});
+
+test('studio permissions persist per role, use full access for new followups, and never change team or production settings',async()=>{
+ const f=await acceptedDiscussionFixture();try{
+  const r=f.run(),before=productionSnapshot(r),count=f.actions.length,request={id:randomUUID(),runId:r.id,role:'director',permissionMode:'full'};
+  await f.studio.chatSettings(request);assert.equal(f.actions.length,count);assert.equal(f.run().chatPermissions?.director,'full');await f.studio.chatSettings(request);assert.equal(f.actions.length,count);
+  const discussion=await f.studio.chat({id:randomUUID(),runId:r.id,role:'director',sessionId:r.delivery!.sessionId,text:'请启动现有成果'});assert.equal(f.actions.at(-1)!.permissionMode,'full');assert.equal(f.studio.projects()[0].permissionMode,'request');
+  const settings={id:randomUUID(),runId:r.id,role:'director',sessionId:discussion.sessionId,permissionMode:'request'};await f.studio.chatSettings(settings);assert.equal(f.actions.at(-1)!.type,'set-permissions');assert.equal(f.store.getSession(discussion.sessionId)!.permissionMode,'request');assert.equal(f.run().chatPermissions?.director,'request');
+  const sent=f.actions.length;await f.studio.chatSettings(settings);assert.equal(f.actions.length,sent);assert.equal(productionSnapshot(f.run()),before);
+  const group=await f.studio.groupChat({id:randomUUID(),runId:r.id,roles:['audio'],text:'讨论音频'});assert.equal(group.post.deliveries[0].status,'sent');assert.equal(f.actions.at(-1)!.permissionMode,'request');
+ }finally{await f.close();}
+});
+
+test('queued permission changes display next-turn intent without claiming current full access or approving pending tools',async()=>{
+ const f=await acceptedDiscussionFixture();try{
+  const r=f.run(),before=productionSnapshot(r),sid=r.tasks[0].sessionId!;f.store.session({...f.store.getSession(sid)!,permissionMode:'request'});
+  (f.studio as any).remote=async(_host:string,action:Action)=>{f.actions.push(action);return {ok:true,queued:true,permissionMode:action.permissionMode};};
+  const changed=await f.studio.chatSettings({id:randomUUID(),runId:r.id,role:'engineering',sessionId:sid,permissionMode:'full'});assert.equal(changed.queued,true);assert.equal(f.store.getSession(sid)!.permissionMode,'request');assert.equal(f.store.getSession(sid)!.nextPermissionMode,'full');assert.equal(f.run().chatPermissions?.engineering,'full');assert.equal(f.actions.at(-1)!.type,'set-permissions');assert.equal(f.actions.some(a=>a.type==='approve'),false);assert.equal(productionSnapshot(f.run()),before);
+ }finally{await f.close();}
+});
+
+test('permission settings reject foreign roles, invalid modes and offline updates, and retain failures without replay',async()=>{
+ const f=await acceptedDiscussionFixture();try{
+  const r=f.run(),sid=r.delivery!.sessionId!,v={id:randomUUID(),runId:r.id,role:'director',sessionId:sid,permissionMode:'full'};
+  await assert.rejects(f.studio.chatSettings({...v,role:'engineering'}),/不属于/);await assert.rejects(f.studio.chatSettings({...v,permissionMode:'admin'}),/有效/);
+  f.setOnline(false);await assert.rejects(f.studio.chatSettings(v),/离线/);assert.equal(f.run().chatPermissions?.director,undefined);f.setOnline(true);
+  let calls=0;(f.studio as any).remote=async()=>{calls++;throw Error('permission outcome unknown');};await assert.rejects(f.studio.chatSettings(v),/outcome unknown/);await assert.rejects(f.studio.chatSettings(v),/outcome unknown/);assert.equal(calls,1);assert.equal(f.run().chatPermissions?.director,undefined);
+ }finally{await f.close();}
+});
+
+test('new post-delivery conversations inherit an explicitly configured team permission instead of forcing approval mode',async()=>{
+ const f=await acceptedDiscussionFixture();try{
+  f.studio.saveProject({...f.project,reviewPlan:false,permissionMode:'full'});const r=f.run(),before=productionSnapshot(r);await f.studio.chat({id:randomUUID(),runId:r.id,role:'concept',text:'说明已有交付'});assert.equal(f.actions.at(-1)!.permissionMode,'full');assert.equal(productionSnapshot(f.run()),before);
+ }finally{await f.close();}
+});
 
 test('accepted task replies start separate followups with scoped attachments and preserve all production state',async()=>{
  const f=await acceptedDiscussionFixture();try{

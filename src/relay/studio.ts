@@ -36,6 +36,7 @@ export interface StudioProject {toolchain?:StudioToolchain;includeCaptures?:bool
 interface Artifact {path:string;description:string}
 export interface Task {resumeSessionId?:string;flowStopId?:string;id:string;title:string;role:string;brief:string;acceptance:string;dependencies:string[];status:TaskState;stage?:SceneStage;kind?:'visual-review'|'producer-review';reviewType?:'design'|'scene';reviewId?:string;approvedAt?:number;visualSnapshots?:{taskId:string;path:string;sha256:string}[];actionId?:string;sessionId?:string;startedAt?:number;finishedAt?:number;output?:string;summary?:string;artifacts?:Artifact[];checks?:string[];error?:string;feedback?:string;attempts?:{sessionId?:string;output?:string;at:number}[]}
 interface RoleChat {role:string;actionId:string;sessionId?:string;error?:string;startedAt:number;resolved?:boolean;afterDelivery?:boolean;sourceSessionId?:string}
+export interface StudioRun {chatPermissions?:Partial<Record<string,PermissionMode>>}
 export interface StudioRun {recordVideo?:boolean;autoAccepted?:boolean;id:string;projectId:string;title:string;brief:string;status:'planning'|'plan-review'|'executing'|'delivery'|'review'|'accepted'|'cancelled';paused:boolean;tasks:Task[];planner:Task;delivery?:Task;workflow?:SceneWorkflow;createdAt:number;updatedAt:number;revision:number;feedback?:string;log:{id?:string;at:number;text:string;taskId?:string;taskTitle?:string;sessionId?:string;role?:string;skip?:TaskSkip;handoff?:{id:string;role:string;title:string;summary?:string;artifacts?:Artifact[]}[]}[];attachments?:FileRef[];workspace?:{status:'queued'|'preparing'|'ready'|'blocked';actionId?:string;value?:StudioWorkspace;error?:string};chats?:RoleChat[];guidance?:{id:string;role:string;text:string;files:FileRef[];at:number;sessionId:string}[]}
 const roleIds=new Set<string>(STUDIO_ROLES.map(r=>r[0]));
 const text=(v:unknown,max:number,label:string,optional=false)=>{if(typeof v!=='string'||v.length>max||(!optional&&!v.trim()))throw Error('请填写有效的'+label);return v.trim();};
@@ -313,6 +314,26 @@ export class Studio {
   private chatBusy(r:StudioRun){return (r.chats??[]).some(c=>!c.resolved&&(!c.sessionId||['running','waiting'].includes(this.store.getSession(c.sessionId)?.status??'')||this.store.getSession(c.sessionId)?.pendingCount));}
   private groupPosts(runId:string):GroupPost[]{return this.store.db.prepare('SELECT json FROM studio_group_posts WHERE run_id=? ORDER BY at').all(runId).map(row=>JSON.parse(String(row.json)));}
   channels(runId:string){const r=this.run(runId);return studioChannels(r,this.project(r.projectId),this.store,this.groupPosts(r.id));}
+  async chatSettings(v:any){
+    const r=this.run(v.runId),p=this.project(r.projectId),assignment=p.roles.find(a=>a.role===v.role&&a.enabled);
+    if(r.status==='cancelled'||!assignment)throw Error('此需求或职能已停止接收设置');
+    this.execution(r);
+    if(typeof v.id!=='string'||!uploadId.test(v.id)||!['request','auto','full'].includes(v.permissionMode)||v.sessionId!==undefined&&(typeof v.sessionId!=='string'||!v.sessionId))throw Error('请选择有效的会话权限');
+    const owned=[...this.allTasks(r).filter(t=>t.role===v.role).map(t=>t.sessionId),...(r.chats??[]).filter(c=>c.role===v.role).map(c=>c.sessionId)];
+    if(v.sessionId&&!owned.includes(v.sessionId))throw Error('会话不属于该需求的职能');
+    if(v.sessionId&&(!this.store.getSession(v.sessionId)||this.store.getSession(v.sessionId)!.hostId!==p.hostId))throw Error('工作会话不可用');
+    if(v.sessionId&&!this.online(p.hostId))throw Error('工作电脑离线，权限未修改');
+    const intent={type:'studio-chat-settings',runId:r.id,role:v.role,sessionId:v.sessionId,permissionMode:v.permissionMode},prior=this.store.beginAction(v.id,p.hostId,intent);
+    if(!prior.fresh){if(prior.result?.error)throw Error(prior.result.error);if(prior.result)return prior.result;throw Error('权限更新结果未确认，请先核对当前会话，不会重复发送');}
+    try{
+      const result=v.sessionId?await this.remote(p.hostId,{id:v.id,type:'set-permissions',sessionId:v.sessionId,permissionMode:v.permissionMode}):{ok:true,queued:false,permissionMode:v.permissionMode};
+      if(result?.ok!==true||result.permissionMode!==v.permissionMode||typeof result.queued!=='boolean')throw Error('权限更新未确认，请核对当前会话');
+      if(v.sessionId){const current=this.store.getSession(v.sessionId)!;this.store.session({...current,...result.queued?{nextPermissionMode:v.permissionMode}:{permissionMode:v.permissionMode,nextPermissionMode:undefined,permissionLabel:undefined}});}
+      const latest=this.run(r.id);latest.chatPermissions??={};latest.chatPermissions[v.role]=v.permissionMode;
+      this.saveRun(latest,'已更新职能对话权限：'+STUDIO_ROLES.find(x=>x[0]===v.role)![1]);
+      this.store.finishAction(v.id,result);return result;
+    }catch(e){this.store.finishAction(v.id,{error:(e as Error).message});throw e;}
+  }
   group(runId:string,before?:string){const r=this.run(runId);return groupPage(groupEntries(r,this.groupPosts(r.id),this.store,id=>STUDIO_ROLES.find(x=>x[0]===id)?.[1]??id,[...r.log.filter(l=>!l.id),...this.store.db.prepare('SELECT json FROM studio_group_records WHERE run_id=? ORDER BY at').all(r.id).map(row=>JSON.parse(String(row.json)))]),before);}
   async groupChat(v:any){const job=this.groupAction(v);this.launches.add(job);try{return await job;}finally{this.launches.delete(job);}}
   private async groupAction(v:any){
@@ -369,7 +390,7 @@ export class Studio {
     const deliveryContext=afterDelivery?'\n这是已交付需求的后续讨论与本机试玩。回答制作人的追问，不修改工程源文件、已完成任务或验收记录，不重新输出制作结果或重新执行生产。明确要求的本机启动按下述试玩约定执行，不因“只读讨论”拒绝运行现有成果。需要改动时建议发起新制作需求。区分素材预览、真实游戏入口与目标设备实测，不将旧场景或展示视频当成新关卡已可玩。\n所选流程与实际交付：'+JSON.stringify({workflow:r.workflow?.selection,sourceTask:sourceTask?{id:sourceTask.id,title:sourceTask.title,summary:sourceTask.summary}:undefined,delivery:r.delivery?.summary,tasks:r.tasks.map(t=>({id:t.id,title:t.title,stage:t.stage,summary:t.summary?.slice(0,500),artifacts:t.artifacts?.slice(0,5)}))}).slice(0,6000):'';
     const instruction=(task?'\n这是制作人对本任务的补充。按补充继续制作，完成后重新输出原要求的 '+(task===r.planner?'STUDIO_PLAN':'STUDIO_RESULT')+' 结构化代码块；验收必须基于补充后的实际结果。':'')+sharedTools+deliveryContext+playtestGuidance;
     groupContext=groupContext.slice(0,Math.max(0,MAX_TEXT-body.length-r.brief.length-a.instructions.length-a.tools.length-sharedTools.length-deliveryContext.length-playtestGuidance.length-1500));
-    const action:Action=targetSessionId?{id:v.id,type:'send',sessionId:targetSessionId,text:groupContext+(body||'请查看附件。')+instruction,attachmentIds:refs.map(f=>f.id)}:{id:v.id,type:'start',projectId:execution.id,workspaceIndex:0,provider:a.provider,agentId:a.agentId,model:a.model,effort:a.effort,permissionMode:afterDelivery?'request':p.permissionMode,text:`你是游戏团队的${STUDIO_ROLES.find(x=>x[0]===v.role)![1]}，与制作人直接对话。需求：${r.title}\n${r.brief}\n独立分支：${r.workspace!.value!.branch}\n工作目录：${execution.path}\n职责：${a.instructions}\n工具：${a.tools}${sharedTools}${deliveryContext}${playtestGuidance}\n默认只读讨论，不修改工程源文件；用户明确要求的本机启动可以按上述约定执行。制作人要求改动时，请说明${afterDelivery?'需要发起新的制作需求':'需要在对应制作任务会话中提出'}，以便后续 QA 重新验证。保护已有修改，遵循工程约定，不切换源工程或主干，不提交、推送或发布。视频或其他文件使用本机工具读取，无法读取须说明。\n制作人：${groupContext}${body||'请查看附件。'}`,attachmentIds:refs.map(f=>f.id)};
+    const action:Action=targetSessionId?{id:v.id,type:'send',sessionId:targetSessionId,text:groupContext+(body||'请查看附件。')+instruction,attachmentIds:refs.map(f=>f.id)}:{id:v.id,type:'start',projectId:execution.id,workspaceIndex:0,provider:a.provider,agentId:a.agentId,model:a.model,effort:a.effort,permissionMode:r.chatPermissions?.[v.role]??p.permissionMode,text:`你是游戏团队的${STUDIO_ROLES.find(x=>x[0]===v.role)![1]}，与制作人直接对话。需求：${r.title}\n${r.brief}\n独立分支：${r.workspace!.value!.branch}\n工作目录：${execution.path}\n职责：${a.instructions}\n工具：${a.tools}${sharedTools}${deliveryContext}${playtestGuidance}\n默认只读讨论，不修改工程源文件；用户明确要求的本机启动可以按上述约定执行。制作人要求改动时，请说明${afterDelivery?'需要发起新的制作需求':'需要在对应制作任务会话中提出'}，以便后续 QA 重新验证。保护已有修改，遵循工程约定，不切换源工程或主干，不提交、推送或发布。视频或其他文件使用本机工具读取，无法读取须说明。\n制作人：${groupContext}${body||'请查看附件。'}`,attachmentIds:refs.map(f=>f.id)};
     const prior=this.store.beginAction(action.id,p.hostId,action);if(!prior.fresh){if(prior.result)return prior.result;throw Error('消息已接受，结果未确认；请核对聊天记录，不会重复发送');}
     if(task&&!['starting','running'].includes(task.status)){
       const affected=this.dependentTasks(r,[task.id]);
