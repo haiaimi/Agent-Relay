@@ -136,7 +136,7 @@ async function inspectSkip(manual=false){
     const value=await api('studio/skip-state?'+new URLSearchParams({runId:target.runId,taskId:target.taskId}),undefined,AbortSignal.timeout(12000));if(generation!==skipGeneration||!$('feedback-dialog').open)return;skipFailures=0;skipRetryAt=0;
     root.replaceChildren();const changed=value.expectedActionId!==target.expectedActionId||value.expectedFinishedAt!==target.expectedFinishedAt;
     $('feedback-submit').disabled=feedbackSubmitting||changed||!value.canSkip;
-    root.append(node('p',value.canSkip&&!changed?'fine':'error',changed?'任务执行记录已变化，请关闭窗口后重新核对。':value.canSkip?value.finishedHistory?'本任务已结束，目前仅保留历史记录，无需停止，可以确认跳过。':'执行已结束且没有未确认投递，可以确认跳过。':'请在下面处理阻挡项。停止请求确认后仍需等待状态结束，再确认跳过。'));
+    root.append(node('p',value.canSkip&&!changed?'fine':'error',changed?'任务执行记录已变化，请关闭窗口后重新核对。':value.canSkip?value.notDispatched?'本轮在预检阶段结束，执行日志确认尚未投递；没有正在执行或排队的会话，可以确认跳过。':value.finishedHistory?'本任务已结束，目前仅保留历史记录，无需停止，可以确认跳过。':'执行已结束且没有未确认投递，可以确认跳过。':'请在下面处理阻挡项。停止请求确认后仍需等待状态结束，再确认跳过。'));
     for(const b of value.blockers){
       const row=node('section','workspace-summary');row.append(node('strong','',b.title),node('p','fine',b.message));
       if(b.sessionId){const a=link('打开对应会话核对 ↗','/?sessionId='+encodeURIComponent(b.sessionId));a.target='_blank';a.rel='noopener';row.append(a);}

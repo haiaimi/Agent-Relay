@@ -87,6 +87,19 @@ test('skip inspection names a blocking role conversation and releases only after
  }finally{await f.close();}
 });
 
+test('skip distinguishes failed preflight from unknown dispatch and accepts exact send acknowledgements without a returned session ID',async()=>{
+ const f=await fixture();try{
+  f.studio.saveProject({...f.project,reviewPlan:false});f.studio.createRun({workflow:'general',projectId:f.project.id,title:'预检与回执',brief:'保留失败与原会话'});await f.settle();f.finish(f.run().planner,plan([task('hud')]));await f.settle();f.finish(f.run().tasks[0],result('blocked','保留场景质量失败'));await f.settle();
+  let r=f.run(),t=r.tasks[0],s=f.store.getSession(t.sessionId!)!;const actionId=randomUUID();t.actionId=actionId;t.startedAt=Date.now()+10;t.finishedAt=undefined;t.error='原画核对连接超时';f.store.db.prepare('UPDATE studio_runs SET json=? WHERE id=?').run(JSON.stringify(r),r.id);
+  f.store.session({...s,status:'history',updatedAt:t.startedAt-1,pendingCount:0});let state=f.studio.skipState(r.id,t.id);assert.equal(state.notDispatched,true);assert.equal(state.canSkip,true);
+  f.store.session({...s,status:'running',pendingCount:0});assert.equal(f.studio.skipState(r.id,t.id).canSkip,false);f.store.session({...s,status:'idle',pendingCount:0});
+  const request={id:actionId,type:'send',sessionId:s.id,projectId:s.projectId};f.store.beginAction(actionId,s.hostId,request);state=f.studio.skipState(r.id,t.id);assert.equal(state.notDispatched,false);assert.equal(state.canSkip,false);assert.equal(state.blockers.some(b=>b.kind==='receipt'),true);
+  f.store.finishAction(actionId,{ok:true});assert.equal(f.studio.skipState(r.id,t.id).canSkip,true);
+  for(const wrong of [{...request,sessionId:'other-session'},{...request,projectId:'other-project'},{...request,type:'start'}]){f.store.db.prepare('UPDATE actions SET request=? WHERE id=?').run(JSON.stringify(wrong),actionId);assert.equal(f.studio.skipState(r.id,t.id).canSkip,false);}f.store.db.prepare('UPDATE actions SET request=? WHERE id=?').run(JSON.stringify(request),actionId);
+  f.store.finishAction(actionId,{error:'connection timeout'});assert.equal(f.studio.skipState(r.id,t.id).canSkip,false);f.store.finishAction(actionId,{ok:true});const calls=f.actions.length;await f.studio.command(skipRequest(r,t));await f.settle();assert.equal(f.run().tasks[0].status,'skipped');assert.equal(f.run().tasks[0].output,t.output);assert.equal(f.actions.slice(calls).filter(a=>a.type==='send'||a.type==='stop').length,0);
+ }finally{await f.close();}
+});
+
 test('selected level flow runs without art/assets or hidden visual gates and routes only selected approvals',async()=>{
   const f=await fixture();try{
     const flowConfig=selectedFlow(['requirements','implementation','assembly','integration','validation'],{design:true,scene:true,final:true});

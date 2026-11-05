@@ -380,14 +380,20 @@ export class Studio {
   skipState(runId:string,taskId:string){
     const r=this.run(runId),p=this.project(r.projectId),task=r.tasks.find(t=>t.id===taskId);if(!task||task.kind||task.role==='qa')throw Error('只能核对制作任务；审批和最终 QA 不能跳过');
     const blockers:SkipBlocker[]=[],session=task.sessionId?this.store.getSession(task.sessionId):undefined;
-    let receipt:any;try{const row=task.actionId?this.store.db.prepare('SELECT result FROM actions WHERE id=?').get(task.actionId):undefined;if(row?.result)receipt=JSON.parse(String(row.result));}catch{/* An invalid receipt is unconfirmed. */}
-    const confirmedReceipt=!!receipt&&(!task.sessionId||receipt.sessionId===task.sessionId);
+    const row=task.actionId?this.store.db.prepare('SELECT host_id,request,result FROM actions WHERE id=?').get(task.actionId):undefined;
+    let receipt:any,request:any;try{if(row?.result)receipt=JSON.parse(String(row.result));if(row?.request)request=JSON.parse(String(row.request));}catch{/* An invalid receipt is unconfirmed. */}
+    // launch writes this journal BEFORE calling the bridge. A missing row on a
+    // blocked task means preflight failed before dispatch, not a lost receipt.
+    // A present row without a result remains genuinely uncertain.
+    const notDispatched=!!(task.status==='blocked'&&task.actionId&&!row);
+    const sendAcknowledged=!!(receipt?.ok===true&&!receipt.error&&request?.type==='send'&&request.sessionId===task.sessionId&&row?.host_id===p.hostId&&request.projectId===this.execution(r).id);
+    const confirmedReceipt=!!receipt&&!receipt.error&&!!task.sessionId&&(receipt.sessionId===task.sessionId||sendAcknowledged);
     // A completed native turn eventually ages out of live status detection.
     // "history" is acceptable only with its matching dispatch receipt, a real
     // completed report, no queued input and no activity newer than that report.
-    const finishedHistory=!!(session?.status==='history'&&confirmedReceipt&&task.output&&task.finishedAt&&session.updatedAt<=task.finishedAt&&!session.pendingCount);
+    const finishedHistory=!!(session?.status==='history'&&!session.pendingCount&&(confirmedReceipt&&task.output&&task.finishedAt&&session.updatedAt<=task.finishedAt||notDispatched&&session.updatedAt<=(task.startedAt??0)));
     if(['accepted','cancelled'].includes(r.status)||task.status!=='blocked')blockers.push({kind:'state',title:task.title,message:'任务状态已变化，请关闭窗口后重新查看',taskId:task.id});
-    if(task.actionId&&!confirmedReceipt)blockers.push({kind:'receipt',title:task.title,message:task.title+'：投递回执尚未确认，请打开执行记录核对或绑定会话',taskId:task.id,sessionId:task.sessionId});
+    if(task.actionId&&!confirmedReceipt&&!notDispatched)blockers.push({kind:'receipt',title:task.title,message:task.title+'：投递回执尚未确认，请打开执行记录核对或绑定会话',taskId:task.id,sessionId:task.sessionId});
     const inspectSession=(id:string|undefined,title:string,taskId?:string,allowHistory=false)=>{
       const s=id?this.store.getSession(id):undefined;
       if(!s||s.hostId!==p.hostId||s.projectId!==this.execution(r).id){blockers.push({kind:'state',title,message:title+'：会话状态或工作副本未确认，请核对执行记录',sessionId:id,taskId});return;}
@@ -406,7 +412,7 @@ export class Studio {
       else if(['running','waiting'].includes(s?.status??'')||s?.pendingCount)inspectSession(c.sessionId,title);
     }
     if(!this.dependenciesReady(r,task))blockers.push({kind:'dependency',title:task.title,message:'前置任务或本轮视觉确认尚未完成',taskId:task.id});
-    return {runId:r.id,taskId:task.id,canSkip:blockers.length===0,finishedHistory,expectedActionId:task.actionId??null,expectedFinishedAt:task.finishedAt??null,blockers};
+    return {runId:r.id,taskId:task.id,taskStatus:task.status,canSkip:blockers.length===0,finishedHistory,notDispatched,expectedActionId:task.actionId??null,expectedFinishedAt:task.finishedAt??null,blockers};
   }
   private chatBusy(r:StudioRun){return (r.chats??[]).some(c=>!c.resolved&&(!c.sessionId||['running','waiting'].includes(this.store.getSession(c.sessionId)?.status??'')||this.store.getSession(c.sessionId)?.pendingCount));}
   private groupPosts(runId:string):GroupPost[]{return this.store.db.prepare('SELECT json FROM studio_group_posts WHERE run_id=? ORDER BY at').all(runId).map(row=>JSON.parse(String(row.json)));}
