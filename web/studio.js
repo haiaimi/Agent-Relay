@@ -266,12 +266,12 @@ function renderTask(){
   const meta=node('div','task-info');meta.append(node('span','',roleName(t.role)),node('span','',t.startedAt?date(t.startedAt):''));root.append(meta);
   if(t.kind){if(t.status!=='awaiting-review')root.append(t.kind==='visual-review'?scenePanel(r,{command,openTask,feedbackFor,notify}):producerReview(r,t));else root.append(node('p','fine','查看上方本轮成果，确认或填写修改意见即可继续。'));}
   else root.append(taskDecision(r,t,s,g));
-  const guidance=guideStage(r,t);if(guidance){root.append(guidance);if(focusedGuide&&guidance.contains(focusedGuide)){focusedGuide.focus({preventScroll:true});focusedGuide.setSelectionRange(...selection);}}
+  const guidance=guideStage(r,t);
   const more=node('details','task-more'),extra=node('div','run-actions');more.append(node('summary','','更多操作'),extra);
   if(t.sessionId){extra.append(button('与该职能讨论',()=>chats.open(r.id,t.role,t.sessionId)),link('完整执行记录 ↗','/?sessionId='+encodeURIComponent(t.sessionId)));}
   if(!finished&&['blocked','done','skipped'].includes(t.status)&&!t.kind)extra.append(button('提出修改要求',()=>feedbackFor(r,t)));
   if(!finished&&t.status==='blocked'&&r.tasks.includes(t)&&t.role!=='qa'&&!t.kind)extra.append(button('跳过本步骤',()=>feedbackFor(r,t,{op:'skip-task'})));
-  extra.append(button('诊断并修复 Relay',()=>selfRepair.open(r,t)),button('刷新状态',()=>refresh(true)));root.append(more);
+  extra.append(button('诊断并修复 Relay',()=>selfRepair.open(r,t)),button('刷新状态',()=>refresh(true)));root.append(more);if(guidance){const supplement=node('details','task-section');supplement.append(node('summary','','补充本阶段要求'),guidance);more.append(supplement);if(focusedGuide&&guidance.contains(focusedGuide)){more.open=true;supplement.open=true;focusedGuide.focus({preventScroll:true});focusedGuide.setSelectionRange(...selection);}}
   root.append(deliveryMedia(r,t));
   const progress=node('details','task-section');progress.append(node('summary','','其他任务与进度'),activityPanel(r,t));more.append(progress);
   const records=node('details','task-section task-records');records.append(node('summary','','任务说明与执行记录'));more.append(records);
