@@ -1,5 +1,17 @@
 const names={planning:'需求拆解中','plan-review':'待确认计划',executing:'制作中',delivery:'整理交付中',review:'待你验收',accepted:'已验收',cancelled:'已取消',queued:'等待前置',starting:'正在启动',running:'进行中',done:'已完成',skipped:'制作人已跳过',blocked:'待处理','awaiting-review':'待确认原画'};
 const terminal=r=>['accepted','cancelled'].includes(r.status);
+export function studioSessionSignature(state,relay){
+  const ids=new Set(state.runs.flatMap(r=>[r.planner,...r.tasks,r.delivery,...(r.chats??[])].filter(Boolean).map(t=>t.sessionId)).filter(Boolean));
+  return relay.sessions.filter(s=>ids.has(s.id)).map(s=>[s.id,s.status,s.questionCount||0,s.pendingCount||0,s.canStop]);
+}
+export function studioRunActivity(r,relay){
+  const sessions=new Map(relay.sessions.map(s=>[s.id,s])),all=[r.planner,...r.tasks,r.delivery].filter(Boolean);
+  const active=all.filter(t=>['starting','running'].includes(t.status)),blocked=all.filter(t=>t.status==='blocked'),approvals=all.filter(t=>t.status==='awaiting-review'),queued=all.filter(t=>t.status==='queued');
+  const targets=terminal(r)?[]:[...active,...blocked,...approvals];
+  const headline=terminal(r)?r.autoAccepted?'已交付':names[r.status]:active.length?'当前正在推进：'+active.map(t=>t.title).join('；'):r.paused?'已暂停后续分发':blocked.length?'流程等待处理：'+blocked.map(t=>t.title).join('；'):approvals.length?'等待制作人确认：'+approvals.map(t=>t.title).join('；'):r.status==='plan-review'?'等待制作人确认计划':r.status==='review'?'等待制作人验收':queued.length?'等待后续任务分发':'正在整理交付状态';
+  const items=targets.map(t=>{const s=sessions.get(t.sessionId),waiting=!!s?.questionCount||s?.status==='waiting';return {id:t.id,title:t.title,role:t.role,status:t.status,label:waiting?'等待你回答 / 确认':t.status==='starting'?'正在核对原画 / 准备投递':t.status==='running'&&['idle','history','failed','interrupted'].includes(s?.status)?'正在核对执行结果':t.checkpoint?'待续做':t.kind==='producer-review'&&t.status==='awaiting-review'?'待制作人审批':names[t.status]||t.status};});
+  return {headline,items,active:active.map(t=>t.id),blocked:blocked.map(t=>t.id),paused:!!r.paused,terminal:terminal(r)};
+}
 export function studioProgress(state,relay,projectId,activeRun,activeTask){
   const roles=new Map(state.roles.map(r=>[r.id,r.name])),sessions=new Map(relay.sessions.map(s=>[s.id,s]));
   const runs=state.runs.filter(r=>r.projectId===projectId).map(r=>{
