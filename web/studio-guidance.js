@@ -1,5 +1,5 @@
 // Presentation only: recommendations do not approve, skip or change task state.
-export function taskGuidance(task,session,{online=true,syncError='',othersRunning=false,pendingDependencies=[]}={}){
+export function taskGuidance(task,session,{online=true,syncError='',othersRunning=false,pendingDependencies=[],automatic=false}={}){
  const reason=task.error||task.checkpoint?.reason||task.blockers?.map(b=>b.details).filter(Boolean).join('\n')||'';
  const result=(label,next,action='',button='',why=reason)=>({label,why,next,action,button});
  if(syncError)return result('状态暂未同步','现有记录已保留。先核对最新状态，再执行操作。','refresh','核对最新状态',syncError);
@@ -12,6 +12,9 @@ export function taskGuidance(task,session,{online=true,syncError='',othersRunnin
  if(task.status!=='blocked')return result('正在核对进度','进度会自动更新。');
  if(pendingDependencies.length)return result('请先完成前置步骤','先处理“'+pendingDependencies.map(t=>t.title||t.id).join('、')+'”，完成后才能继续本步骤。','dependency','处理前置步骤');
  if(othersRunning)return result('等待当前工作结束','其他任务或职能对话仍在执行，结束后再继续本步骤。','active','查看正在进行的工作');
+ if(automatic&&!task.kind&&task.sessionId&&(task.finishedAt&&!task.checkpoint&&session?.status==='idle'||task.autoFollowup&&['idle','failed','interrupted'].includes(session?.status))){
+  const f=task.autoFollowup;return result(f?.phase==='checking'?'正在核对原会话':f?.phase==='unavailable'?'连接恢复后自动补做':'Agent 将自动补做未完成项',f?.note||'无需点击继续。系统会交回原 Agent 修复或按最新指引记录延期项，完成后继续后续流程。');
+ }
  if(task.checkpoint)return result('上次工作已中断','断点和已有成果已保存，点击后接着未完成的部分做。','resume','继续上次工作');
  if(!task.sessionId||session?.status==='history')return result('任务启动或执行状态需核对','先检查投递回执与流程状态，避免重复启动任务。','repair','诊断并修复流程');
  if(/STUDIO_PLAN|职能与所选阶段不匹配|计划.*(?:校验|无效)/i.test(reason))return result('制作计划需要修正','让统筹修正拆解格式或依赖，保留已有工程分析与所选流程。','recheck','请统筹修正计划');

@@ -22,6 +22,7 @@ import {questionReplyId} from '../shared/async-answers.js';
 import {QuestionAnswers} from './question-answers.js';
 import {StudioAttention} from './studio-attention.js';
 import {StudioAutoAnswers} from './studio-auto-answers.js';
+import {StudioFollowups} from './studio-followups.js';
 import {RelayRepairs} from './repairs.js';
 
 interface Options { dataDir: string; phoneToken: string; bridgeToken: string; publicOrigin?: string;turn?:TurnConfig }
@@ -158,6 +159,7 @@ export function createRelay(options: Options) {
     }catch(error){store.finishAction(action.id,{error:(error as Error).message});throw error;}
   }
   const autoAnswers=new StudioAutoAnswers(store,studio,attention,remote,(host,action,reason)=>submitAnswer(host,action,true,reason),host=>bridges.get(host)?.readyState===WebSocket.OPEN,()=>emit('studio',{}));
+  const followups=new StudioFollowups(store,studio,remote,host=>bridges.get(host)?.readyState===WebSocket.OPEN);
   const brains=new Brainstorms(store,studio,remote,host=>bridges.get(host)?.readyState===WebSocket.OPEN,()=>emit('studio',{}),files,media);
   const server=createServer(async(req,res)=>{
     res.setHeader('Cache-Control','no-store'); res.setHeader('X-Content-Type-Options','nosniff');
@@ -420,5 +422,5 @@ export function createRelay(options: Options) {
     });
     ws.on('error',()=>{});
   });
-  return {server,store,studio,brains,repairs, async close(){for(const p of pending.values()){clearTimeout(p.timer);p.reject(new Error('Relay stopping'));}pending.clear();await autoAnswers.close();await studio.close();await repairs.close();await attention.close();for(const res of viewers)res.end();for(const ws of wss.clients)ws.terminate();wss.close();await new Promise<void>(resolve=>server.close(()=>resolve()));store.close();}};
+  return {server,store,studio,brains,repairs, async close(){for(const p of pending.values()){clearTimeout(p.timer);p.reject(new Error('Relay stopping'));}pending.clear();await autoAnswers.close();await followups.close();await studio.close();await repairs.close();await attention.close();for(const res of viewers)res.end();for(const ws of wss.clients)ws.terminate();wss.close();await new Promise<void>(resolve=>server.close(()=>resolve()));store.close();}};
 }

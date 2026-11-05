@@ -1,3 +1,4 @@
+import {StudioFollowups} from '../src/relay/studio-followups.js';
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {mkdtempSync,rmSync} from 'node:fs';
@@ -770,4 +771,19 @@ test('a blocked deliverable rechecks the same session with shared tools and pres
     await assert.rejects(f.studio.command({runId:f.run().id,op:'recheck-task',taskId:'assets'}));assert.equal(f.actions.filter(a=>a.type==='send'&&a.sessionId===session).length,1);
     f.finish(f.run().tasks[1],result());await f.settle();assert.equal(f.run().tasks[1].status,'done');assert.deepEqual(f.run().tasks[1].blockers,[]);
   }finally{await f.close();}
+});
+
+
+test('autonomous repair resumes the exact original task and a scoped deferral unlocks video without claiming GI passed',async()=>{
+ const f=await fixture();let now=Date.now();let followups:StudioFollowups|undefined;
+ try{
+  f.studio.saveProject({...f.project,reviewPlan:false});f.studio.createRun({workflow:'general',projectId:f.project.id,title:'角色与3C',brief:'优先角色与3C，GI相关的可以先放一放'});await f.settle();
+  f.finish(f.run().planner,plan([task('code'),task('video',['code'])]));await f.settle();const sid=f.run().tasks[0].sessionId;
+  f.finish(f.run().tasks[0],result('blocked','角色流程55/55通过；GI A/B未通过但已延期'));await f.settle();const old=f.run().tasks[0],output=old.output;
+  followups=new StudioFollowups(f.store,f.studio,async()=>({questions:[],questionsAsOf:now}),()=>true,()=>now,false);
+  await followups.tick();now+=3000;await followups.tick();await turn();await f.settle();
+  let t=f.run().tasks[0];assert.equal(t.status,'running');assert.equal(t.sessionId,sid);assert.match(f.actions.at(-1)!.text!,/自动补做/);assert.equal(t.attempts!.at(-1)!.output,output);
+  f.finish(t,'```STUDIO_RESULT\n'+JSON.stringify({outcome:'done',summary:'角色55/55通过；GI保留失败并按范围延期',checks:['角色55/55：PASS','GI A/B：FAIL，按制作人范围延期，未认定通过'],artifacts:[{path:'report.md',description:'失败证据与范围'}],deferred:[{code:'GI_AB',details:'A/B仍未通过，保留报告，随GI专项延期',basis:'GI相关的可以先放一放'}]})+'\n```');await f.settle();
+  t=f.run().tasks[0];assert.equal(t.status,'done');assert.equal(t.deferred![0].code,'GI_AB');assert.match(t.checks![1],/FAIL/);assert.equal(f.run().tasks[1].status,'running');assert.match(f.actions.at(-1)!.text!,/本轮已按制作人范围延期/);assert.notEqual(f.run().status,'accepted');
+ }finally{await followups?.close();await f.close();}
 });

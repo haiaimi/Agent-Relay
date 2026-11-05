@@ -30,3 +30,11 @@ test('tool availability is not mistaken for a missing environment, and malformed
  assert.equal(taskGuidance({...t,error:'未收到有效 STUDIO_RESULT'},{status:'idle'}).button,'请 Agent 补齐交付结果');
  assert.equal(taskGuidance({...t,role:'director',error:'职能与所选阶段不匹配'},{status:'idle'}).button,'请统筹修正计划');
 });
+
+
+test('automatic followups remove the routine continue button while keeping explicit approval actions',()=>{
+ const t={status:'blocked',sessionId:'s',finishedAt:1,error:'GI 延期，核心流程完成',autoFollowup:{phase:'scheduled',note:'自动交回原 Agent'}};
+ const g=taskGuidance(t,{status:'idle'},{automatic:true});assert.equal(g.action,'');assert.equal(g.button,'');assert.match(g.label,/自动补做/);
+ assert.equal(taskGuidance({...t,status:'awaiting-review',kind:'producer-review'},{status:'idle'},{automatic:true}).action,'attention');
+ assert.equal(taskGuidance(t,{status:'idle'},{automatic:false}).action,'recheck');
+});

@@ -13,7 +13,7 @@ test('studio sidebar scopes progress to the selected team and carries real role/
 test('studio sidebar exposes questions and checkpoints without claiming a blocked task is running; terminal runs remain terminal',()=>{
   const r:any={id:'run',projectId:'p',title:'Prototype',status:'executing',planner:{id:'plan',role:'director',title:'Plan',status:'done'},tasks:[{id:'code',role:'engineering',title:'Gameplay',status:'running',sessionId:'s'},{id:'qa',role:'qa',title:'QA',status:'blocked',checkpoint:{sessionId:'q'}}]};
   const state={roles:[],projects:[{id:'p',name:'P'}],runs:[r]},relay={sessions:[{id:'s',status:'waiting',questionCount:1}]};
-  let value=studioProgress(state,relay,'p','run','code');assert.equal(value.runs[0].tasks[0].label,'等待你回答');assert.equal(value.runs[0].tasks[1].label,'上次工作已中断');assert.equal(value.activeTask,'code');
+  let value=studioProgress(state,relay,'p','run','code');assert.equal(value.runs[0].tasks[0].label,'团队自动处理问题');assert.equal(value.runs[0].tasks[1].label,'上次工作已中断');assert.equal(value.activeTask,'code');
   r.paused=true;value=studioProgress(state,relay,'p');assert.equal(value.runs[0].label,'已暂停');
   r.paused=false;r.status='accepted';value=studioProgress(state,relay,'p');assert.equal(value.runs[0].label,'已验收');assert.equal(value.runs[0].attention,false);assert.equal(value.activeRun,undefined);
   assert.equal(studioProgress(state,relay,'missing').runs.length,0);
@@ -33,4 +33,12 @@ test('normal running to idle and queued input changes invalidate studio presenta
  const before=JSON.stringify(studioSessionSignature(state,relay));relay.sessions[0].status='idle';assert.notEqual(JSON.stringify(studioSessionSignature(state,relay)),before);
  const idle=JSON.stringify(studioSessionSignature(state,relay));relay.sessions[2].status='failed';assert.equal(JSON.stringify(studioSessionSignature(state,relay)),idle);
  (relay.sessions[1] as any).pendingCount=1;assert.notEqual(JSON.stringify(studioSessionSignature(state,relay)),idle);
+});
+
+
+test('automatic technical followups are progress, while selected producer reviews still require attention',()=>{
+ const r:any={id:'r',projectId:'p',status:'executing',planner:{id:'plan',status:'done'},tasks:[{id:'code',title:'集成',role:'engineering',status:'blocked',sessionId:'s',finishedAt:1,autoFollowup:{phase:'scheduled',round:1,note:'自动补做'}}]};
+ const state={roles:[],projects:[{id:'p'}],runs:[r]},relay={sessions:[{id:'s',status:'idle'}]};let v=studioProgress(state,relay,'p');assert.equal(v.runs[0].attention,false);assert.equal(v.runs[0].label,'自动补做中');assert.match(studioRunActivity(r,relay).headline,/自动补做/);
+ r.tasks=[{id:'gate',kind:'producer-review',status:'awaiting-review'}];v=studioProgress(state,relay,'p');assert.equal(v.runs[0].attention,true);assert.equal(v.runs[0].label,'待你处理');
+ r.tasks=[{id:'s',status:'running',sessionId:'s'}];r.autoAnswerQuestions=false;assert.equal(studioProgress(state,{sessions:[{id:'s',questionCount:1,status:'waiting'}]},'p').runs[0].tasks[0].label,'等待确认操作');
 });

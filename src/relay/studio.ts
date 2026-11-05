@@ -1,3 +1,4 @@
+import {deferredChecks,followupInstructions,type TaskFollowup,type DeferredCheck} from './studio-followups.js';
 import {autonomyInstructions} from './studio-autonomy.js';
 import {withShowcase,videoPath} from './studio-showcase.js';
 import {normalizeProductionFlow,productionFlowInstructions,productionRoleIds,ProductionPlanError} from './studio-flow.js';
@@ -34,6 +35,7 @@ type TaskState='queued'|'starting'|'running'|'done'|'blocked'|'skipped'|'cancell
 interface TaskSkip {at:number;reason:string;previousStatus:'blocked';summary?:string;error?:string;blockers?:StudioBlocker[]}
 // A producer waiver releases dependencies; it never changes the recorded verification result.
 const released=(t:Task)=>t.status==='done'||t.status==='skipped'&&!!t.skip;
+export interface Task {autoFollowup?:TaskFollowup;deferred?:DeferredCheck[]}
 export interface Task {skip?:TaskSkip;planRepairs?:number;showcase?:boolean}
 export interface Task {recovery?:StudioRecovery}
 export interface Task {preflightRetry?:PreflightRetry}
@@ -183,6 +185,7 @@ export class Studio {
     }
   }
   recordAutomaticAnswer(runId:string,taskId:string,note:string){const r=this.run(runId),t=this.allTasks(r).find(t=>t.id===taskId);this.saveRun(r,'团队自动决策：'+note,t);}
+  noteAutomaticFollowup(runId:string,taskId:string,state:TaskFollowup){const r=this.run(runId),t=this.allTasks(r).find(t=>t.id===taskId);if(!t)return;t.autoFollowup=state;this.saveRun(r,'团队自动补做（第 '+state.round+' 轮）：'+state.note,t);}
   private recovering=new Set<string>();
   private recoverPreflight(r:StudioRun,t:Task){
     // Every task start/send is preceded by beginAction. Never repeat an action
@@ -259,7 +262,7 @@ export class Studio {
     return {hostId:p.hostId,sessionId:t.sessionId,path:artifact.path};
   }
   private resetTask(t:Task,feedback?:string){
-    t.checkpoint=undefined;t.blockers=undefined;t.skip=undefined;t.recovery=undefined;
+    t.checkpoint=undefined;t.blockers=undefined;t.skip=undefined;t.recovery=undefined;t.autoFollowup=undefined;t.deferred=undefined;
     t.attempts=[...(t.attempts??[]),{sessionId:t.sessionId,output:t.output,at:Date.now()}];
     Object.assign(t,{status:'queued',preflightRetry:undefined,actionId:undefined,sessionId:undefined,output:undefined,summary:undefined,artifacts:undefined,checks:undefined,error:undefined,finishedAt:undefined,reviewId:undefined,approvedAt:undefined,visualSnapshots:undefined,feedback});
   }
@@ -354,6 +357,7 @@ export class Studio {
     }
     if(v.op==='upgrade-scene-flow'){const pending=this.flowUpgrades.get(r.id);if(pending)return pending;const job=this.upgradeScene(r,p).finally(()=>this.flowUpgrades.delete(r.id));this.flowUpgrades.set(r.id,job);return job;}
     if(v.op==='recheck-task'){
+      if(v.automatic&&(r.paused||r.autoAnswerQuestions===false||task?.actionId!==v.expectedActionId||(task?.finishedAt??null)!==v.expectedFinishedAt||(task?.checkpoint?.at??null)!==v.expectedCheckpointAt))throw Error('自动补做条件或本轮执行记录已变化，未重复投递');
       if(!task||task.kind||task.status!=='blocked'||!task.sessionId)throw Error('请选择已阻断且已绑定会话的职能任务');
       if(!this.online(p.hostId)||!this.dependenciesReady(r,task))throw Error('请先完成前置任务、制作人审批并确认电脑在线');
       const session=this.store.getSession(task.sessionId),receipt=task.actionId?this.store.db.prepare('SELECT result FROM actions WHERE id=?').get(task.actionId):undefined;
@@ -361,8 +365,8 @@ export class Studio {
       if(this.chatBusy(r)||this.allTasks(r).some(t=>['starting','running'].includes(t.status)))throw Error('请等待当前任务和角色对话结束后复核');
       task.attempts=[...(task.attempts??[]),{sessionId:task.sessionId,output:task.output,at:Date.now()}];
       task.resumeSessionId=task.sessionId;task.status='queued';task.actionId=undefined;task.error=undefined;task.finishedAt=undefined;
-      task.feedback=(task===r.planner?'计划校验修正：沿用原会话的工程分析，只修正任务拆解。严格遵守制作人所选阶段、职能对应和审批设置；删除未选阶段的任务并修正依赖，不能把场景组装或集成校验改标为资产生产来绕过范围。重新输出完整 STUDIO_PLAN，不执行制作、不修改工程。':'技术阻断复核：先读取团队最新工具配置和原检查报告，在同一工作副本与原会话只补做未完成步骤。区分不适用项与硬阻断；核对最新上游程序交付，不以旧规格快照覆盖合法更新。未解决的质量或构建来源门禁仍保持 blocked。')+(v.feedback?text(v.feedback,2000,'复核说明'):'');
-      r.paused=false;this.saveRun(r,task===r.planner?'在原统筹会话修正计划，保留工程分析与原流程选择':'在原会话复核技术阻断，保留已有前置成果与视觉批准',task);void this.tick();return this.run(r.id);
+      task.feedback=(task===r.planner?'计划校验修正：沿用原会话的工程分析，只修正任务拆解。严格遵守制作人所选阶段、职能对应和审批设置；删除未选阶段的任务并修正依赖，不能把场景组装或集成校验改标为资产生产来绕过范围。重新输出完整 STUDIO_PLAN，不执行制作、不修改工程。':(v.automatic?'自动补做：按最新制作人范围处理。必需项失败自行修复；已明确延期项引用原指引记录 deferred 并保留证据，不再作为当前门禁，不声称通过。':'技术阻断复核：')+'先读取团队最新工具配置和原检查报告，在同一工作副本与原会话只补做未完成步骤。区分不适用项与硬阻断；核对最新上游程序交付，不以旧规格快照覆盖合法更新。本轮仍必需且未解决的质量或构建来源门禁保持 blocked，已按制作人范围延期的项不能重新加作当前门禁。')+(v.feedback?text(v.feedback,2000,'复核说明'):'');
+      r.paused=false;this.saveRun(r,v.automatic?'自动交回原 Agent 补做未完成项，保留前置成果与审批':task===r.planner?'在原统筹会话修正计划，保留工程分析与原流程选择':'在原会话复核技术阻断，保留已有前置成果与视觉批准',task);void this.tick();return this.run(r.id);
     }
     else if(v.op==='continue-task'||v.op==='continue-run'){
       if(!this.online(p.hostId))throw Error('工作电脑离线，断点已保留，请上线后继续');
@@ -658,7 +662,7 @@ export class Studio {
     const contextNotes=`独立需求分支：${r.workspace!.value!.branch}\n当前工作副本：${this.execution(r).path}。源工程 ${r.workspace!.value!.sourcePath} 只用于识别，不在源目录执行或修改文件。任务说明中若提到源工程绝对路径，必须映射到当前工作副本；引擎子模块也使用副本内的 engine 目录。禁止切换或修改源工程 / 主干。\n制作人参考附件：${(r.attachments??[]).map(f=>f.name).join('、')||'无'}。图片随输入提供；视频和其他文件通过输入附带的本机路径读取，视频可用已有工具抽帧；工具不可用时明确报告，不能声称已经观看。\n团队群聊补充：\n${this.groupPosts(r.id).slice(-8).map(m=>'制作人 @'+m.roles.join(',')+': '+m.text+' [附件 '+m.files.map(f=>f.name).join(',')+']').join('\n').slice(-2500)}\n后续制作人补充：\n${(r.guidance??[]).slice(-12).map(g=>(g.automatic?'团队自动决策 ':'制作人 ')+g.role+': '+g.text+' [附件 '+g.files.map(f=>f.name).join(',')+']').join('\n').slice(r.workflow?.kind==='scene'?-3000:-5000)}\n`;
     const resumeNote=t.resumeSessionId?['继续同一个任务、同一份工程与已有实现，从原代码续做，不另起一套玩法。先检查原会话记录、已有文件与验证结果，从未完成的步骤继续；不得重跑已完成的前置任务，也不得跳过制作人审批。','断点前的公开执行记录（可能不完整，须核对工程）：',(t.output??'').slice(-5000),''].join('\n'):'';
     const handoffNote=!t.resumeSessionId&&t.recovery?.handoff?`这是模型断连后的新会话接力，不是重做。原会话：${t.recovery.handoff.sessionId}。沿用本需求 worktree、分支、职责和已批准方向。先检查已有文件与日志，只继续未完成步骤；未知工具结果先核实，不重复启动进程、导出或发布，不重跑前置任务、不跳过审批。\n${t.recovery.handoff.context}\n`:'';
-    const common=`${r.autoAnswerQuestions!==false?autonomyInstructions:''}${renderingInstructions}${handoffNote}${resumeNote}${contextNotes}${continuationInstructions(r.continuation)}${toolchainInstructions(p.toolchain,this.execution(r).path,r.workspace!.value!.sourcePath)}${sceneTaskInstructions(t,r.workflow)}【${role[1]}】${r.title} / ${t.title}\n你是游戏团队的${role[1]}。制作人需求：\n${r.title}\n${t.resumeSessionId?'制作人原始需求沿用本会话开头的完整说明；结合以下最新补充与已有工程续做。':r.brief}\n\n职能职责：${role[2]}\n补充说明：${a.instructions||'无'}\n本机工具 / 引擎 / DCC：${a.tools||'自行检查工程和已有工具；工具缺失必须报告，不得虚构生成或验收结果。'}\n工具在工作电脑后台执行。遵循工程约定，保护已有修改，不提交、推送或发布，除非制作人明确要求。所有职能共享当前工程；并发时只修改分配给自己的文件，发现冲突立即报告 blocked。将可持久化交付物保存到工程内，文档优先 .studio/${r.id}/${t.id}/，实际游戏资源遵循工程目录。\n${r.feedback?'制作人本轮返工意见（按本任务相关项执行，优先于旧任务说明中的冲突限制）：'+r.feedback+'\n':''}${t.feedback?'返工要求：'+t.feedback+'\n':''}`;
+    const common=`${r.autoAnswerQuestions!==false?autonomyInstructions+followupInstructions:''}${renderingInstructions}${handoffNote}${resumeNote}${contextNotes}${r.tasks.some(x=>x.deferred?.length)?'本轮已按制作人范围延期的检查（不是通过，保留证据，不重新作为当前门禁）：'+JSON.stringify(r.tasks.filter(x=>x.deferred?.length).map(x=>({id:x.id,deferred:x.deferred}))).slice(-5000)+'\n':''}${continuationInstructions(r.continuation)}${toolchainInstructions(p.toolchain,this.execution(r).path,r.workspace!.value!.sourcePath)}${sceneTaskInstructions(t,r.workflow)}【${role[1]}】${r.title} / ${t.title}\n你是游戏团队的${role[1]}。制作人需求：\n${r.title}\n${t.resumeSessionId?'制作人原始需求沿用本会话开头的完整说明；结合以下最新补充与已有工程续做。':r.brief}\n\n职能职责：${role[2]}\n补充说明：${a.instructions||'无'}\n本机工具 / 引擎 / DCC：${a.tools||'自行检查工程和已有工具；工具缺失必须报告，不得虚构生成或验收结果。'}\n工具在工作电脑后台执行。遵循工程约定，保护已有修改，不提交、推送或发布，除非制作人明确要求。所有职能共享当前工程；并发时只修改分配给自己的文件，发现冲突立即报告 blocked。将可持久化交付物保存到工程内，文档优先 .studio/${r.id}/${t.id}/，实际游戏资源遵循工程目录。\n${r.feedback?'制作人本轮返工意见（按本任务相关项执行，优先于旧任务说明中的冲突限制）：'+r.feedback+'\n':''}${t.feedback?'返工要求：'+t.feedback+'\n':''}`;
     const scenePlan=r.workflow?.selection?productionFlowInstructions(r.workflow.selection):r.workflow?.kind==='scene'?`场景生产流程为强制约束：玩法与 LD 设计 requirements → 原画 concept → 制作人确认（系统节点）→ 资产规格 asset-spec → ${r.workflow.assetMode==='new'?'资产生产 assets → ':''}LA 正式搭建 assembly → 布光效果与程序集成 integration → QA。玩法策划与 LD 必须先完成 requirements 设计文档和布局，原画依赖这两项；不安排独立玩法原型制作。制作人确认后再做数值 balance 和程序 implementation；玩法实现统一交给程序，复用现有代码，只做一套。最终 integration 只接入和验证已有实现，不重复开发。每个任务明确 stage。角色匹配：requirements 玩法/LD/系统；balance 数值；implementation 程序；concept 原画；asset-spec 原画/模型/技术美术；assets 模型；assembly 场景美术；integration 程序/技术美术/UI/音频。原画至少交付一张实际存在的 PNG/JPEG/WebP/GIF 工程内图片供制作人查看；工具缺失必须 blocked，禁止用文字假装产图。不要输出人工确认任务，系统自动插入；系统会补齐缺失的必要制作阶段并校验依赖。${r.workflow.assetMode==='reuse'?'制作人指定复用范围：'+r.workflow.reuseReason+'，只核对已有视觉、编资产清单和搭建，不安排新资产生产。':'这次需要新场景 / 新资产，不能自行以复用为由跳过原画、确认与资产生产。'}\n`:'通用任务仅做代码、配置或讨论；涉及正式场景或美术资产生产时需要场景流程。\n';
     const exampleStage=r.workflow?.selection?.stages[0]??'requirements',exampleRole=r.workflow?.selection?productionRoleIds({...r.workflow.selection,stages:[r.workflow.selection.stages[0]]}).find(id=>p.roles.some(a=>a.enabled&&a.role===id)):'gameplay';
     if(t.id==='studio-plan'){const instructions=`${scenePlan}\n你现在只做只读分析和任务规划，不改动工程。${r.recordVideo?'系统会在制作末尾安排成果展示视频，不要重复输出录制任务。':''}可用职能：${p.roles.filter(a=>a.enabled&&a.role!=='director'&&(!r.workflow?.selection||productionRoleIds(r.workflow.selection).includes(a.role))).map(a=>a.role+' ('+STUDIO_ROLES.find(r=>r[0]===a.role)![1]+')').join(', ')}。按需求选择必要职能，不要为了凑人数安排无关工作。把文件责任写入 brief；同文件写入必须有依赖。${r.workflow?.selection?(r.workflow.selection.stages.includes('validation')?'QA 只安排在选定的 validation 阶段，不重复追加。':'制作人未选 QA，不安排或追加 QA 任务。'):'系统会追加最终独立 QA 任务。'}最后只输出一个 JSON 代码块：\n\`\`\`STUDIO_PLAN\n${JSON.stringify({tasks:[{id:"task-1",title:"任务名",role:exampleRole,stage:exampleStage,brief:"具体工作与文件责任",acceptance:"可检查的验收标准",dependencies:[]}]})}\n\`\`\``;return common.slice(0,Math.max(0,MAX_TEXT-instructions.length))+instructions;}
@@ -704,7 +708,7 @@ export class Studio {
     try{
       if(t===r.planner){r.tasks=parseStudioPlan(output,this.project(r.projectId).roles,r.workflow);if(r.recordVideo)r.tasks=withShowcase(r.tasks);if(r.workflow)r.workflow.error=undefined;t.summary='已拆解 '+r.tasks.length+' 个任务'+(r.tasks.some(x=>x.role==='qa')?'（含 QA）':'（未安排 QA）');r.status=(r.workflow?.selection?.approvals.plan??this.project(r.projectId).reviewPlan)?'plan-review':'executing';}
       else{const value=structured(output,'result');if(!['done','blocked'].includes(value.outcome))throw Error('交付 outcome 必须为 done 或 blocked');
-        t.summary=text(value.summary,16000,'交付摘要');t.blockers=validateBlockers(value.blockers);if(value.outcome==='done'&&t.blockers.length)throw Error('仍有硬阻断，不能声明完成');
+        t.summary=text(value.summary,16000,'交付摘要');t.blockers=validateBlockers(value.blockers);t.deferred=deferredChecks(value.deferred,r);if(t.deferred.some(d=>t.blockers!.some(b=>b.code===d.code)))throw Error('同一检查不能同时声明为必需阻断与延期');if(value.outcome==='done'&&t.blockers.length)throw Error('仍有硬阻断，不能声明完成');
         if(!Array.isArray(value.artifacts)||value.artifacts.length>80||!Array.isArray(value.checks)||value.checks.length>80)throw Error('交付物或验证记录格式无效');
         t.artifacts=value.artifacts.map((v:any)=>({path:text(v.path,2000,'交付路径'),description:text(v.description,2000,'交付说明',true)}));t.checks=value.checks.map((c:unknown)=>text(c,2000,'验证记录'));
         if(value.outcome==='blocked')throw Error(t.summary);
