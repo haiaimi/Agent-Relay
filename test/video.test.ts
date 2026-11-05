@@ -1,8 +1,16 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {createHash,randomUUID} from 'node:crypto';import {DatabaseSync} from 'node:sqlite';import {mkdtempSync,writeFileSync,rmSync} from 'node:fs';import {join} from 'node:path';import {tmpdir} from 'node:os';import {once} from 'node:events';
+import {createHash,randomUUID} from 'node:crypto';import {DatabaseSync} from 'node:sqlite';import {mkdtempSync,mkdirSync,writeFileSync,rmSync} from 'node:fs';import {join} from 'node:path';import {tmpdir} from 'node:os';import {once} from 'node:events';
 import {videoMime} from '../src/shared/video.js';import {FileStore} from '../src/shared/files.js';import {MediaStore,imageBytes} from '../src/shared/media.js';import {imageSources,messageImages,imageSafeJson} from '../src/bridge/media.js';import {createRelay} from '../src/relay/server.js';
 const mp4=Buffer.concat([Buffer.from([0,0,0,24]),Buffer.from('ftypisom'),Buffer.from([0,0,0,0]),Buffer.from('isommp42'),Buffer.from('video-content')]);
+
+test('showcase links and typed video references never enter persistent transcript media caches',()=>{
+ const root=mkdtempSync(join(tmpdir(),'relay-showcase-no-cache-')),db=new DatabaseSync(':memory:'),media=new MediaStore(root,db),run=randomUUID(),dir=join(root,'.studio',run,'studio-showcase');mkdirSync(dir,{recursive:true});
+ try{const path=join(dir,'recording.mp4'),renamed=join(dir,'renamed.png');writeFileSync(path,mp4);writeFileSync(renamed,mp4);
+  for(const raw of ['[Video](.studio/'+run+'/studio-showcase/recording.mp4)',{type:'video',path},{type:'video',path:renamed}])assert.deepEqual(messageImages(media,'pc:codex:showcase',root,{id:randomUUID(),role:'assistant',text:'showcase'},raw).images,[]);
+  assert.equal(db.prepare('select count(*) n from media').get()!.n,0);assert.equal(db.prepare('select count(*) n from media_refs').get()!.n,0);
+ }finally{db.close();rmSync(root,{recursive:true,force:true});}
+});
 test('video containers are sniffed from bytes and scoped attachments never trust filename or supplied MIME',()=>{
  assert.equal(videoMime(mp4),'video/mp4');assert.equal(videoMime(Buffer.from('<html>fake.mp4</html>')),undefined);
  const mov=Buffer.from(mp4);mov.write('qt  ',8,'ascii');assert.equal(videoMime(mov),'video/quicktime');

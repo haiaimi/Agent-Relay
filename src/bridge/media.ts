@@ -2,6 +2,7 @@ import {readFileSync,statSync,realpathSync} from 'node:fs';
 import {resolve,isAbsolute,basename} from 'node:path';
 import {createRequire} from 'node:module';
 import {createHash} from 'node:crypto';
+import {videoMime} from '../shared/video.js';
 import {MAX_IMAGE_BYTES,MediaStore,type ImageRef} from '../shared/media.js';
 import type {Message} from '../shared/protocol.js';
 
@@ -9,6 +10,7 @@ const MarkdownIt=createRequire(import.meta.url)('markdown-it');
 const parser=new MarkdownIt({html:false});
 const imported=new WeakMap<MediaStore,Map<string,ImageRef>>();
 type Source={path?:string;data?:string;name?:string};
+const showcasePath=(path:string)=>/(?:^|[\\/])\.studio[\\/][a-f0-9-]{36}[\\/]studio-showcase[\\/]/i.test(path);
 export function imageSources(raw:unknown):Source[]{
   const found:Source[]=[];
   const text=(value:string)=>{
@@ -83,10 +85,14 @@ export function messageImages(store:MediaStore,sessionId:string,cwd:string,messa
         if(/^\\\\\?\\[A-Za-z]:\\/.test(path))path=path.slice(4);
         if(/^[a-z][a-z0-9+.-]*:/i.test(path)&&!(/^[a-z]:[\\/]/i).test(path)||/^(?:\\\\|\/\/)/.test(path)||path.includes('\0'))throw new Error('仅支持本地图片文件');
         path=isAbsolute(path)?path:resolve(cwd,path);name=basename(path)||name;
+        // Showcase videos have a dedicated bounded stream. Transcript backfill
+        // must not turn a Markdown link into a persistent server media copy.
+        if(showcasePath(path)&&/\.(mp4|m4v|mov|webm)$/i.test(path))continue;
         try{statSync(path);}catch(error){const cached=store.referenceByName(sessionId,name);if(cached){if(!seen.has(cached.id!)){images.push(cached);seen.add(cached.id!);}continue;}throw error;}
         path=realpathSync.native(path);if(/^(?:\\\\|\/\/)/.test(path)&&!/^\\\\\?\\[A-Za-z]:\\/.test(path))throw new Error('网络共享图片不自动读取');
+        if(showcasePath(path)&&/\.(mp4|m4v|mov|webm)$/i.test(path))continue;
         const stat=statSync(path);if(!stat.isFile())throw new Error('图片不是普通文件');if(stat.size>MAX_IMAGE_BYTES)throw new Error('图片超过单张 16 MB 上限');
-        key=path+':'+stat.mtimeMs+':'+stat.size;const prior=memo.get(key);if(prior){store.link(sessionId,prior);if(!seen.has(prior.id!)){images.push(prior);seen.add(prior.id!);}continue;}bytes=readFileSync(path);
+        key=path+':'+stat.mtimeMs+':'+stat.size;const prior=memo.get(key);if(prior){if(showcasePath(path)&&prior.mime?.startsWith('video/'))continue;store.link(sessionId,prior);if(!seen.has(prior.id!)){images.push(prior);seen.add(prior.id!);}continue;}bytes=readFileSync(path);if(showcasePath(path)&&videoMime(bytes))continue;
       }
       const ref=store.put(sessionId,bytes,name);memo.set(key,ref);if(memo.size>2000)memo.delete(memo.keys().next().value!);if(!seen.has(ref.id!)){images.push(ref);seen.add(ref.id!);}
     }catch(e){const error=(e as NodeJS.ErrnoException).code?'本地图片已不存在或无法读取':(e as Error).message;images.push({name,error});}
