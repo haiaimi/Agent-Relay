@@ -515,6 +515,38 @@ test('a checkpoint with pending producer questions must be answered before any r
   }finally{await f.close();}
 });
 
+test('producer replies hold a checkpoint task in starting until delivery is confirmed, then clear stale recovery',async()=>{
+ const f=await fixture();try{
+  f.studio.createRun({workflow:'general',projectId:f.project.id,title:'回答后续做',brief:'保留原会话'});await f.settle();f.finish(f.run().planner,'已有分析','failed');await f.settle();
+  const t=f.run().planner,sid=t.sessionId!,checkpoint=t.checkpoint!,remote=(f.studio as any).remote;let acknowledge!:(v:any)=>void;
+  f.store.session({...f.store.getSession(sid)!,status:'idle'});
+  (f.studio as any).remote=async(host:string,a:Action)=>a.type==='send'?new Promise(resolve=>{acknowledge=resolve;}):remote(host,a);
+  const id=randomUUID(),job=f.studio.chat({id,runId:f.run().id,role:'director',sessionId:sid,text:'按确认方案继续'});await turn();await f.settle();
+  assert.equal(f.run().planner.status,'starting');assert.equal(f.run().planner.error,undefined);assert.deepEqual(f.run().planner.checkpoint,checkpoint);
+  f.store.session({...f.store.getSession(sid)!,status:'running'});acknowledge({ok:true,sessionId:sid});await job;await f.settle();
+  assert.equal(f.run().planner.status,'running');assert.equal(f.run().planner.actionId,id);assert.equal(f.run().planner.checkpoint,undefined);assert.equal(f.run().planner.recovery,undefined);
+ }finally{await f.close();}
+});
+
+test('legacy checkpoint reply races adopt their matching acknowledged send without dispatching another writer',async()=>{
+ const f=await fixture();try{
+  f.studio.createRun({workflow:'general',projectId:f.project.id,title:'恢复已送达回复',brief:'不重复投递'});await f.settle();f.finish(f.run().planner,'已有分析','failed');await f.settle();
+  const prior=f.run().planner,checkpoint=prior.checkpoint!,id=randomUUID();await f.studio.chat({id,runId:f.run().id,role:'director',sessionId:prior.sessionId,text:'按已确认方案继续'});
+  const r=f.run();r.planner.status='blocked';r.planner.checkpoint=checkpoint;r.planner.actionId=prior.actionId;r.planner.error='未收到有效的 STUDIO_PLAN';r.guidance![0].at=checkpoint.at+1;
+  f.store.db.prepare('UPDATE studio_runs SET json=? WHERE id=?').run(JSON.stringify(r),r.id);const count=f.actions.length;await f.settle();
+  assert.equal(f.run().planner.status,'running');assert.equal(f.run().planner.sessionId,prior.sessionId);assert.equal(f.run().planner.actionId,id);assert.equal(f.run().planner.checkpoint,undefined);assert.equal(f.actions.length,count);
+ }finally{await f.close();}
+});
+
+test('unknown producer reply delivery remains blocked and is never adopted or automatically resent',async()=>{
+ const f=await fixture();try{
+  f.studio.createRun({workflow:'general',projectId:f.project.id,title:'未知回答结果',brief:'避免重复'});await f.settle();f.finish(f.run().planner,'已有分析','failed');await f.settle();const t=f.run().planner,id=randomUUID();
+  (f.studio as any).remote=async()=>{throw Error('connection lost after send');};const count=f.actions.length;
+  await assert.rejects(f.studio.chat({id,runId:f.run().id,role:'director',sessionId:t.sessionId,text:'继续'}),/connection lost/);await f.settle();
+  assert.equal(f.run().planner.status,'blocked');assert.equal(f.run().planner.actionId,id);assert.match(f.run().planner.error!,/结果尚未确认/);assert.equal(f.run().guidance?.length,0);assert.equal(f.actions.length,count);
+ }finally{await f.close();}
+});
+
 test('unknown send receipts and QA failures cannot be resumed as interruption checkpoints',async()=>{
   const f=await fixture();try{
     f.studio.createRun({workflow:'general',projectId:f.project.id,title:'结果未知',brief:'不要重复发送'});await f.settle();const r=f.run(),t=r.planner;

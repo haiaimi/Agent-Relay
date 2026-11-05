@@ -151,6 +151,22 @@ export class Studio {
     t.resumeSessionId=t.sessionId;t.status='queued';t.actionId=undefined;t.error=undefined;t.finishedAt=undefined;
     if(t.recovery)t.recovery.nextAt=undefined;
   }
+  private reconcileProducerResume(r:StudioRun,t:Task){
+    if(t.status!=='blocked'||!t.checkpoint||!t.sessionId||!this.dependenciesReady(r,t))return false;
+    // Older releases checked the stale idle session while a producer reply was
+    // still in flight. Adopt only a matching, acknowledged send already recorded
+    // as guidance; never resend it or infer delivery from native activity alone.
+    const guidance=(r.guidance??[]).filter(g=>g.sessionId===t.sessionId&&g.at>t.checkpoint!.at).at(-1);
+    if(!guidance)return false;
+    const row=this.store.db.prepare('SELECT host_id,request,result FROM actions WHERE id=?').get(guidance.id);
+    if(!row?.result)return false;
+    try{
+      const request=JSON.parse(String(row.request)),result=JSON.parse(String(row.result)),s=this.store.getSession(t.sessionId);
+      if(request.type!=='send'||request.sessionId!==t.sessionId||row.host_id!==this.project(r.projectId).hostId||result.error||!(result.ok===true||result.sessionId===t.sessionId)||!s||s.hostId!==row.host_id||s.projectId!==this.execution(r).id)return false;
+    }catch{return false;}
+    t.status='running';t.actionId=guidance.id;t.checkpoint=undefined;t.recovery=undefined;t.error=undefined;t.finishedAt=undefined;
+    this.saveRun(r,'已确认制作人回复送达原会话，恢复任务跟踪；未重复投递',t);return true;
+  }
   private recovering=new Set<string>();
   private recoverConnection(r:StudioRun,t:Task,p:StudioProject){
     if(!t.checkpoint||t.status!=='blocked'||r.paused||r.workflow?.error||!modelConnectionFailure(t.checkpoint.reason)||!this.dependenciesReady(r,t))return;
@@ -499,7 +515,7 @@ export class Studio {
     if(task&&!['starting','running'].includes(task.status)){
       const affected=this.dependentTasks(r,[task.id]);
       for(const t of this.allTasks(r))if(affected.has(t.id)&&t!==task)this.resetTask(t,'上游收到制作人补充，重新验证；视觉确认需重新进行');
-      task.status='running';task.skip=undefined;task.startedAt=Date.now();task.error=undefined;
+      task.status='starting';task.actionId=v.id;task.skip=undefined;task.startedAt=Date.now();task.error=undefined;
       if(task===r.planner){r.tasks=[];r.delivery=undefined;r.status='planning';}else if(task===r.delivery)r.status='delivery';else{r.delivery=undefined;r.status='executing';}this.saveRun(r,'制作人补充已完成任务，重新验证后续交付',task);
     }
     if(!targetSessionId){for(const file of refs)this.files?.link(scope,p.hostId+'|project:'+execution.id,file.id);r.chats??=[];r.chats.push({role:v.role,actionId:v.id,startedAt:Date.now(),...afterDelivery?{afterDelivery:true,sourceSessionId:v.sessionId}:{}});this.saveRun(r,(afterDelivery?'开启交付后讨论：':'开启角色对话：')+STUDIO_ROLES.find(x=>x[0]===v.role)![1]);}
@@ -512,12 +528,14 @@ export class Studio {
       }
       const result=await this.remote(p.hostId,action);this.store.finishAction(action.id,result);const latest=this.run(r.id),sessionId=targetSessionId??result.sessionId;
       if(typeof sessionId!=='string')throw Error('Agent 未返回会话 ID，请核对执行记录');
+      const resumed=task&&this.allTasks(latest).find(t=>t.id===task.id);
+      if(resumed?.status==='starting'&&resumed.actionId===action.id){resumed.status='running';resumed.checkpoint=undefined;resumed.recovery=undefined;resumed.finishedAt=undefined;}
       for(const f of refs)this.files?.link(scope,p.hostId+'|project:'+execution.id,f.id);
       if(!targetSessionId){const c=latest.chats!.find(c=>c.actionId===v.id)!;c.sessionId=sessionId;for(const f of refs)this.files?.link(scope,p.hostId+'|'+sessionId,f.id);}
       latest.guidance??=[];latest.guidance.push({id:v.id,role:v.role,text:body,files:refs,at:Date.now(),sessionId});latest.guidance=latest.guidance.slice(-100);this.saveRun(latest,'制作人补充：'+STUDIO_ROLES.find(x=>x[0]===v.role)![1]);
       if(latest.status==='cancelled')await this.remote(p.hostId,{id:randomUUID(),type:'stop',sessionId});
       return {...result,sessionId};
-    }catch(e){const latest=this.run(r.id),c=latest.chats?.find(c=>c.actionId===v.id);if(c){c.error=(e as Error).message;this.saveRun(latest,'角色会话启动未确认');}throw e;}
+    }catch(e){const latest=this.run(r.id),c=latest.chats?.find(c=>c.actionId===v.id);if(c){c.error=(e as Error).message;this.saveRun(latest,'角色会话启动未确认');}const resumed=task&&this.allTasks(latest).find(t=>t.id===task.id);if(resumed?.status==='starting'&&resumed.actionId===v.id){resumed.status='blocked';resumed.error='制作人回复投递结果尚未确认，请核对原会话，勿重复发送：'+(e as Error).message;this.saveRun(latest,'制作人回复结果未确认，已停止自动恢复',resumed);}throw e;}
   }
   private async upgradeScene(r:StudioRun,p:StudioProject){
     if(r.workflow?.kind!=='scene')throw Error('此需求不是场景制作流程');if(r.workflow.version===2)return r;if(!this.online(p.hostId))throw Error('工作电脑离线，尚未更新');
@@ -650,7 +668,10 @@ export class Studio {
       for(const r of active){
         const p=this.project(r.projectId);if(!this.online(p.hostId)||this.flowUpgrades.has(r.id))continue;const key=r.id;
         if(r.workspace?.status!=='ready'){if(r.workspace?.status==='queued'&&!r.paused)this.prepare(r,p);continue;}
-        for(const t of this.allTasks(r))if(t.status==='blocked'&&this.checkpoint(r,t))this.saveRun(r,'已保留执行断点：'+t.title,t);
+        for(const t of this.allTasks(r)){
+          if(this.reconcileProducerResume(r,t))busy.set(key,(busy.get(key)??0)+1);
+          if(t.status==='blocked'&&this.checkpoint(r,t))this.saveRun(r,'已保留执行断点：'+t.title,t);
+        }
         for(const t of this.allTasks(r))if(t.status==='running'){this.complete(r,t);if(t.status!=='running'){busy.set(key,Math.max(0,(busy.get(key)??1)-1));this.saveRun(r,(t.status==='done'?'完成：':'待处理：')+t.title,t);}}
         if(r.paused||r.workflow?.error)continue;
         for(const t of this.allTasks(r))this.recoverConnection(r,t,p);
