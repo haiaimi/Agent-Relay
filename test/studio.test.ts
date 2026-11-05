@@ -673,6 +673,29 @@ test('legacy scene plan migration inserts missing art stages and preserves the e
 test('a scene image changed after approval blocks the next production launch before an agent starts',async()=>{
   let hash='a'.repeat(64);const f=await fixture(false,async()=>({sha256:hash}));try{await sceneAtGate(f);await f.studio.command({runId:f.run().id,op:'pause'});await approveVisual(f);const calls=f.actions.length;hash='b'.repeat(64);await f.studio.command({runId:f.run().id,op:'resume'});await f.settle();const spec=f.run().tasks.find(t=>t.stage==='asset-spec')!;assert.equal(spec.status,'blocked');assert.match(spec.error!,/原画文件发生变化/);assert.equal(f.actions.length,calls);assert.equal(f.run().tasks.find(t=>t.stage==='assets')!.status,'queued');}finally{await f.close();}
 });
+test('undispatched connection failures retry preflight once a minute, stop after five attempts and preserve the confirmed scene gate',async()=>{
+ let fail=false;const f=await fixture(false,async()=>{if(fail)throw Error('电脑响应超时；操作不会自动重发');return {sha256:'a'.repeat(64)};});try{
+  await sceneAtGate(f);await f.studio.command({runId:f.run().id,op:'pause'});await approveVisual(f);fail=true;const calls=f.actions.length;await f.studio.command({runId:f.run().id,op:'resume'});await f.settle();
+  const id=f.run().tasks.find(t=>t.stage==='asset-spec')!.id,gate=JSON.stringify(f.run().tasks.find(t=>t.kind==='visual-review'));
+  for(let attempt=1;attempt<=5;attempt++){
+   const r=f.run(),t=r.tasks.find(t=>t.id===id)!;assert.equal(t.status,'blocked');assert.equal(t.preflightRetry?.attempts,attempt);assert.equal(f.actions.length,calls);assert.equal(JSON.stringify(r.tasks.find(t=>t.kind==='visual-review')),gate);
+   if(attempt<5){assert.ok(t.preflightRetry!.nextAt!>Date.now()+50_000);const action=t.actionId;await f.settle();assert.equal(f.run().tasks.find(t=>t.id===id)!.actionId,action);t.preflightRetry!.nextAt=Date.now()-1;f.store.db.prepare('UPDATE studio_runs SET json=? WHERE id=?').run(JSON.stringify(r),r.id);await f.settle();}
+   else{assert.equal(t.preflightRetry?.nextAt,undefined);await f.settle();assert.equal(f.run().tasks.find(t=>t.id===id)!.preflightRetry?.attempts,5);}
+  }
+ }finally{await f.close();}
+});
+test('a recorded dispatch is never repeated automatically when its response is lost',async()=>{
+ const f=await fixture();try{
+  f.studio.saveProject({...f.project,reviewPlan:false});f.studio.createRun({workflow:'general',projectId:f.project.id,title:'不确定投递',brief:'保护原执行'});await f.settle();const original=(f.studio as any).remote;let sent=0;(f.studio as any).remote=async(host:string,action:Action)=>{if(action.type==='start'){sent++;throw Error('电脑连接中断；操作不会自动重发');}return original(host,action);};
+  f.finish(f.run().planner,plan([task('unknown')]));await f.settle();let t=f.run().tasks[0];assert.equal(t.status,'blocked');assert.ok(f.store.db.prepare('SELECT id FROM actions WHERE id=?').get(t.actionId!));assert.equal(t.preflightRetry,undefined);await f.settle();assert.equal(sent,1);assert.equal(f.run().tasks[0].status,'blocked');
+ }finally{await f.close();}
+});
+test('recovered preflight dispatches the pending task once and clears its connection retry notice',async()=>{
+ let fail=false;const f=await fixture(false,async()=>{if(fail)throw Error('电脑连接中断');return {sha256:'a'.repeat(64)};});try{
+  await sceneAtGate(f);await f.studio.command({runId:f.run().id,op:'pause'});await approveVisual(f);fail=true;await f.studio.command({runId:f.run().id,op:'resume'});await f.settle();const r=f.run(),t=r.tasks.find(t=>t.stage==='asset-spec')!;assert.equal(t.preflightRetry?.attempts,1);
+  fail=false;t.preflightRetry!.nextAt=Date.now()-1;f.store.db.prepare('UPDATE studio_runs SET json=? WHERE id=?').run(JSON.stringify(r),r.id);const count=f.actions.length;await f.settle();assert.equal(f.run().tasks.find(x=>x.id===t.id)!.status,'running');assert.equal(f.run().tasks.find(x=>x.id===t.id)!.preflightRetry,undefined);assert.equal(f.actions.length,count+1);await f.settle();assert.equal(f.actions.length,count+1);
+ }finally{await f.close();}
+});
 test('legacy deliveries without a completed scene gate cannot be accepted under the new scene workflow',async()=>{
   const f=await fixture();try{await sceneAtGate(f);const r=f.run();r.status='review';r.paused=true;r.workflow!.error='旧场景计划已经开始执行，请重新拆解';f.store.db.prepare('UPDATE studio_runs SET json=? WHERE id=?').run(JSON.stringify(r),r.id);await assert.rejects(f.studio.command({runId:r.id,op:'accept'}),/重新拆解/);r.workflow!.error=undefined;f.store.db.prepare('UPDATE studio_runs SET json=? WHERE id=?').run(JSON.stringify(r),r.id);await assert.rejects(f.studio.command({runId:r.id,op:'accept'}),/视觉确认/);assert.equal(f.run().status,'review');}finally{await f.close();}
 });

@@ -4,6 +4,7 @@ import {validateToolchain,validateBlockers,toolchainInstructions,type StudioTool
 import {createHash,randomUUID} from 'node:crypto';
 import {continuationSnapshot,continuationInstructions,type StudioContinuation} from './studio-continuation.js';
 import {modelConnectionFailure,pendingProducerInput,handoffContext,MODEL_RETRIES,MODEL_RETRY_MS,type StudioRecovery} from './studio-recovery.js';
+import {preflightConnectionFailure,nextPreflightRetry,PREFLIGHT_ATTEMPTS,type PreflightRetry} from './studio-preflight-recovery.js';
 import {MAX_TEXT,type Action,type Host,type Provider,type PermissionMode} from '../shared/protocol.js';
 import type {RelayStore} from './store.js';
 import {FileStore,type FileRef,uploadId,MAX_UPLOAD_BYTES} from '../shared/files.js';
@@ -33,6 +34,7 @@ interface TaskSkip {at:number;reason:string;previousStatus:'blocked';summary?:st
 const released=(t:Task)=>t.status==='done'||t.status==='skipped'&&!!t.skip;
 export interface Task {skip?:TaskSkip;planRepairs?:number;showcase?:boolean}
 export interface Task {recovery?:StudioRecovery}
+export interface Task {preflightRetry?:PreflightRetry}
 export interface Task {blockers?:StudioBlocker[];checkpoint?:{at:number;sessionId:string;reason:string}}
 interface Assignment {role:string;enabled:boolean;provider:Provider;agentId?:string;model?:string;effort?:string;instructions:string;tools:string}
 export interface StudioProject {toolchain?:StudioToolchain;includeCaptures?:boolean;id:string;name:string;hostId:string;projectId:string;workspaceIndex:number;roles:Assignment[];permissionMode:PermissionMode;concurrency:number;reviewPlan:boolean;createdAt:number;updatedAt:number}
@@ -168,8 +170,6 @@ export class Studio {
     t.status='running';t.actionId=guidance.id;t.checkpoint=undefined;t.recovery=undefined;t.error=undefined;t.finishedAt=undefined;
     this.saveRun(r,'已确认制作人回复送达原会话，恢复任务跟踪；未重复投递',t);return true;
   }
-  private recovering=new Set<string>();
-  private recoverConnection(r:StudioRun,t:Task,p:StudioProject){
   noteQuestionAnswer(id:string,sessionId:string,text:string,startedAt:number){
     for(const r of this.runs()){
       if(['accepted','cancelled'].includes(r.status)||(r.guidance??[]).some(g=>g.id===id))continue;
@@ -179,6 +179,21 @@ export class Studio {
       this.saveRun(r,'制作人回答已送回原任务，按投递收据跟踪继续执行',t);
     }
   }
+  private recovering=new Set<string>();
+  private recoverPreflight(r:StudioRun,t:Task){
+    // Every task start/send is preceded by beginAction. Never repeat an action
+    // that reached that journal, even if its receipt or connection was lost.
+    if(t.status!=='blocked'||t.checkpoint||!t.actionId||!preflightConnectionFailure(t.error??'')||this.store.db.prepare('SELECT id FROM actions WHERE id=?').get(t.actionId))return;
+    if(!t.preflightRetry||!t.preflightRetry.nextAt&&t.preflightRetry.attempts<PREFLIGHT_ATTEMPTS){
+      t.preflightRetry=nextPreflightRetry(t.preflightRetry,t.error!);this.saveRun(r,t.preflightRetry.nextAt?`预检尚未投递，连接恢复 ${t.preflightRetry.attempts}/${PREFLIGHT_ATTEMPTS}：1 分钟后继续原任务`:'预检连接已尝试 5 次，停止自动恢复；文件和执行记录保留',t);
+    }
+    if(!t.preflightRetry.nextAt||Date.now()<t.preflightRetry.nextAt||!this.dependenciesReady(r,t)||this.chatBusy(r)||this.allTasks(r).some(x=>['starting','running'].includes(x.status)))return;
+    const s=t.sessionId?this.store.getSession(t.sessionId):undefined;
+    if(t.sessionId&&(!s||!['idle','failed','interrupted','history'].includes(s.status)||s.status==='history'&&s.updatedAt>(t.startedAt??0)||s.pendingCount||pendingProducerInput(this.store.sessionEvents(s.id),s.questionCount)))return;
+    t.preflightRetry.nextAt=undefined;t.status='queued';t.actionId=undefined;t.error=undefined;
+    this.saveRun(r,'重新核对预检并继续原任务；上次未投递，不重跑已完成前置任务',t);
+  }
+  private recoverConnection(r:StudioRun,t:Task,p:StudioProject){
     if(!t.checkpoint||t.status!=='blocked'||r.paused||r.workflow?.error||!modelConnectionFailure(t.checkpoint.reason)||!this.dependenciesReady(r,t))return;
     const key=r.id+':'+t.id;if(this.recovering.has(key)||t.recovery?.phase==='stopped')return;
     const s=this.store.getSession(t.sessionId!);if(!s)return;
@@ -242,7 +257,7 @@ export class Studio {
   private resetTask(t:Task,feedback?:string){
     t.checkpoint=undefined;t.blockers=undefined;t.skip=undefined;t.recovery=undefined;
     t.attempts=[...(t.attempts??[]),{sessionId:t.sessionId,output:t.output,at:Date.now()}];
-    Object.assign(t,{status:'queued',actionId:undefined,sessionId:undefined,output:undefined,summary:undefined,artifacts:undefined,checks:undefined,error:undefined,finishedAt:undefined,reviewId:undefined,approvedAt:undefined,visualSnapshots:undefined,feedback});
+    Object.assign(t,{status:'queued',preflightRetry:undefined,actionId:undefined,sessionId:undefined,output:undefined,summary:undefined,artifacts:undefined,checks:undefined,error:undefined,finishedAt:undefined,reviewId:undefined,approvedAt:undefined,visualSnapshots:undefined,feedback});
   }
   private dependentTasks(r:StudioRun,ids:string[]){const affected=new Set(ids);let growing=true;while(growing){growing=false;for(const t of r.tasks)if(!affected.has(t.id)&&t.dependencies.some(id=>affected.has(id))){affected.add(t.id);growing=true;}}return affected;}
   private dependenciesReady(r:StudioRun,t:Task){if(r.workflow?.selection)return !r.workflow.error&&t.dependencies.every(id=>r.tasks.some(x=>x.id===id&&released(x)));return (!(r.workflow?.kind==='scene'&&(t.kind==='visual-review'||t.stage==='concept'))||r.tasks.filter(x=>x.stage==='requirements').every(released))&&t.dependencies.every(id=>r.tasks.some(x=>x.id===id&&released(x)))&&(!r.workflow?.error)&&(!(r.workflow?.kind==='scene'&&['balance','implementation','asset-spec','assets','assembly','integration','validation'].includes(t.stage??''))||r.tasks.some(g=>g.kind==='visual-review'&&g.status==='done'&&g.approvedAt&&g.visualSnapshots?.length));}
@@ -632,7 +647,7 @@ export class Studio {
         this.store.beginAction(action.id,p.hostId,action);const result=await this.remote(p.hostId,action);this.store.finishAction(action.id,result);
         if(typeof result?.sessionId!=='string')throw Error('Agent 未返回会话 ID；请核对执行记录后重试');
         const latest=this.run(r.id),current=this.allTasks(latest).find(x=>x.id===t.id);if(!current||current.actionId!==action.id)return;
-        this.linkAttachments(latest,result.sessionId);current.sessionId=result.sessionId;current.resumeSessionId=undefined;current.checkpoint=undefined;current.status='running';this.saveRun(latest,'已启动：'+t.title,current);
+        this.linkAttachments(latest,result.sessionId);current.sessionId=result.sessionId;current.resumeSessionId=undefined;current.checkpoint=undefined;current.preflightRetry=undefined;current.status='running';this.saveRun(latest,'已启动：'+t.title,current);
         if(latest.status==='cancelled'){await this.remote(p.hostId,{id:randomUUID(),type:'stop',sessionId:result.sessionId});const cancelled=this.run(r.id),stopped=this.allTasks(cancelled).find(x=>x.id===t.id);if(stopped){stopped.status='cancelled';this.saveRun(cancelled,'已停止取消期间启动的任务',stopped);}}
       }catch(e){const latest=this.run(r.id),current=this.allTasks(latest).find(x=>x.id===t.id);if(current&&current.actionId===action.id){current.status='blocked';current.error=(e as Error).message;this.saveRun(latest,'任务分发未确认：'+t.title,current);}}
     })();this.launches.add(job);void job.finally(()=>this.launches.delete(job));
@@ -684,7 +699,7 @@ export class Studio {
         }
         for(const t of this.allTasks(r))if(t.status==='running'){this.complete(r,t);if(t.status!=='running'){busy.set(key,Math.max(0,(busy.get(key)??1)-1));this.saveRun(r,(t.status==='done'?'完成：':'待处理：')+t.title,t);}}
         if(r.paused||r.workflow?.error)continue;
-        for(const t of this.allTasks(r))this.recoverConnection(r,t,p);
+        for(const t of this.allTasks(r)){this.recoverConnection(r,t,p);this.recoverPreflight(r,t);}
         if((r.chats??[]).some(c=>!c.sessionId&&!c.resolved))continue;
         if(r.status==='executing'&&r.tasks.length&&r.tasks.every(released)){r.status='delivery';const priorDelivery=r.delivery;r.delivery={attempts:priorDelivery?[...(priorDelivery.attempts??[]),{sessionId:priorDelivery.sessionId,output:priorDelivery.output,at:Date.now()}]:undefined,id:'studio-delivery',title:'汇总制作人交付包',role:'director',brief:'汇总所有实际交付物及验证结果，给制作人可直接使用的入口和验收步骤。',acceptance:'列出成果、启动 / 查看方法、验证结果及已知限制。',dependencies:[],status:'queued'};this.saveRun(r,r.tasks.some(t=>t.status==='skipped')?'QA 已结束，整理交付并披露制作人跳过记录':r.workflow?.selection&&!r.workflow.selection.stages.includes('validation')?'已选制作任务完成，整理交付（未安排 QA）':'QA 通过，整理最终交付');}
         const candidates=r.status==='planning'?[r.planner]:r.status==='executing'?r.tasks:r.status==='delivery'&&r.delivery?[r.delivery]:[];
