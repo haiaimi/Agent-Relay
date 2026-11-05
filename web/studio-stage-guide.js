@@ -17,7 +17,7 @@ export function stageGuidance({api,refresh,notify}){
         row.busy=true;send.disabled=true;note.textContent='正在投递阶段指引…';
         try{
           const result=await api('studio/guidance',row.request);
-          note.textContent=result.status==='saved'?'已保存；前置步骤和审批完成后，Agent 按指引执行。':result.status==='queued'?'已进入原会话队列；即时引导未确认，请核对职能会话。':'已投递给原 Agent，继续当前任务。';
+          note.textContent=result.status==='saved'?'已保存；前置步骤和审批完成后，Agent 按指引执行。':result.status==='queued'?'已确认原会话排队回执；即时引导未确认，请核对职能会话。':'已投递给原 Agent，继续当前任务。';
           if(result.error)note.textContent+=' '+result.error;
           input.value='';row.request=null;notify(note.textContent);await refresh(true).catch(()=>{});
         }catch(error){note.textContent=error.message;}

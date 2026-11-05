@@ -539,7 +539,7 @@ export class Studio {
       if(queued){
         const steer:Action={id:randomUUID(),type:'steer',sessionId:t.sessionId,queuedId:v.id};
         this.store.beginAction(steer.id,p.hostId,steer);
-        try{const result=await this.remote(p.hostId,steer);this.store.finishAction(steer.id,result);if(result.steered===true)queued=false;else steerError='即时引导未确认，消息保留在原会话队列，请核对执行记录';}
+        try{const result=await this.remote(p.hostId,steer);this.store.finishAction(steer.id,result);if(result.steered===true)queued=false;else steerError='即时引导未确认，已有排队回执；请核对原会话的当前状态';}
         catch(e){steerError='即时引导未确认：'+(e as Error).message+'；请核对原会话，避免重复提交';}
       }
       const latest=this.run(r.id),saved=latest.directions!.find(d=>d.id===v.id)!;
