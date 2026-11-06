@@ -10,13 +10,16 @@ export function effectiveBlockers(t:Task){
   const raw=result(t.output).blockers;
   return (t.blockers??[]).map(b=>({...b,...(Array.isArray(raw)?raw.find((x:any)=>x?.code===b.code&&x?.category===b.category):{}),...b}));
 }
-function humanScope(r:StudioRun){return [r.brief,r.feedback&&r.feedback!==r.planner.feedback?r.feedback:'',...(r.guidance??[]).filter(g=>!g.automatic).map(g=>g.text),...(r.directions??[]).filter(g=>['saved','delivered','queued'].includes(g.status)).map(g=>g.text)].filter(Boolean).join('\n');}
+function humanScope(r:StudioRun){
+  const notes=[...(r.guidance??[]).filter(g=>!g.automatic),...(r.directions??[]).filter(g=>['saved','delivered','queued'].includes(g.status))].sort((a,b)=>(a.at??0)-(b.at??0));
+  return [r.brief,r.feedback&&r.feedback!==r.planner.feedback?r.feedback:'',...notes.map(g=>g.text)].filter(Boolean).join('\n');
+}
 export function producerRequiresDesktop(r:StudioRun){
   const scope=humanScope(r);
   const statements=scope.split(/[\n。；;]/).filter(s=>/Computer\s*Use|Finder|访达|人工(?:键盘|试玩)|真人试玩|桌面控制/i.test(s));
   // A later explicit withdrawal takes precedence over an earlier requirement.
   let required=false;
-  for(const s of statements){if(/不依赖|不要依赖|无需|不得.{0,15}(?:门槛|门禁|前置)|撤销|不作为门禁|不要求/i.test(s))required=false;else if(!/只有|如果|若|确实明确|制作人明确要求的/.test(s)&&/必须|要求|仅允许|务必|must|require/i.test(s))required=true;}
+  for(const s of statements){if(/不依赖|不要依赖|无需|不得.{0,15}(?:门槛|门禁|前置)|撤销|不作为门禁|不要求/i.test(s))required=false;else if(!/只有|如果|若|确实明确|制作人明确要求的/.test(s)&&/必须|要求|仅允许|务必|请|希望|需要|must|require/i.test(s))required=true;}
   return required;
 }
 export function addedToolGate(r:StudioRun,t:Pick<Task,'brief'|'acceptance'|'blockers'>){

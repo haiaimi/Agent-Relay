@@ -33,6 +33,12 @@ test('QA hands internal defects to a scoped repair, but a failed repair cannot r
  f.task.role='engineering';assert.equal(reworkDecision(f.run,f.task,f.project,f.history,100).route,'waiting');
  f.task.role='qa';f.task.remediationFor={taskId:'original'};assert.equal(reworkDecision(f.run,f.task,f.project,f.history,100).route,'waiting');
 });
+test('polite producer requests remain authoritative and newer cross-channel instructions override older ones',()=>{
+ const f=fixture();f.run.brief='请进行一次真人试玩';assert.equal(producerRequiresDesktop(f.run),true);
+ f.run.directions=[{at:20,status:'delivered',text:'需要用 Computer Use 验证'}];
+ f.run.guidance=[{at:30,text:'撤销 Computer Use 门禁，走脚本路线'}];assert.equal(producerRequiresDesktop(f.run),false);
+ f.run.directions.push({at:40,status:'delivered',text:'这次请用 Computer Use 做真人试玩'});assert.equal(producerRequiresDesktop(f.run),true);
+});
 test('renaming reports cannot reset budgets; human scope and actual upstream completion can',()=>{
  const f=fixture();f.task.role='engineering';
  f.task.summary='第184轮仍未执行新检查';assert.equal(reworkDecision(f.run,f.task,f.project,f.history,100).route,'waiting');
