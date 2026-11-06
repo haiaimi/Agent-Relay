@@ -88,7 +88,7 @@ async function body(req: IncomingMessage,limit=64_000): Promise<any> {
   return JSON.parse(text || '{}');
 }
 export function createRelay(options: Options) {
-  const uiRevision=createHash('sha256').update(['studio-playtests.js','studio-stage-guide.js','studio.js','studio-sidebar.js','studio-scene.js','studio-guidance.js','studio-task-focus.js','studio-repairs.js','studio-attention.js','studio.css','studio.html','workspace-shell.js','app.js'].map(file=>readFileSync(fileURLToPath(new URL(`../../web/${file}`,import.meta.url)))).reduce((all,part)=>Buffer.concat([all,part]),Buffer.alloc(0))).digest('hex');
+  const uiRevision=createHash('sha256').update(['studio-mainline.js','studio-startup.js','studio-playtests.js','studio-stage-guide.js','studio.js','studio-sidebar.js','studio-scene.js','studio-guidance.js','studio-task-focus.js','studio-repairs.js','studio-attention.js','studio.css','studio.html','workspace-shell.js','app.js'].map(file=>readFileSync(fileURLToPath(new URL(`../../web/${file}`,import.meta.url)))).reduce((all,part)=>Buffer.concat([all,part]),Buffer.alloc(0))).digest('hex');
   if(options.turn)turnCredentials(options.turn);
   requireSecret(options.phoneToken,'PHONE_TOKEN'); requireSecret(options.bridgeToken,'BRIDGE_TOKEN');
   if (equalSecret(options.phoneToken, options.bridgeToken)) throw new Error('Use separate phone and bridge secrets');
@@ -123,6 +123,7 @@ export function createRelay(options: Options) {
     for(const res of viewers) { if(res.writableLength>1024*1024) res.destroy(); else res.write(message); }
   }
   function remote(host: string, action: Action,timeoutMs=90_000): Promise<any> {
+    try{validateAction(action);}catch(e){return Promise.reject(new Error('设备指令未发送：'+(e as Error).message));}
     const questionRevision=action.sessionId?questionState.revision(action.sessionId):0;
     const projectId=action.projectId??(action.sessionId?store.getSession(action.sessionId)?.projectId:undefined),uploadScope=action.upload?.scope.slice(host.length+1)??'';
     const brain=action.type==='prepare-brainstorm'||projectId?.startsWith('brainstorm-')||uploadScope.startsWith('project:brainstorm-')||store.getSession(uploadScope)?.projectId?.startsWith('brainstorm-');
@@ -224,7 +225,7 @@ export function createRelay(options: Options) {
       if(req.method==='POST'&&url.pathname==='/api/studio/toolchain')return json(res,200,{project:studio.saveToolchain(await body(req))});
       if(req.method==='POST'&&url.pathname==='/api/studio/run')return json(res,200,{run:studio.createRun(await body(req))});
       if(req.method==='GET'&&url.pathname==='/api/studio/mainline')return json(res,200,{jobs:mainline.list(url.searchParams.get('runId')??'')});
-      if(req.method==='POST'&&url.pathname==='/api/studio/mainline')return json(res,200,{job:await mainline.start(await body(req))});
+      if(req.method==='POST'&&url.pathname==='/api/studio/mainline')return json(res,200,{job:await (async()=>{const v=await body(req);return v.op==='recover'?mainline.recover(v):mainline.start(v);})()});
       if(req.method==='GET'&&url.pathname==='/api/studio/playtests')return json(res,200,playtests.list(url.searchParams.get('runId')??''));
       if(req.method==='POST'&&url.pathname==='/api/studio/playtests/start')return json(res,200,{launch:await playtests.start(await body(req))});
       if(req.method==='GET'&&url.pathname==='/api/studio/playtests/status')return json(res,200,{launch:await playtests.status(url.searchParams.get('runId')??'',url.searchParams.get('id')??'')});
