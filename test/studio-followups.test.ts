@@ -19,6 +19,30 @@ function fixture(){
 test('completed blocked results automatically recheck the original task, preserving predecessors and final approval',async()=>{
  const f=fixture();try{const previous=JSON.stringify(f.run.tasks[0]);await f.tick();assert.equal(f.commands.length,0);f.time(3000);await f.tick();assert.equal(f.commands.length,1);assert.equal(f.commands[0].op,'recheck-task');assert.equal(f.commands[0].automatic,true);assert.match(f.commands[0].feedback,/不是|不需要制作人/);assert.match(f.commands[0].feedback,/deferred/);assert.equal(f.run.tasks[1].resumeSessionId,'h:one');assert.equal(f.run.tasks[2].status,'queued');assert.equal(f.run.workflow.selection.approvals.final,true);assert.equal(JSON.stringify(f.run.tasks[0]),previous);await f.restart();await f.tick();assert.equal(f.commands.length,1);}finally{await f.close();}
 });
+test('external blockers wait durably without live probes or repeated production writes',async()=>{
+ const f=fixture();try{
+  f.run.tasks[1].blockers=[{category:'environment',code:'OFFLINE_SERVICE',details:'需要外部服务恢复',remedy:'恢复服务',requiresExternalStateChange:true,retryableWithoutExternalChange:false}];
+  await f.tick();assert.equal(f.notes.at(-1).phase,'waiting');assert.equal(f.reads,0);
+  f.time(86_400_000);await f.tick();await f.restart();await f.tick();
+  assert.equal(f.commands.length,0);assert.equal(f.reads,0);assert.equal(f.notes.at(-1).nextAt,undefined);
+ }finally{await f.close();}
+});
+test('a repeated failure does not shorten the existing backoff to three seconds',async()=>{
+ const f=fixture();try{
+  const t=f.run.tasks[1];t.blockers=[{category:'quality',code:'RGB'}];
+  for(let i=0;i<2;i++)f.store.db.prepare('INSERT INTO studio_followups VALUES(?,?)').run('past-'+i,JSON.stringify({id:'past-'+i,runId:'run',taskId:t.id,phase:'queued',finishedAt:50_000,round:i+1}));
+  await f.tick();assert.equal(f.notes.at(-1).phase,'waiting');f.time(3000);await f.tick();assert.equal(f.commands.length,0);
+ }finally{await f.close();}
+});
+test('changed recovery conditions grant one live recheck while the same external failure waits again',async()=>{
+ const f=fixture();try{
+  const t=f.run.tasks[1];t.blockers=[{category:'environment',code:'SERVICE',requiresExternalStateChange:true}];await f.tick();assert.equal(f.notes.at(-1).phase,'waiting');
+  f.time(10_000);f.run.guidance.push({id:'recovered',at:110_000,text:'服务已恢复，请核对'});await f.tick();assert.equal(f.notes.at(-1).phase,'scheduled');
+  f.time(3000);await f.tick();assert.equal(f.commands.length,1);
+  t.actionId=randomUUID();t.finishedAt=113_000;t.status='blocked';f.store.beginAction(t.actionId,'h',{id:t.actionId,type:'send',sessionId:t.sessionId});f.store.finishAction(t.actionId,{ok:true});
+  await f.tick();assert.equal(f.notes.at(-1).phase,'waiting');assert.equal(f.commands.length,1);
+ }finally{await f.close();}
+});
 test('approvals, pause, disabled autonomy, dependencies, active writers and unknown receipts never auto-dispatch',async()=>{
  const changes=[(f:any)=>f.run.tasks[1].kind='producer-review',(f:any)=>f.run.paused=true,(f:any)=>f.run.autoAnswerQuestions=false,(f:any)=>f.run.status='accepted',(f:any)=>f.run.tasks[0].status='queued',(f:any)=>f.store.finishAction(f.run.tasks[1].actionId,{error:'unknown write'}),(f:any)=>f.store.db.prepare('UPDATE actions SET result=NULL').run(),(f:any)=>f.store.session({...f.store.getSession('h:one'),status:'running'}),(f:any)=>f.run.tasks[0].status='running',(f:any)=>f.run.workspace.value.project.id='foreign'];
  for(const change of changes){const f=fixture();try{change(f);await f.tick();f.time(10_000);await f.tick();assert.equal(f.commands.length,0);assert.equal(f.reads,0);}finally{await f.close();}}

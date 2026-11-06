@@ -43,6 +43,10 @@ test('automatic followups remove the routine continue button while keeping expli
 test('scheduled retries show the actual wait and collaboration never claims the original agent is running',()=>{
  const t:any={status:'blocked',sessionId:'s',finishedAt:1,autoFollowup:{phase:'scheduled',nextAt:Date.now()+900_000,note:'第13轮已安排'}};let g=taskGuidance(t,{status:'idle'},{automatic:true});assert.equal(g.label,'已安排自动续做');assert.match(g.next,/下一次核对/);t.autoFollowup={phase:'collaborating',note:'程序修复后返回本职能'};g=taskGuidance(t,{status:'idle'},{automatic:true});assert.equal(g.label,'程序协作修复中');assert.equal(g.action,'');
 });
+test('a waiting recovery does not promise another automatic retry or claim approval is needed',()=>{
+ const t={status:'blocked',sessionId:'s',finishedAt:1,autoFollowup:{phase:'waiting',note:'外部服务恢复后核对'}};
+ const g=taskGuidance(t,{status:'idle'},{automatic:true});assert.equal(g.label,'等待恢复条件');assert.equal(g.action,'recheck');assert.equal(g.button,'核对变化后继续');assert.doesNotMatch(g.next,/批准|自动补做/);
+});
 
 
 test('imported blocked tasks explain explicit local continuation instead of requesting a missing old native session',()=>{

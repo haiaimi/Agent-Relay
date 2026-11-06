@@ -815,6 +815,27 @@ test('autonomous repair resumes the exact original task and a scoped deferral un
 });
 
 
+test('planner-added desktop gates are rejected while explicit producer requirements remain valid',async()=>{
+ for(const required of [false,true]){
+  const f=await fixture();try{
+   f.studio.saveProject({...f.project,reviewPlan:false});f.studio.createRun({workflow:'general',projectId:f.project.id,title:'实际验证',brief:required?'必须使用 Computer Use 完成真人键盘试玩':'实际运行验证业务功能'});await f.settle();
+   f.finish(f.run().planner,plan([{...task('test'),acceptance:'必须通过 Computer Use 取得 App 句柄后才可验收'}]));await f.settle();
+   if(required){assert.equal(f.run().tasks[0].status,'running');}
+   else{assert.equal(f.run().tasks.length,0);assert.equal(f.run().planner.status,'running');assert.match(f.actions.at(-1)!.text!,/自行增加了.*门禁/);}
+  }finally{await f.close();}
+ }
+});
+test('QA can receive an in-stage engineering repair without waiting for downstream validation',async()=>{
+ const f=await fixture();try{
+  f.studio.createRun({workflow:'general',projectId:f.project.id,title:'QA内部修复',brief:'修复业务实现并复验',flowConfig:{template:'custom',stages:['validation'],approvals:{plan:false,design:false,visual:false,scene:false,final:true}}});await f.settle();
+  f.finish(f.run().planner,plan([{...task('verify',[],'qa'),stage:'validation'}]));await f.settle();
+  let r=f.run(),t=r.tasks[0];const failure='```STUDIO_RESULT\n'+JSON.stringify({outcome:'blocked',summary:'输入逻辑错误',artifacts:[],checks:['FAIL'],blockers:[{category:'upstream',code:'INPUT_BUG',details:'实际输入失败',remedy:'程序修复后由QA复验',ownerTaskId:'downstream'}]})+'\n```';
+  f.finish(t,failure);await f.settle();r=f.run();t=r.tasks[0];t.attempts=[{output:failure,at:1},{output:failure,at:2}];f.store.db.prepare('UPDATE studio_runs SET json=? WHERE id=?').run(JSON.stringify(r),r.id);
+  await f.studio.command({op:'collaborate-task',runId:r.id,taskId:t.id,automatic:true,blockerKey:'upstream:INPUT_BUG',expectedActionId:t.actionId,expectedFinishedAt:t.finishedAt??null,expectedCheckpointAt:null});await f.settle();
+  r=f.run();const repair=r.tasks.find(x=>x.remediationFor)!;assert.equal(repair.status,'running');assert.equal(repair.role,'engineering');assert.deepEqual(repair.dependencies,[]);assert.deepEqual(r.tasks.find(x=>x.id==='verify')!.dependencies,[repair.id]);assert.equal(r.workflow!.selection!.approvals.final,true);
+  f.finish(repair,result());await f.settle();assert.equal(f.run().tasks.find(x=>x.id==='verify')!.status,'blocked');assert.equal(f.run().delivery,undefined);
+ }finally{await f.close();}
+});
 test('cross-role technical repair breaks a dependency deadlock without releasing verification or producer gates',async()=>{
  const f=await fixture();try{
   f.studio.createRun({workflow:'general',projectId:f.project.id,title:'程序协作',brief:'修复实际画面，保持既定审批',flowConfig:{template:'custom',stages:['integration'],approvals:{plan:false,design:false,visual:false,scene:true,final:true}}});await f.settle();

@@ -1,5 +1,5 @@
 export interface StudioToolchain {blender?:string;python?:string;engine?:string;discoveryScript?:string;pythonPaths?:string[];searchRoots?:string[]}
-export interface StudioBlocker {category:'environment'|'provenance'|'upstream'|'quality'|'other';code:string;details:string;remedy:string}
+export interface StudioBlocker {category:'environment'|'provenance'|'upstream'|'quality'|'other';code:string;details:string;remedy:string;requiresExternalStateChange?:boolean;retryableWithoutExternalChange?:boolean;ownerTaskId?:string}
 export function validateToolchain(value:unknown):StudioToolchain|undefined{
   if(value===undefined)return undefined;
   if(!value||typeof value!=='object'||Array.isArray(value))throw Error('无效团队工具配置');
@@ -11,7 +11,7 @@ export function validateToolchain(value:unknown):StudioToolchain|undefined{
 }
 export function validateBlockers(value:unknown):StudioBlocker[]{
   if(value===undefined)return [];if(!Array.isArray(value)||value.length>12)throw Error('阻断记录格式无效');
-  return value.map(item=>{if(!item||!['environment','provenance','upstream','quality','other'].includes(item.category)||typeof item.code!=='string'||!/^[A-Z0-9_-]{1,60}$/.test(item.code)||typeof item.details!=='string'||!item.details.trim()||item.details.length>2000||typeof item.remedy!=='string'||!item.remedy.trim()||item.remedy.length>2000)throw Error('阻断记录需包含类别、代码、实际证据和恢复步骤');return {category:item.category,code:item.code,details:item.details,remedy:item.remedy};});
+  return value.map(item=>{if(!item||!['environment','provenance','upstream','quality','other'].includes(item.category)||typeof item.code!=='string'||!/^[A-Z0-9_-]{1,60}$/.test(item.code)||typeof item.details!=='string'||!item.details.trim()||item.details.length>2000||typeof item.remedy!=='string'||!item.remedy.trim()||item.remedy.length>2000)throw Error('阻断记录需包含类别、代码、实际证据和恢复步骤');for(const key of ['requiresExternalStateChange','retryableWithoutExternalChange'])if(item[key]!==undefined&&typeof item[key]!=='boolean')throw Error('阻断恢复条件必须为布尔值');if(item.ownerTaskId!==undefined&&(typeof item.ownerTaskId!=='string'||!/^[a-zA-Z0-9_-]{1,80}$/.test(item.ownerTaskId)))throw Error('阻断责任任务无效');return {category:item.category,code:item.code,details:item.details,remedy:item.remedy,...item.requiresExternalStateChange!==undefined?{requiresExternalStateChange:item.requiresExternalStateChange}:{},...item.retryableWithoutExternalChange!==undefined?{retryableWithoutExternalChange:item.retryableWithoutExternalChange}:{},...item.ownerTaskId?{ownerTaskId:item.ownerTaskId}:{}};});
 }
 export function toolchainInstructions(config:StudioToolchain|undefined,workspace:string,source:string){
   const argv=['node',config?.discoveryScript??'<本机 Agent Relay 目录>/scripts/discover-studio-tools.mjs','--project',workspace,'--source',source];

@@ -13,7 +13,7 @@ export function taskGuidance(task,session,{online=true,syncError='',othersRunnin
  if(pendingDependencies.length)return result('请先完成前置步骤','先处理“'+pendingDependencies.map(t=>t.title||t.id).join('、')+'”，完成后才能继续本步骤。','dependency','处理前置步骤');
  if(othersRunning)return result('等待当前工作结束','其他任务或职能对话仍在执行，结束后再继续本步骤。','active','查看正在进行的工作');
  if(automatic&&!task.kind&&task.sessionId&&(task.finishedAt&&!task.checkpoint&&session?.status==='idle'||task.autoFollowup&&['idle','failed','interrupted'].includes(session?.status))){
-  const f=task.autoFollowup;if(f?.phase==='collaborating')return result('程序协作修复中',f.note);if(f?.nextAt>Date.now())return result('已安排自动续做','下一次核对：'+new Date(f.nextAt).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'})+'。'+f.note);return result(f?.phase==='checking'?'正在核对原会话':f?.phase==='unavailable'?'连接恢复后自动补做':'Agent 将自动补做未完成项',f?.note||'无需点击继续。系统会交回原 Agent 修复或按最新指引记录延期项，完成后继续后续流程。');
+  const f=task.autoFollowup;if(f?.phase==='waiting')return result('等待恢复条件',f.note,'recheck','核对变化后继续');if(f?.phase==='collaborating')return result('程序协作修复中',f.note);if(f?.nextAt>Date.now())return result('已安排自动续做','下一次核对：'+new Date(f.nextAt).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'})+'。'+f.note);return result(f?.phase==='checking'?'正在核对原会话':f?.phase==='unavailable'?'连接恢复后自动补做':'Agent 将自动补做未完成项',f?.note||'无需点击继续。系统会交回原 Agent 修复或按最新指引记录延期项，完成后继续后续流程。');
  }
  if(task.checkpoint)return result('上次工作已中断','断点和已有成果已保存，点击后接着未完成的部分做。','resume','继续上次工作');
  if(!task.sessionId&&repositoryImported&&task.migrationContext&&!task.kind)return result('可在此电脑继续','使用 Git 中的进度和上下文开启本机对话，只处理本步骤未完成项，已完成成果和审批保持。','recheck','在此电脑继续处理');

@@ -1,3 +1,4 @@
+import {addedToolGate,canRepairInStage,repairDependencies} from './studio-rework-policy.js';
 import {repositoryAddress} from '../shared/repository-url.js';
 import {assertMainlineIdle} from './studio-mainline.js';
 import {launchTargets,type LaunchTarget} from '../shared/playtests.js';
@@ -46,7 +47,7 @@ export interface StudioRun {functionalTestRequested?:boolean;deliveryHistory?:Ta
 export interface Task {remediationFor?:{taskId:string;blockerKey:string;sourceActionId:string};autoFollowup?:TaskFollowup;deferred?:DeferredCheck[]}
 export interface Task {skip?:TaskSkip;planRepairs?:number;showcase?:boolean}
 export interface Task {recovery?:StudioRecovery}
-export interface Task {preflightRetry?:PreflightRetry}
+export interface Task {preflightRetry?:PreflightRetry;reworkEpoch?:number}
 export interface Task {migrationContext?:string;artifactSessionId?:string}
 export interface Task {blockers?:StudioBlocker[];checkpoint?:{at:number;sessionId:string;reason:string}}
 interface Assignment {role:string;enabled:boolean;provider:Provider;agentId?:string;model?:string;effort?:string;instructions:string;tools:string}
@@ -287,7 +288,7 @@ export class Studio {
     return {hostId:p.hostId,sessionId:(t.artifactSessionId??t.sessionId)!,path:artifact.path};
   }
   private resetTask(t:Task,feedback?:string){
-    t.launchers=undefined;t.checkpoint=undefined;t.blockers=undefined;t.skip=undefined;t.recovery=undefined;t.autoFollowup=undefined;t.deferred=undefined;
+    t.reworkEpoch=Date.now();t.launchers=undefined;t.checkpoint=undefined;t.blockers=undefined;t.skip=undefined;t.recovery=undefined;t.autoFollowup=undefined;t.deferred=undefined;
     t.attempts=[...(t.attempts??[]),{sessionId:t.sessionId,output:t.output,at:Date.now()}];
     Object.assign(t,{status:'queued',preflightRetry:undefined,actionId:undefined,sessionId:undefined,output:undefined,summary:undefined,artifacts:undefined,checks:undefined,error:undefined,finishedAt:undefined,reviewId:undefined,approvedAt:undefined,visualSnapshots:undefined,feedback});
   }
@@ -405,19 +406,22 @@ export class Studio {
       if(!session||session.hostId!==p.hostId||session.projectId!==this.execution(r).id||!['idle','failed','interrupted'].includes(session.status)||session.pendingCount||receipt&&!receipt.result)throw Error('会话仍忙或投递结果未确认，不能重复发送复核');
       if(this.chatBusy(r)||this.allTasks(r).some(t=>['starting','running'].includes(t.status)))throw Error('请等待当前任务和角色对话结束后复核');
       if(v.op==='collaborate-task'){
-        if(v.automatic!==true||!repeatedFailure(task)||v.blockerKey!==blockerSignature(task)||task.remediationFor||task.role==='engineering'||!['implementation','integration'].includes(task.stage??'')||r.workflow?.selection&&!r.workflow.selection.stages.includes(task.stage as any)||!p.roles.some(a=>a.role==='engineering'&&a.enabled))throw Error('当前问题不满足所选阶段内的程序协作条件');
+        if(v.automatic!==true||!repeatedFailure(task)||v.blockerKey!==blockerSignature(task)||!canRepairInStage(r,task,p))throw Error('当前问题不满足所选阶段内的程序协作条件');
         let repair=r.tasks.find(t=>t.remediationFor?.taskId===task.id&&t.remediationFor.blockerKey===v.blockerKey);
         if(repair?.remediationFor?.sourceActionId===task.actionId)return r;
         const brief='这是当前制作阶段内部的程序协作修复，不是执行后续完整验收或新增制作阶段。原任务 '+task.id+' 连续出现相同阻断：'+JSON.stringify(task.blockers)+'\n先读取原任务现有报告与候选，核对当前程序和材质实际采样路径。逐条对照制作人原需求与原任务验收：区分“实际检查并报告观感/已知限制”和“必须达到硬性通过标准”，不能自行把观察项扩大成新的硬门禁，也不能把场景接入无限扩大成整个渲染器研究。最终场景视觉交给已配置的制作人场景审批，而不是新增一个技术审批。仍属本轮必需的真实质量失败必须修复，不伪造通过。区分原需求与 Agent 自行扩大的验收；针对真实未完成目标提出不同于已失败候选的可验证假设，实际实施最小修复并用真实入口和目标镜头验证。允许在本需求独立副本内协调必要的程序、着色器、当前场景适配和材质修复，不能把修复推给依赖本任务完成的后续任务。Agent 自行编写的旧文件分工可在此子任务内调整，原制作人明确限制仍有效。保留源工程、默认预设、既定玩法、已选视觉与审批，禁止修改源目录、增加未选阶段或伪造通过。失败候选可撤回但保留证据，不能仅产出同一份诊断建议。需要内部讨论自行完成，不另问制作人是否允许继续修复。\n原任务：'+task.title+'\n验收标准：'+task.acceptance+'\n上轮摘要：'+(task.summary??task.error??'')+'\n最近交付：'+JSON.stringify(task.artifacts??[]);
         if(!repair){
           const id='studio-collab-'+createHash('sha256').update(task.id+'|'+v.blockerKey).digest('hex').slice(0,12);
-          repair={id,title:'程序协作修复 · '+task.title,role:'engineering',stage:task.stage,brief:brief.slice(0,12000),acceptance:'给出针对当前阻断的实际修复、变更清单、真实样张和验证；只在真实修复完成时 done，不能把诊断或技术指标通过等同画质通过。',dependencies:[...task.dependencies],status:'queued',remediationFor:{taskId:task.id,blockerKey:v.blockerKey,sourceActionId:task.actionId!}};
+          const dependencies=repairDependencies(r.tasks,task,id);
+          repair={id,title:'程序协作修复 · '+task.title,role:'engineering',stage:task.stage,brief:brief.slice(0,12000),acceptance:'给出针对当前阻断的实际修复、变更清单、真实样张和验证；只在真实修复完成时 done，不能把诊断或技术指标通过等同画质通过。',dependencies,status:'queued',remediationFor:{taskId:task.id,blockerKey:v.blockerKey,sourceActionId:task.actionId!}};
           r.tasks.splice(r.tasks.indexOf(task),0,repair);task.dependencies.push(repair.id);
         }else{
+          repair.dependencies=repairDependencies(r.tasks,task,repair.id);
           repair.attempts=[...(repair.attempts??[]),{sessionId:repair.sessionId,output:repair.output,at:Date.now()}];repair.resumeSessionId=repair.sessionId;repair.status='queued';repair.actionId=undefined;repair.finishedAt=undefined;repair.error=undefined;repair.brief=brief.slice(0,12000);repair.remediationFor!.sourceActionId=task.actionId!;
         }
         this.saveRun(r,'连续同类阻断转程序协作：'+repair.id+'；原任务等待实际修复后验证，已完成任务和制作人审批保留',task);void this.tick();return this.run(r.id);
       }
+      if(!v.automatic)task.reworkEpoch=Date.now();
       task.attempts=[...(task.attempts??[]),{sessionId:task.sessionId,output:task.output,at:Date.now()}];
       task.resumeSessionId=task.sessionId;task.status='queued';task.actionId=undefined;task.error=undefined;task.finishedAt=undefined;
       task.feedback=(task===r.planner?'计划校验修正：沿用原会话的工程分析，只修正任务拆解。严格遵守制作人所选阶段、职能对应和审批设置；删除未选阶段的任务并修正依赖，不能把场景组装或集成校验改标为资产生产来绕过范围。重新输出完整 STUDIO_PLAN，不执行制作、不修改工程。':(v.automatic?'自动补做：按最新制作人范围处理。必需项失败自行修复；已明确延期项引用原指引记录 deferred 并保留证据，不再作为当前门禁，不声称通过。':'技术阻断复核：')+'先读取团队最新工具配置和原检查报告，在同一工作副本与原会话只补做未完成步骤。区分不适用项与硬阻断；核对最新上游程序交付，不以旧规格快照覆盖合法更新。本轮仍必需且未解决的质量或构建来源门禁保持 blocked，已按制作人范围延期的项不能重新加作当前门禁。')+(v.feedback?text(v.feedback,2000,'复核说明'):'');
@@ -719,7 +723,8 @@ export class Studio {
     }catch(e){const latest=this.run(r.id);latest.workspace={status:'blocked',error:(e as Error).message};this.saveRun(latest,'工作副本准备失败，已停止分发');}})();this.launches.add(job);void job.finally(()=>this.launches.delete(job));
   }
   private prompt(r:StudioRun,t:Task,p:StudioProject){
-    const note=t.migrationContext?`跨电脑接力：旧会话仅作历史，请核对当前副本，只继续未完成步骤；旧电脑绝对路径必须映射到当前副本。沿用已完成任务和制作人审批；工具结果须核实，不重复导出或发布。\n${t.migrationContext}\n`:'';
+    const toolPolicy=addedToolGate(r,t)?'旧计划中的 Computer Use、Finder/App 绑定、真实键盘门禁未经制作人要求，不能作为本轮前置条件。请用受支持脚本实际运行并保存证据，保留业务断言及真实失败，不冒称人工实测。\n':'';
+    const note=toolPolicy+(t.migrationContext?`跨电脑接力：旧会话仅作历史，请核对当前副本，只继续未完成步骤；旧电脑绝对路径必须映射到当前副本。沿用已完成任务和制作人审批；工具结果须核实，不重复导出或发布。\n${t.migrationContext}\n`:'');
     const body=this.taskPrompt(r,t,p),limit=MAX_TEXT-note.length;if(body.length<=limit)return note+body;
     const tail=body.slice(-6000),marker='\n部分上下文已截断，请从当前工程交付文件核对；以下保留任务交付格式。\n';
     return note+body.slice(0,limit-tail.length-marker.length)+marker+tail;
@@ -773,7 +778,7 @@ export class Studio {
     if(s.status!=='idle'){t.status='blocked';t.error='Agent '+(s.status==='failed'?'执行失败':'执行已停止')+'，请查看记录';return;}
     const output=this.taskOutput(t);t.output=output;t.finishedAt=Date.now();
     try{
-      if(t===r.planner){r.tasks=parseStudioPlan(output,this.projectForRun(r).roles,r.workflow);if(r.recordVideo)r.tasks=withShowcase(r.tasks);if(r.workflow)r.workflow.error=undefined;t.summary='已拆解 '+r.tasks.length+' 个任务'+(r.tasks.some(x=>x.role==='qa')?'（含 QA）':'（未安排 QA）');r.status=(r.workflow?.selection?.approvals.plan??this.projectForRun(r).reviewPlan)?'plan-review':'executing';}
+      if(t===r.planner){const planned=parseStudioPlan(output,this.projectForRun(r).roles,r.workflow);if(planned.some(x=>!x.kind&&addedToolGate(r,x)))throw new ProductionPlanError('计划自行增加了 Computer Use/Finder/App 绑定或真实键盘门禁；制作人未要求此操作方式，请保留业务验收并改用受支持脚本，不添加工具门槛');r.tasks=planned;if(r.recordVideo)r.tasks=withShowcase(r.tasks);if(r.workflow)r.workflow.error=undefined;t.summary='已拆解 '+r.tasks.length+' 个任务'+(r.tasks.some(x=>x.role==='qa')?'（含 QA）':'（未安排 QA）');r.status=(r.workflow?.selection?.approvals.plan??this.projectForRun(r).reviewPlan)?'plan-review':'executing';}
       else{const value=structured(output,'result');if(!['done','blocked'].includes(value.outcome))throw Error('交付 outcome 必须为 done 或 blocked');
         t.summary=text(value.summary,16000,'交付摘要');t.launchers=launchTargets(value.launchers);t.blockers=validateBlockers(value.blockers);t.deferred=deferredChecks(value.deferred,r);if(t.deferred.some(d=>t.blockers!.some(b=>b.code===d.code)))throw Error('同一检查不能同时声明为必需阻断与延期');if(value.outcome==='done'&&t.blockers.length)throw Error('仍有硬阻断，不能声明完成');
         if(!Array.isArray(value.artifacts)||value.artifacts.length>80||!Array.isArray(value.checks)||value.checks.length>80)throw Error('交付物或验证记录格式无效');
