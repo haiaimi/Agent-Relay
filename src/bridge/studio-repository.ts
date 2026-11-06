@@ -49,8 +49,9 @@ export class StudioRepository {
     return this.publish(root,repo,w,v,view);
   });}
   private async save(root:string,repo:string,w:StudioWorkspace,a:RequirementArchive){
-    const stateRoot=await common(root),old=await localJson(root,'.relay/project.json')??await localJson(stateRoot,'relay/project.json');if(old&&old.id!==a.projectId)throw Error('仓库已绑定其他项目，请使用该仓库已有的项目身份');
-    a=structuredClone(a);a.projectRelative=relative(repo,w.project.path).replaceAll('\\','/');
+    const stateRoot=await common(root),old=await localJson(root,'.relay/project.json')??await localJson(stateRoot,'relay/project.json');
+    a=structuredClone(a);if(old){if(old.version!==1||typeof old.id!=='string')throw Error('仓库项目身份文件无效');if(old.id!==a.projectId)a.project.sourceTeamId=a.projectId;a.projectId=old.id;a.project.id=old.id;a.run.projectId=old.id;if(typeof old.name==='string')a.project.name=old.name;}
+    a.projectRelative=relative(repo,w.project.path).replaceAll('\\','/');
     const portable=(path:string)=>{const normalized=path.replaceAll('\\','/'),base=w.project.path.replaceAll('\\','/').replace(/\/$/,'');return normalized.startsWith(base+'/')?normalized.slice(base.length+1):path;};
     for(const t of [a.run.planner,...a.run.tasks,...a.run.delivery?[a.run.delivery]:[]]){for(const artifact of t.artifacts??[])artifact.path=portable(artifact.path);for(const snapshot of t.visualSnapshots??[])snapshot.path=portable(snapshot.path);}
     validateArchive(a);
@@ -69,13 +70,14 @@ export class StudioRepository {
     if(fetch)await fetchRepository(root);const archive=await localJson(repo,archivePath(w.runId));validateArchive(archive);
     const remoteHead=await refHash(root,'refs/remotes/origin/'+archive.branch),main=await defaultBranch(root),mainHead=await refHash(root,'refs/remotes/origin/'+main)||await refHash(root,'refs/heads/'+main);
     const remote=remoteHead?await gitJson(root,remoteHead,archivePath(w.runId)):undefined;if(remote)validateArchive(remote);
-    const diff=(await repositoryGit(repo,['diff',remoteHead||'HEAD','--name-only','-z','--no-ext-diff','--ignore-submodules=all'])).split('\0').filter(Boolean),untracked=(await repositoryGit(repo,['ls-files','--others','--exclude-standard','-z'])).split('\0').filter(Boolean);
+    const diff=(await repositoryGit(repo,['diff',remoteHead||'HEAD','--name-only','-z','--no-ext-diff','--ignore-submodules=none'])).split('\0').filter(Boolean),untracked=(await repositoryGit(repo,['ls-files','--others','--exclude-standard','-z'])).split('\0').filter(Boolean);
+    const modules=new Set((await repositoryGit(repo,['ls-files','--stage','-z'])).split('\0').filter(p=>p.startsWith('160000 ')).map(p=>p.slice(p.indexOf('\t')+1)));
     const documents:string[]=[];const walk=async(folder:string,depth=0)=>{if(depth>12||documents.length>10000)throw Error('需求文本资料过多，请先整理后同步');if(!existsSync(folder))return;for(const entry of await readdir(folder,{withFileTypes:true})){const file=join(folder,entry.name);if(entry.isSymbolicLink())throw Error('需求资料不能包含符号链接');if(entry.isDirectory())await walk(file,depth+1);else if(/\.(md|json|txt|csv|ya?ml)$/i.test(entry.name))documents.push(relative(repo,file).replaceAll('\\','/'));}};
     await walk(join(w.project.path,'.studio',w.runId));
     const formal=[archive.run.planner,...archive.run.tasks,...archive.run.delivery?[archive.run.delivery]:[]].flatMap(t=>(t.artifacts??[]).map((a:any)=>relative(repo,resolve(w.project.path,a.path)).replaceAll('\\','/'))).filter(p=>repositoryFilePolicy(p)&&existsSync(join(repo,p)));
     const candidates=[...new Set([...diff,...untracked,...documents,...formal])].sort(),files:{path:string;bytes:number;deleted:boolean;hash:string}[]=[],omitted:string[]=[],blobs=new Map<string,string>();
     if(remoteHead)for(const entry of (await repositoryGit(repo,['ls-tree','-r','-z',remoteHead])).split('\0')){const tab=entry.indexOf('\t');if(tab>=0)blobs.set(entry.slice(tab+1),entry.slice(0,tab).split(' ')[2]);}
-    for(const path of candidates){if(!repositoryFilePolicy(path)){omitted.push(path);continue;}const file=resolve(repo,path);if(!existsSync(file)){files.push({path,bytes:0,deleted:true,hash:'deleted'});continue;}
+    for(const path of candidates){if(modules.has(path)){omitted.push(path+'（子模块改动需先单独提交并推送，当前只同步需求与顶层工程）');continue;}if(!repositoryFilePolicy(path)){omitted.push(path);continue;}const file=resolve(repo,path);if(!existsSync(file)){files.push({path,bytes:0,deleted:true,hash:'deleted'});continue;}
       const st=await lstat(file);if(!st.isFile()||!inside(await realpath(repo),await realpath(file)))throw Error('提交文件包含符号链接或子模块，请先单独同步：'+path);
       if(st.size>25*1024*1024){omitted.push(path+'（超过 25 MB，请配置 LFS 后单独同步）');continue;}
       const bytes=await readFile(file),blob=createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex');if(blobs.get(path)===blob)continue;

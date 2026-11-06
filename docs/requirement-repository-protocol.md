@@ -14,6 +14,8 @@
 
 项目根是 Git 仓库根；`projectRelative` 表示游戏工程目录相对于仓库根的位置，例如 `project`，仓库根本身则为空字符串。跨设备不得把源电脑绝对路径作为执行目录。
 
+`.relay/project.json` 是仓库项目身份的权威。旧设备可能各自创建过不同团队 UUID；拉取后保存需求时统一使用仓库的项目 UUID，原团队 ID 可保留为 `project.sourceTeamId`，不修改源设备当前的团队绑定或执行归属。这样同一个仓库不会因为电脑不同分裂成多个 Git 项目。初始化之前的本地项目身份与待提交索引暂存在 Git common dir 的 `relay/` 中，不在主干工作目录生成会阻挡 pull 的未跟踪文件。
+
 机器可读结构见 [requirement-archive-v1.schema.json](schemas/requirement-archive-v1.schema.json)。实现还会检查任务 ID 唯一性、依赖存在性、循环依赖、路径与体积限制，不能只通过 JSON Schema 就认为可以执行。
 
 ## 项目与索引
