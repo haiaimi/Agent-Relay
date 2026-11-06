@@ -13,7 +13,7 @@ export class StudioMainline {
  private save(j:Job){this.store.db.prepare('INSERT OR REPLACE INTO studio_mainline_jobs VALUES(?,?,?)').run(j.id,j.runId,JSON.stringify(j));this.changed();}
  private run(id:string){const r=this.studio.runs().find(r=>r.id===id);if(!r)throw Error('需求不存在');return r;}
  list(runId:string){this.run(runId);return this.store.db.prepare('SELECT json FROM studio_mainline_jobs WHERE run_id=? ORDER BY rowid DESC LIMIT 10').all(runId).map(row=>{
-  const j=JSON.parse(String(row.json)) as Job;if(j.phase==='running'&&j.sessionId){const s=this.store.getSession(j.sessionId);if(s&&!['running','waiting'].includes(s.status)){
+  const j=JSON.parse(String(row.json)) as Job;if(j.phase==='running'&&j.sessionId){const s=this.store.getSession(j.sessionId);if(s&&!['running','waiting'].includes(s.status)&&!(s.pendingCount&&s.pendingCount>0)){
    const messages=new Map<string,string>();for(const e of this.store.sessionEvents(j.sessionId)){if(e.type==='message'&&e.data.role==='assistant')messages.set(e.data.id,String(e.data.text??''));if(e.type==='delta')messages.set(e.data.messageId,(messages.get(e.data.messageId)??'')+String(e.data.text??''));}
    const blocks=[...messages.values()].join('\n').matchAll(/```STUDIO_MERGE_RESULT\s*([\s\S]*?)```/g);let report:any;for(const b of blocks){try{report=JSON.parse(b[1]);}catch{}}
    if(report&&['merged','blocked'].includes(report.outcome)&&typeof report.summary==='string'&&report.summary.length<=6000&&report.targetBranch===j.branch){j.report={...report,checks:Array.isArray(report.checks)?report.checks.slice(0,40):[]};j.phase=report.outcome==='merged'&&/^[a-f0-9]{40,64}$/.test(report.targetCommit??'')&&/^[a-f0-9]{40,64}$/.test(report.sourceCommit??'')&&j.report.checks.length>0?'reported':'blocked';}else{j.phase='blocked';j.error='合入任务已停止，未收到有效合入报告，请核对完整记录。';}this.save(j);
@@ -56,7 +56,8 @@ export function mergeInstructions(r:{id:string;title:string},w:{project:{path:st
 制作人选定目标分支：${JSON.stringify(branch)}
 先只读核对 worktree、Git common-dir、分支和 HEAD、所有 worktree 的状态、未完成 merge/rebase、子模块与并行写入者；确认它们属于同一个仓库。目标分支必须已经存在，不得猜测其他分支代替，不得切换或清理源工程。
 制作人已明确合入范围：只把游戏功能代码、运行所需正式资产、场景及必要的正式启动入口合入主干。中间生成文件不合入：排除 .studio 制作记录、截图、视频、录帧、检查报告、日志、缓存、角度扫描和临时试验脚本；这些证据留在原需求副本。正式运行资源与临时导出要按引用关系区分，不能漏掉运行依赖。列出本需求交付清单、跟踪/未跟踪差异和待提交文件；只整理可归属于本需求的正式文件。不能 git add -A/-f 批量吞入其他工作；排除凭据、.env、构建/导入缓存、大体积录帧、临时进程/锁和私有目录。游戏需要的正式资产必须完整。新文件、子模块、继承的未提交改动若归属不明确，报告 blocked 并列出待核对路径。不得误称所有 dirty 都是本需求成果。
-提交前复核 diff 和资产依赖，只提交本需求文件。此按钮明确授权本需求所需的本地 Git 提交及合入选定目标；不授权推送、发布、删除历史或修改其他需求。
+若原成果分支夹带其他实验或历史提交，不要整条合入原分支；从目标 HEAD 创建独立整合 worktree/临时分支，按正式交付路径进行文件级整合，形成只含本需求功能代码和资产的独立提交。最终 sourceCommit 指这一个交付专用提交。提交前复核 diff 和资产依赖，只暂存明确列出的正式文件。此按钮明确授权本需求所需的本地 Git 提交及合入选定目标；不授权推送、发布、删除历史或修改其他需求。
+运行依赖若错误引用 .studio 内的配置，在整合副本把同一数据提升到正式 config 目录并修正加载路径，不改变参数值；旧 .import/缓存不合入，使用独立整合副本重新生成，不为排除缓存而清理原副本。
 合入前检查目标分支所有已检出 worktree，存在其他未提交改动/并行写入/未完成整合则停止并报告，禁止 stash/reset/clean/force。先在新建的独立整合 worktree（目标 HEAD 的副本）试合并并做适合变更的验证，出现冲突就保留整合副本和冲突记录，原目标不变。确认验证通过后再次核对目标 HEAD 未变化，再正常合入目标。禁止强推、绕过冲突或悄悄修正其他人的变更。
 成功后实际执行 git merge-base --is-ancestor <成果提交> <目标分支>，核对目标 HEAD、Git 状态、子模块、可玩入口和工作副本中的启动脚本（不能遗留指向旧 worktree 的绝对路径）。合入不能虚构缺失的 QA，也不能把延期项写成通过。保留原需求副本、提交前后的 SHA、整合日志和失败证据。
 最后输出 fenced STUDIO_MERGE_RESULT JSON：{outcome:"merged"或"blocked",targetBranch:${JSON.stringify(branch)},sourceCommit:"实际成果SHA",targetCommit:"实际目标SHA",summary:"实际结果或具体阻断",checks:["实际命令与结果"],integrationWorktree:"实际路径"}。没有实际合入及祖先验证，不得报告 merged；不推送远程。`;
