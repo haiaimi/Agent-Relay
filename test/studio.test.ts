@@ -464,6 +464,21 @@ test('blocked QA stops delivery, rework invalidates downstream and preserves old
     await f.studio.command({runId:f.run().id,op:'cancel'});assert.equal(f.run().status,'cancelled');assert.equal(f.actions.at(-1)!.type,'stop');
   }finally{await f.close();}
 });
+test('planner retry instructions stay scoped to planning instead of forbidding downstream production',async()=>{
+  const f=await fixture();try{
+    f.studio.saveProject({...f.project,reviewPlan:false});
+    f.studio.createRun({workflow:'general',projectId:f.project.id,title:'规划恢复',brief:'实际制作'});await f.settle();
+    f.finish(f.run().planner,'无效计划');await f.settle();
+    const feedback='修复规划启动，仅输出原需求的制作计划。';
+    await f.studio.command({runId:f.run().id,op:'retry',taskId:'studio-plan',feedback});await f.settle();
+    assert.match(f.actions.at(-1)!.text!,/仅输出原需求的制作计划/);
+    assert.equal(f.run().feedback,undefined);
+    // Old persisted runs stored this same planner instruction globally.
+    const legacy=f.run();legacy.feedback=feedback;f.store.db.prepare('UPDATE studio_runs SET json=? WHERE id=?').run(JSON.stringify(legacy),legacy.id);
+    f.finish(f.run().planner,plan([task('a')]));await f.settle();
+    assert.equal(f.run().tasks[0].status,'running');assert.doesNotMatch(f.actions.at(-1)!.text!,/仅输出原需求的制作计划/);
+  }finally{await f.close();}
+});
 test('malformed output and failed execution cannot masquerade as completion; restart never duplicates uncertain delivery',async()=>{
   const f=await fixture();try{
     f.studio.createRun({workflow:'general',projectId:f.project.id,title:'需求',brief:'制作'});await f.settle();f.finish(f.run().planner,'看起来完成了');await f.settle();assert.equal(f.run().planner.status,'blocked');assert.equal(f.run().tasks.length,0);

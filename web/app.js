@@ -10,6 +10,7 @@ import {orderedMessages,acceptsStatusEvent,HistoryPager,reconcileChildren,timeli
 import {directAssets} from './direct.js';
 import {QuestionPanel} from './questions.js';
 import {settingsPresentation,findModel,modelName} from './session-settings.js';
+import {renderPermissionControls} from './session-permissions.js';
 import {setupComposerKeys} from './composer.js';
 const $=id=>document.getElementById(id);
 let state={hosts:[],sessions:[]},provider='all',selected=null,messages=new Map(),approvals=new Map(),seen=new Set(),events=null,refreshTimer;
@@ -28,7 +29,6 @@ const receipts=new SendReceipts();
 const settingsWrites=new SettingsWrites((sessionId,patch)=>action({type:'set-model',sessionId,...patch}),()=>renderHead(),(id,patch,result)=>{const session=state.sessions.find(s=>s.id===id);if(!session)return;const model=result.model??patch.model,effort=result.effort??patch.effort;Object.assign(session,result.queued?{nextModel:model,nextEffort:effort}:{model,effort,nextModel:undefined,nextEffort:undefined});if(selected?.id===id)selected=session;},(id,error)=>toast('模型设置未保存：'+error.message));
 const draftMemory=new Map(),drafts={get(id){try{return draftMemory.get(id)??localStorage.getItem('relay-session-draft:'+id)??'';}catch{return draftMemory.get(id)??'';}},set(id,value){draftMemory.set(id,value);try{if(value)localStorage.setItem('relay-session-draft:'+id,value);else localStorage.removeItem('relay-session-draft:'+id);}catch{}}},expandedTools=new Set(),sending=new Set(),stopping=new Set();let commandOptions=[],commandCandidates=[],commandIndex=0,commandsLoading=0;
 const effortNames={default:'本机默认',none:'无',minimal:'最低',low:'低',medium:'中',high:'高',xhigh:'很高',max:'最高',ultra:'极高'};
-const permissionNames={request:'请求批准',auto:'帮我批准',full:'完整权限'};
 const permissionChanges=new Set();
 const statusNames={history:'历史会话',idle:'已完成',running:'正在执行',waiting:'等待你确认',failed:'执行失败',interrupted:'已停止'};
 const markdown=typeof window.markdownit==='function'?window.markdownit({html:false,linkify:true,breaks:true}):null;
@@ -147,12 +147,11 @@ function renderHead(){
   $('model-select').disabled=!online;$('effort-select').disabled=!online;
   const saving=settingsWrites.pending(selected.id);
   const presentation=settingsPresentation(selected,modelLists.get(selected.hostId+':'+selected.provider+':'+(selected.agentId??''))??[],!selected.settingsSource&&!selected.settingsError&&online);
-  const permission=selected.nextPermissionMode??selected.permissionMode??'';
-  $('permission-preview').textContent=presentation.permission;$('permission-toggle').dataset.mode=permission;
+  const permission=renderPermissionControls(selected,{preview:$('permission-preview'),toggle:$('permission-toggle'),menu:$('permission-menu'),loading:!selected.settingsSource&&!selected.settingsError&&online});
   $('permission-toggle').disabled=permissionChanges.has(selected.id);
-  $('permission-toggle').title=presentation.permissionPending||selected.settingsError||(selected.canSetPermissions===false?'此原生 Claude 窗口需在电脑上修改权限':'选择当前会话权限');
-  for(const option of document.querySelectorAll('[data-permission]')){option.setAttribute('aria-pressed',String(option.dataset.permission===permission));option.disabled=!online||!hostOf(selected)?.capabilities?.permissions||selected.canSetPermissions===false||permissionChanges.has(selected.id);}
-  $('permission-note').textContent=!hostOf(selected)?.capabilities?.permissions?'此电脑的连接程序需要更新后才能选择权限':selected.canSetPermissions===false?'独立 Claude 窗口的权限需在电脑上修改；网页启动的 Claude 支持切换':selected.nextPermissionMode?'已预设下一轮权限，当前任务保持原权限':'仅应用于当前会话；Agent 强制要求的确认仍会显示';
+  $('permission-toggle').title=[permission.summary,selected.settingsError,selected.canSetPermissions===false?'此原生 Claude 窗口需在电脑上修改权限':''].filter(Boolean).join('\n');
+  for(const option of $('permission-menu').querySelectorAll('[data-permission]'))option.disabled=!online||!hostOf(selected)?.capabilities?.permissions||selected.canSetPermissions===false||permissionChanges.has(selected.id);
+  $('permission-note').textContent=permission.note+(!hostOf(selected)?.capabilities?.permissions?' 此电脑的连接程序需要更新后才能选择权限':selected.canSetPermissions===false?' 独立 Claude 窗口的权限需在电脑上修改；网页启动的 Claude 支持切换':'');
   const targetModel=saving?.model??selected.nextModel??selected.model;if(targetModel&&[...$('model-select').options].some(o=>o.value===targetModel))$('model-select').value=targetModel;
   const targetEffort=saving?.effort??selected.nextEffort??selected.effort??'default';if([...$('effort-select').options].some(o=>o.value===targetEffort))$('effort-select').value=targetEffort;
   const settingsModels=modelLists.get(selected.hostId+':'+selected.provider+':'+(selected.agentId??''))??[];

@@ -13,11 +13,16 @@ test('preview uses isolated sample state and handles queue, answers and completi
   const initial=await api('state');assert.equal(initial.sessions.length,9);assert.equal(initial.hosts.length,2);
   assert.ok(initial.sessions.some((s:any)=>s.status==='running'));assert.ok(initial.sessions.some((s:any)=>s.status==='idle'));
   const history=await api('history?sessionId=demo:lighting');assert.ok(history.messages.some((m:any)=>m.images?.length));
+  const permissionBefore=initial.sessions.find((s:any)=>s.id==='demo:lighting').permissionMode;
+  const permissionChanged=await api('actions',{type:'set-permissions',sessionId:'demo:lighting',permissionMode:'full'});assert.equal(permissionChanged.queued,true);
+  const preset=(await api('state')).sessions.find((s:any)=>s.id==='demo:lighting');assert.equal(preset.permissionMode,permissionBefore);assert.equal(preset.nextPermissionMode,'full');
   const queued=await api('actions',{type:'send',sessionId:'demo:lighting',text:'请补充细节'});assert.equal(queued.queued,true);
   const running=(await api('state')).sessions.find((s:any)=>s.id==='demo:lighting');assert.equal(running.pendingCount,1);
   await api('actions',{type:'steer',sessionId:running.id,queuedId:running.pendingIds[0]});
   for(const [id,fn] of [...timers]){timers.delete(id);fn();}
   assert.equal((await api('state')).sessions.find((s:any)=>s.id===running.id).status,'idle');
+  await api('actions',{type:'send',sessionId:running.id,text:'开始下一轮'});
+  const next=(await api('state')).sessions.find((s:any)=>s.id===running.id);assert.equal(next.permissionMode,'full');assert.equal(next.nextPermissionMode,undefined);
   await api('actions',{type:'answer',sessionId:'demo:question',questionId:'aaaaaaaa-1111-4111-8111-111111111111',answers:{style:['温暖海岸']}});
   const answered=await api('history?sessionId=demo:question');assert.equal(answered.questions.length,0);assert.equal(answered.events[0].data.status,'answered');
   await api('actions',{type:'stop',sessionId:'demo:question'});for(const fn of timers.values())fn();

@@ -38,6 +38,15 @@ test('deferred checks require an actual explicit producer scope quote, and prese
  r.guidance[0].automatic=true;assert.throws(()=>deferredChecks([d],r),/实际存在/);
 });
 
+test('a legacy planner-only retry note cannot authorize deferring downstream production',()=>{
+ const note='恢复规划，暂不运行白模和渲染，只输出本轮制作计划';
+ const run:any={brief:'制作新场景',feedback:note,planner:{feedback:note}};
+ const deferred={code:'RENDER',details:'未执行渲染',basis:note};
+ assert.throws(()=>deferredChecks([deferred],run),/实际存在/);
+ run.guidance=[{text:'GI 专项暂缓，本轮先完成角色和场景制作'}];
+ assert.deepEqual(deferredChecks([{...deferred,basis:run.guidance[0].text}],run),[{...deferred,basis:run.guidance[0].text}]);
+});
+
 
 test('runtime failures resume automatically, while an explicit stop and model reconnect recovery keep their ownership',async()=>{
  const f=fixture();try{f.run.tasks[1].finishedAt=undefined;f.run.tasks[1].checkpoint={at:75_000,reason:'导出脚本抛出异常，已保存断点'};f.store.session({...f.store.getSession('h:one')!,status:'failed'});await f.tick();f.time(3000);await f.tick();assert.equal(f.commands.length,1);assert.equal(f.commands[0].expectedCheckpointAt,75_000);}finally{await f.close();}

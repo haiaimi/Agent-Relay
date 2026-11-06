@@ -1,5 +1,5 @@
+import {permissionPresentation} from './session-permissions.js';
 const efforts={none:'无',minimal:'最低',low:'低',medium:'中',high:'高',xhigh:'很高',max:'最高',ultra:'极高'};
-const permissions={request:'请求批准',auto:'帮我批准',full:'完整权限'};
 // Several Claude choices can resolve to the same wire ID. Prefer an exact ID,
 // then a named model, so the generic default row cannot hide the actual model.
 export function findModel(list,id){
@@ -17,5 +17,6 @@ export function settingsPresentation(session,list=[],loading=false){
   // or an unrelated model/list default. Presets have their own explicit label.
   const current=`${name(session.model)} · ${effort(session.model,session.effort)}`;
   const pending=session.nextModel||session.nextEffort?`下一轮：${name(session.nextModel??session.model)} · ${effort(session.nextModel??session.model,session.nextEffort??session.effort)}`:'';
-  return {model:current,pending,permission:session.permissionLabel||permissions[session.permissionMode]||(loading?'读取权限中…':'权限未读取'),permissionPending:session.nextPermissionMode?`下一轮：${permissions[session.nextPermissionMode]}`:''};
+  const permission=permissionPresentation(session,loading);
+  return {model:current,pending,permission:permission.current,permissionPending:permission.pending};
 }

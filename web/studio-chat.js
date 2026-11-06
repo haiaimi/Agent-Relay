@@ -1,6 +1,7 @@
 import {displayUserMessage} from './message-text.js';
 import {setupReplyKeys} from './composer.js';
 import {SettingsWrites} from './operations.js';
+import {renderPermissionControls} from './session-permissions.js';
 import {enhanceDiagrams} from './diagrams.js';
 import {pagedConversationCache} from './conversation-cache.js';
 import {AttachmentInput} from './attachments.js';
@@ -23,7 +24,7 @@ export function studioChat({snapshot,api,refresh,roleName,notify,review}){
   const key=()=>runId+':'+role,context=()=>{const p=team(),r=run();return p&&r?{key:key(),target:{hostId:p.hostId,...sessionId?{sessionId}:{projectId:r.workspace?.value?.project?.id}}}:null;};
   const files=new AttachmentInput($('chat-form'),$('chat-attach'),$('chat-files'),context,m=>{$('chat-error').textContent=m||'';},{clipboardFiles});
   const action=async value=>api('actions',{id:crypto.randomUUID(),sessionId,...value});
-  const permissionNames={request:'请求批准',auto:'帮我批准',full:'完整权限'},permissionErrors=new Map();
+  const permissionErrors=new Map();
   const permissionKey=()=>JSON.stringify([runId,role,sessionId||'']);
   const permissionWrites=new SettingsWrites((key,patch)=>{const [runId,role,sessionId]=JSON.parse(key);return api('studio/chat/settings',{id:crypto.randomUUID(),runId,role,...sessionId?{sessionId}:{},...patch});},()=>{if($('chat-dialog').open)renderPermissions();},(key,patch,result)=>{
     const [targetRun,targetRole,targetSession]=JSON.parse(key),r=snapshot().state.runs.find(r=>r.id===targetRun),s=snapshot().relay.sessions.find(s=>s.id===targetSession);if(r){r.chatPermissions??={};r.chatPermissions[targetRole]=result.permissionMode;}
@@ -37,11 +38,11 @@ export function studioChat({snapshot,api,refresh,roleName,notify,review}){
   function renderPermissions(){
     permissionToggle.hidden=role==='team';if(permissionToggle.hidden||!run()){permissionMenu.close();return;}
     if(permissionMenu.open&&permissionMenu.dataset.target!==permissionKey())permissionMenu.close();
-    const r=run(),p=team(),s=snapshot().relay.sessions.find(s=>s.id===sessionId),pending=permissionWrites.pending(permissionKey()),mode=pending?.permissionMode??(sessionId?s?.nextPermissionMode??s?.permissionMode:r.chatPermissions?.[role]??p.permissionMode),note=$('chat-permission-note');
-    permissionToggle.dataset.mode=mode||'';permissionToggle.disabled=sending||r.status==='cancelled'||selection()?.archived||r.workspace?.status!=='ready'||!snapshot().relay.hosts.some(h=>h.id===p.hostId&&h.online&&h.capabilities?.permissions)||s?.canSetPermissions===false;
-    $('chat-permission-preview').textContent=pending?'正在保存…':permissionNames[mode]||'本机权限';
-    for(const option of permissionMenu.querySelectorAll('[data-permission]')){option.setAttribute('aria-pressed',String(option.dataset.permission===mode));option.disabled=permissionToggle.disabled||!!pending;}
-    note.textContent=permissionErrors.has(permissionKey())?'权限未确认，请重新选择':pending?'正在保存权限…':s?.nextPermissionMode?'下一轮使用'+permissionNames[s.nextPermissionMode]+'；当前'+(permissionNames[s.permissionMode]||s.permissionLabel||'权限未读取'):'应用于当前会话及该职能的新对话；已有批准卡片仍需单独处理。';
+    const r=run(),p=team(),s=snapshot().relay.sessions.find(s=>s.id===sessionId),pending=permissionWrites.pending(permissionKey()),note=$('chat-permission-note');
+    const permission=renderPermissionControls(sessionId?s??{}:{permissionMode:r.chatPermissions?.[role]??p.permissionMode},{preview:$('chat-permission-preview'),toggle:permissionToggle,menu:permissionMenu});
+    permissionToggle.disabled=sending||r.status==='cancelled'||selection()?.archived||r.workspace?.status!=='ready'||!snapshot().relay.hosts.some(h=>h.id===p.hostId&&h.online&&h.capabilities?.permissions)||s?.canSetPermissions===false;
+    for(const option of permissionMenu.querySelectorAll('[data-permission]'))option.disabled=permissionToggle.disabled||!!pending;
+    note.textContent=permission.summary+'。'+(permissionErrors.has(permissionKey())?'权限未确认，请重新选择':pending?'正在保存权限…':s?.nextPermissionMode?'下一轮开始时生效，当前任务继续使用当前权限。':'应用于当前会话及该职能的新对话；已有批准卡片仍需单独处理。');
     permissionToggle.title=note.textContent;positionPermissions();
   }
   permissionToggle.onclick=()=>{renderPermissions();if(permissionToggle.disabled||permissionToggle.hidden)return;permissionMenu.style.cssText='margin:0;position:fixed;inset:auto';permissionMenu.dataset.target=permissionKey();permissionMenu.tabIndex=-1;permissionMenu.showModal();permissionToggle.setAttribute('aria-expanded','true');positionPermissions();permissionMenu.focus({preventScroll:true});};

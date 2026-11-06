@@ -17,10 +17,13 @@ export function repeatedFailure(t:Task){
   return count>=3?{key,count}:undefined;
 }
 export interface DeferredCheck {code:string;details:string;basis:string}
+export function productionFeedback(run:Pick<StudioRun,'feedback'|'planner'>){
+  return run.feedback&&run.feedback!==run.planner?.feedback?run.feedback:undefined;
+}
 export function deferredChecks(value:unknown,run:StudioRun):DeferredCheck[]{
   if(value===undefined)return [];
   if(!Array.isArray(value)||value.length>12)throw Error('延期检查记录格式无效');
-  const authority=[run.brief,run.feedback,...(run.guidance??[]).filter(g=>!g.automatic&&!g.text.includes('<send_user_message_question_reply>')).map(g=>g.text),...(run.directions??[]).map(g=>g.text)].filter((s):s is string=>typeof s==='string');
+  const authority=[run.brief,productionFeedback(run),...(run.guidance??[]).filter(g=>!g.automatic&&!g.text.includes('<send_user_message_question_reply>')).map(g=>g.text),...(run.directions??[]).map(g=>g.text)].filter((s):s is string=>typeof s==='string');
   const rows=value.map(d=>{
     if(!d||typeof d.code!=='string'||!/^[A-Z0-9_-]{1,60}$/.test(d.code)||typeof d.details!=='string'||!d.details.trim()||d.details.length>2000||typeof d.basis!=='string'||d.basis.trim().length<4||d.basis.length>1000||!/延期|暂缓|先放|暂不|不(?:纳入|做|验收)|不(?:需要|要求).{0,20}(?:检查|验收|GI|光照|专项|验证|测试)|跳过|不在.{0,20}范围|后续再|下一轮|下次|defer|not.required|out.of.scope/i.test(d.basis)||!authority.some(s=>s.includes(d.basis)))throw Error('延期检查须引用本需求中实际存在的制作人范围说明，不能自行豁免必需验收');
     return {code:d.code,details:d.details.trim(),basis:d.basis};
