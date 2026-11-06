@@ -29,9 +29,11 @@ async function refHash(root:string,ref:string){try{return (await repositoryGit(r
 async function rootFor(p:Project){return (await repositoryGit(p.path,['rev-parse','--show-toplevel'])).trim();}
 async function common(root:string){return resolve(root,(await repositoryGit(root,['rev-parse','--git-common-dir'])).trim());}
 async function defaultBranch(root:string){try{const b=(await repositoryGit(root,['symbolic-ref','refs/remotes/origin/HEAD'])).trim();if(/^refs\/remotes\/origin\/.+/.test(b))return b.slice('refs/remotes/origin/'.length);}catch{}for(const b of ['main','master'])if(await refHash(root,'refs/remotes/origin/'+b)||await refHash(root,'refs/heads/'+b))return b;throw Error('找不到主干，请先设置 origin 的默认分支');}
+async function repositoryIdentity(root:string){const branch=await defaultBranch(root).catch(()=>undefined),remote=branch?await gitJson(root,'refs/remotes/origin/'+branch,'.relay/project.json'):undefined;return remote??await localJson(root,'.relay/project.json')??await localJson(await common(root),'relay/project.json')??await gitJson(root,'HEAD','.relay/project.json');}
 async function fetchRepository(root:string){for(let attempt=0;attempt<5;attempt++)try{await repositoryGit(root,['fetch','--no-tags','origin','+refs/heads/*:refs/remotes/origin/*']);return;}catch(e){if(attempt===4||!/timed? out|connection|could not resolve|unable to access|network|远程主机/i.test((e as Error).message))throw e;await new Promise(r=>setTimeout(r,60000));}}
-function excluded(path:string){return /(^|\/)(captures?|screenshots?|recordings?|frames?|cache|node_modules|\.godot|\.git|\.data|\.runtime|dist|build|tmp|temp)(\/|$)/i.test(path)||/\.(mp4|mov|mkv|webm|avi|log|tmp|bak|exe|dll|dylib|so|zip|7z|tar|gz)$/i.test(path)||/(^|\/)(\.env(?:\..*)?|id_rsa|id_ed25519|credentials[^/]*|.*\.(pem|key))$/i.test(path)||path.startsWith('.relay/')||path.startsWith('.studio/')&&!/\.(md|json|txt|csv|ya?ml)$/i.test(path);}
+function excluded(path:string){return /(^|\/)(captures?|screenshots?|recordings?|frames?|cache|__pycache__|node_modules|\.venv|\.ssh|\.aws|\.codex|\.claude|\.godot|\.git|\.data|\.runtime|dist|build|tmp|temp)(\/|$)/i.test(path)||/\.(mp4|mov|mkv|webm|avi|log|tmp|bak|pyc|exe|dll|dylib|so|zip|7z|tar|gz)$/i.test(path)||/(^|\/)(\.env(?:\..*)?|\.mcp\.json|auth\.json|id_rsa|id_ed25519|credentials[^/]*|.*\.(pem|key))$/i.test(path)||path.startsWith('.relay/')||path.startsWith('.studio/')&&!/\.(md|json|txt|csv|ya?ml|py|gd|ps1|sh|js|mjs)$/i.test(path);}
 export function repositoryFilePolicy(path:string){return validRepositoryPath(path)&&!excluded(path);}
+const processAsset=(path:string)=>/(^|\/)(validation|rebuild|previews?|renders?|trials?|history|archive|fixtures?)(\/|$)/i.test(path);
 
 export class StudioRepository {
   constructor(private store:BridgeStore,private dataDir:string){}
@@ -49,7 +51,7 @@ export class StudioRepository {
     return this.publish(root,repo,w,v,view);
   });}
   private async save(root:string,repo:string,w:StudioWorkspace,a:RequirementArchive){
-    const stateRoot=await common(root),old=await localJson(root,'.relay/project.json')??await localJson(stateRoot,'relay/project.json');
+    const stateRoot=await common(root),old=await repositoryIdentity(root);
     a=structuredClone(a);if(old){if(old.version!==1||typeof old.id!=='string')throw Error('仓库项目身份文件无效');if(old.id!==a.projectId)a.project.sourceTeamId=a.projectId;a.projectId=old.id;a.project.id=old.id;a.run.projectId=old.id;if(typeof old.name==='string')a.project.name=old.name;}
     a.projectRelative=relative(repo,w.project.path).replaceAll('\\','/');
     const portable=(path:string)=>{const normalized=path.replaceAll('\\','/'),base=w.project.path.replaceAll('\\','/').replace(/\/$/,'');return normalized.startsWith(base+'/')?normalized.slice(base.length+1):path;};
@@ -59,10 +61,10 @@ export class StudioRepository {
     // untracked files into a protected checkout where they could block git pull.
     await jsonFile(stateRoot,'relay/project.json',{version:1,id:a.projectId,name:a.project.name});
     await jsonFile(repo,'.relay/project.json',{version:1,id:a.projectId,name:a.project.name});
-    const previous=await localJson(repo,archivePath(a.runId)) as RequirementArchive|undefined;
-    if(previous){validateArchive(previous);const bySession=new Map(previous.conversations.map(c=>[c.sessionId,c]));for(const c of a.conversations){const old=bySession.get(c.sessionId),messages=new Map([...(old?.messages??[]),...c.messages].map(m=>[m.id,m]));bySession.set(c.sessionId,{...c,messages:[...messages.values()]});}a.conversations=[...bySession.values()];validateArchive(a);}
+    // Git carries the current handoff, not an ever-growing transcript archive.
+    a.conversations=a.conversations.map(c=>({...c,messages:c.messages.slice(-12).map(m=>({...m,text:m.text.length>12000?'[公开上下文节选；完整记录保留原机器]\n'+m.text.slice(-12000):m.text}))}));a.contextPolicy={messageLimit:12,completeHistory:false};a.run.log=a.run.log.slice(-20);a.run.guidance=(a.run.guidance??[]).slice(-12);a.run.publicGroup=(a.run.publicGroup??[]).slice(-12);delete a.run.deliveryHistory;delete a.run.feedbackFileHistory;for(const t of [a.run.planner,...a.run.tasks,...a.run.delivery?[a.run.delivery]:[]]){delete t.attempts;delete t.recovery;delete t.preflightRetry;delete t.autoFollowup;}validateArchive(a);
     await jsonFile(repo,archivePath(a.runId),a);
-    const index=await localJson(stateRoot,'relay/requirements.json') as RequirementIndex|undefined;
+    const index=await localJson(stateRoot,'relay/requirements.json') as RequirementIndex|undefined;if(index&&index.projectId!==a.projectId)index.projectId=a.projectId;
     await jsonFile(stateRoot,'relay/requirements.json',this.index(a,index));return {saved:true,hash:archiveHash(a)};
   }
   private index(a:RequirementArchive,old?:RequirementIndex):RequirementIndex{if(old&&(old.version!==1||old.projectId!==a.projectId||!Array.isArray(old.requirements)))throw Error('项目需求索引身份不匹配');return {version:1,projectId:a.projectId,requirements:[...(old?.requirements??[]).filter(r=>r.id!==a.runId),{id:a.runId,title:String(a.run.title),branch:a.branch,status:String(a.run.status),revision:Number(a.run.revision),updatedAt:Number(a.run.updatedAt)}].sort((x,y)=>x.id.localeCompare(y.id))};}
@@ -71,14 +73,30 @@ export class StudioRepository {
     const remoteHead=await refHash(root,'refs/remotes/origin/'+archive.branch),main=await defaultBranch(root),mainHead=await refHash(root,'refs/remotes/origin/'+main)||await refHash(root,'refs/heads/'+main);
     const remote=remoteHead?await gitJson(root,remoteHead,archivePath(w.runId)):undefined;if(remote)validateArchive(remote);
     const diff=(await repositoryGit(repo,['diff',remoteHead||'HEAD','--name-only','-z','--no-ext-diff','--ignore-submodules=none'])).split('\0').filter(Boolean),untracked=(await repositoryGit(repo,['ls-files','--others','--exclude-standard','-z'])).split('\0').filter(Boolean);
-    const modules=new Set((await repositoryGit(repo,['ls-files','--stage','-z'])).split('\0').filter(p=>p.startsWith('160000 ')).map(p=>p.slice(p.indexOf('\t')+1)));
-    const documents:string[]=[];const walk=async(folder:string,depth=0)=>{if(depth>12||documents.length>10000)throw Error('需求文本资料过多，请先整理后同步');if(!existsSync(folder))return;for(const entry of await readdir(folder,{withFileTypes:true})){const file=join(folder,entry.name);if(entry.isSymbolicLink())throw Error('需求资料不能包含符号链接');if(entry.isDirectory())await walk(file,depth+1);else if(/\.(md|json|txt|csv|ya?ml)$/i.test(entry.name))documents.push(relative(repo,file).replaceAll('\\','/'));}};
-    await walk(join(w.project.path,'.studio',w.runId));
-    const formal=[archive.run.planner,...archive.run.tasks,...archive.run.delivery?[archive.run.delivery]:[]].flatMap(t=>(t.artifacts??[]).map((a:any)=>relative(repo,resolve(w.project.path,a.path)).replaceAll('\\','/'))).filter(p=>repositoryFilePolicy(p)&&existsSync(join(repo,p)));
+    const stages=(await repositoryGit(repo,['ls-files','--stage','-z'])).split('\0'),tracked=new Set(stages.map(p=>p.slice(p.indexOf('\t')+1))),modules=new Set(stages.filter(p=>p.startsWith('160000 ')).map(p=>p.slice(p.indexOf('\t')+1)));
+    const formal=[archive.run.planner,...archive.run.tasks,...archive.run.delivery?[archive.run.delivery]:[]].flatMap(t=>(t.artifacts??[]).map((a:any)=>relative(repo,resolve(w.project.path,a.path)).replaceAll('\\','/'))).filter(p=>repositoryFilePolicy(p)&&existsSync(join(repo,p))),declared=new Set(formal),groups=new Set<string>(),documents:string[]=[],sources:string[]=[],visited=new Set<string>();
+    const projectRoot=existsSync(join(w.project.path,'project.godot'))?w.project.path:existsSync(join(w.project.path,'project','project.godot'))?join(w.project.path,'project'):w.project.path;
+    const addGroup=(path:string)=>{if(!/(^|\/)assets\//.test(path))return;const version=path.match(/^(.*?\/v\d+)(?:\/|$)/)?.[1],parent=dirname(path).replaceAll('\\','/'),scope=parent.replace(/^.*?(?:^|\/)assets\/?/,'').split('/').filter(Boolean);groups.add(version??(scope.length>=2?parent:path));};
+    for(const path of formal){if((await lstat(join(repo,path))).isDirectory())groups.add(path);else{addGroup(path);sources.push(path);}}
+    for(const path of [...diff,...untracked])if(repositoryFilePolicy(path)&&!/(^|\/)(assets|\.studio)\//.test(path)&&/\.(gd|tscn|tres|godot|ps1|sh|py|js|json)$/i.test(path))sources.push(path);
+    if(existsSync(join(projectRoot,'project.godot')))sources.push(relative(repo,join(projectRoot,'project.godot')).replaceAll('\\','/'));
+    const walk=async(folder:string,depth=0)=>{if(depth>12||documents.length>10000)throw Error('当前交付资产过多，请整理清单');if(!existsSync(folder))return;const st=await lstat(folder);if(st.isSymbolicLink()||!inside(await realpath(repo),await realpath(folder)))throw Error('交付资产路径链接超出工程');if(st.isFile()){const path=relative(repo,folder).replaceAll('\\','/');if(repositoryFilePolicy(path)&&!processAsset(path)){documents.push(path);if(/\.(json|gltf|gd|tscn|tres)$/i.test(path))sources.push(path);}return;}for(const entry of await readdir(folder,{withFileTypes:true})){const path=relative(repo,join(folder,entry.name)).replaceAll('\\','/');if(repositoryFilePolicy(path)&&!processAsset(path))await walk(join(folder,entry.name),depth+1);}};
+    const walked=new Set<string>();for(let round=0;round<12;round++){
+      for(const group of groups)if(!walked.has(group)){walked.add(group);await walk(join(repo,group));}
+      const pending=sources.splice(0);if(!pending.length)break;
+      for(const path of pending){if(visited.has(path)||!validRepositoryPath(path)||!existsSync(join(repo,path)))continue;visited.add(path);if(visited.size>1000)throw Error('资产依赖超过 1000 个文本文件，请缩小交付范围');const st=await lstat(join(repo,path));if(!st.isFile()||st.size>1024*1024||!inside(await realpath(repo),await realpath(join(repo,path))))continue;const text=await readFile(join(repo,path),'utf8'),refs=[...text.matchAll(/res:\/\/([^\s"'<>\)\]]+)/g)].map(m=>resolve(projectRoot,m[1]));
+        if(/\.(json|gltf)$/i.test(path))try{const collect=(v:any):void=>{if(typeof v==='string'&&/\.(png|jpe?g|webp|glb|gltf|blend|tres|tscn|scn|res)$/i.test(v))for(const base of [dirname(join(repo,path)),projectRoot,repo])refs.push(resolve(base,v));else if(v&&typeof v==='object')Object.values(v).forEach(collect);};collect(JSON.parse(text));}catch{}
+        for(const ref of refs)if(inside(repo,ref)&&existsSync(ref)&&(await lstat(ref)).isFile()){const p=relative(repo,ref).replaceAll('\\','/');if(repositoryFilePolicy(p)&&!processAsset(p)){declared.add(p);documents.push(p);addGroup(p);if(/\.(json|gltf|gd|tscn|tres|gdshader|glsl|glslinc)$/i.test(p))sources.push(p);}}
+      }
+    }
     const candidates=[...new Set([...diff,...untracked,...documents,...formal])].sort(),files:{path:string;bytes:number;deleted:boolean;hash:string}[]=[],omitted:string[]=[],blobs=new Map<string,string>();
     if(remoteHead)for(const entry of (await repositoryGit(repo,['ls-tree','-r','-z',remoteHead])).split('\0')){const tab=entry.indexOf('\t');if(tab>=0)blobs.set(entry.slice(tab+1),entry.slice(0,tab).split(' ')[2]);}
-    for(const path of candidates){if(modules.has(path)){omitted.push(path+'（子模块改动需先单独提交并推送，当前只同步需求与顶层工程）');continue;}if(!repositoryFilePolicy(path)){omitted.push(path);continue;}const file=resolve(repo,path);if(!existsSync(file)){files.push({path,bytes:0,deleted:true,hash:'deleted'});continue;}
-      const st=await lstat(file);if(!st.isFile()||!inside(await realpath(repo),await realpath(file)))throw Error('提交文件包含符号链接或子模块，请先单独同步：'+path);
+    const rootReal=await realpath(repo);
+    for(const path of candidates){if(modules.has(path)){omitted.push(path+'（子模块改动需先单独提交并推送，当前只同步需求与顶层工程）');continue;}if(!repositoryFilePolicy(path)){omitted.push(path);continue;}
+      if(!tracked.has(path)&&(/(^|\/)assets\//.test(path)&&(!declared.has(path)&&![...groups].some(g=>path===g||path.startsWith(g+'/'))||processAsset(path))||path.startsWith('.studio/')&&!declared.has(path))){omitted.push(path+'（非当前交付或运行依赖，保留本机）');continue;}
+      const file=resolve(repo,path);if(!existsSync(file)){files.push({path,bytes:0,deleted:true,hash:'deleted'});continue;}
+      const st=await lstat(file);if(st.isDirectory())continue;if(!st.isFile()||!inside(rootReal,await realpath(file)))throw Error('提交文件包含符号链接或子模块，请先单独同步：'+path);
+      if(path.startsWith('.studio/')&&st.size>1024*1024){omitted.push(path+'（大体积过程报告留在本机）');continue;}
       if(st.size>25*1024*1024){omitted.push(path+'（超过 25 MB，请配置 LFS 后单独同步）');continue;}
       const bytes=await readFile(file),blob=createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex');if(blobs.get(path)===blob)continue;
       files.push({path,bytes:st.size,deleted:false,hash:createHash('sha256').update(bytes).digest('hex')});
@@ -110,7 +128,7 @@ export class StudioRepository {
     await jsonFile(await common(root),'relay/requirements.json',index);return {synced:true,commit:demand,indexCommit:main,branch:view.branch,main:view.main,omitted:view.omitted,localBranchUnchanged:true};
   }
   private async scan(root:string){
-    let identity=await localJson(root,'.relay/project.json')??await localJson(await common(root),'relay/project.json')??await gitJson(root,'HEAD','.relay/project.json');if(!identity){const main=await defaultBranch(root).catch(()=>null);if(main)identity=await gitJson(root,'refs/remotes/origin/'+main,'.relay/project.json');}if(!identity)return {requirements:[]};
+    const identity=await repositoryIdentity(root);if(!identity)return {requirements:[]};
     const refs=(await repositoryGit(root,['for-each-ref','--format=%(refname)','refs/remotes/origin/codex','refs/heads/codex'])).trim().split('\n').filter(Boolean),catalog=new Map<string,any>();
     for(const ref of refs){const id=ref.match(/\/codex\/studio-([a-f0-9-]{36})$/)?.[1];if(!id)continue;const a=await gitJson(root,ref,archivePath(id));if(!a)continue;validateArchive(a);if(a.projectId!==identity.id)continue;const entry={id,title:a.run.title,status:a.run.status,revision:a.run.revision,updatedAt:a.run.updatedAt,branch:a.branch,ref,hash:archiveHash(a),done:a.run.tasks.filter((t:any)=>t.status==='done').length,total:a.run.tasks.length};const old=catalog.get(id);if(!old||ref.startsWith('refs/remotes/')||entry.updatedAt>old.updatedAt&&!old.ref.startsWith('refs/remotes/'))catalog.set(id,entry);}
     return {projectId:identity.id,requirements:[...catalog.values()]};
@@ -118,7 +136,7 @@ export class StudioRepository {
   private async restore(root:string,project:Project,v:RepositoryRequest){
     await fetchRepository(root);const ref='refs/remotes/origin/codex/studio-'+v.runId,head=await refHash(root,ref);if(!head)throw Error('远程尚未同步该需求');
     const archive=await gitJson(root,head,archivePath(v.runId!));validateArchive(archive);
-    const identity=await localJson(root,'.relay/project.json');if(identity&&identity.id!==archive.projectId)throw Error('仓库项目身份不匹配');
+    const identity=await repositoryIdentity(root);if(identity&&identity.id!==archive.projectId)throw Error('仓库项目身份不匹配');
     const oldRow=this.store.db.prepare('SELECT json FROM studio_workspaces WHERE id=?').get(v.runId!),old=oldRow?JSON.parse(String(oldRow.json)) as StudioWorkspace:undefined;
     let expected=archiveHash({head,hash:archiveHash(archive)});
     if(old){const repo=await rootFor(old.project);if(await common(root)!==await common(repo))throw Error('本机已有同 ID 的另一仓库需求');const view=await this.inspect(root,repo,old,false);expected=view.token;}

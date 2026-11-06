@@ -55,7 +55,7 @@
 | `projectRelative` | 游戏目录相对仓库根的位置 |
 | `project` | 项目名称与职能分配配置，ID 必须等于 `projectId` |
 | `run` | 需求标题、正文、生命周期、修订、时间、`planner`、`tasks`、可选 `delivery`、审批与过程记录；ID 必须等于 `runId` |
-| `conversations` | 公开会话数组，见下文 |
+| `conversations` | 用于续做的近期公开上下文数组，见下文；不是全量历史 |
 | `media` | 原机器的媒体索引，见下文；不包含二进制或 Base64 |
 
 `run.status`：`planning / plan-review / executing / delivery / review / accepted / cancelled`。
@@ -70,7 +70,7 @@
 }
 ```
 
-只持久化公开 `user / assistant` 消息和业务结果，不保存隐藏推理、原始工具调用、系统登录凭据或运行锁。`coverage` 明确表示 Relay 已缓存的公开内容，**不是原生客户端全量会话的承诺**。后续本地保存按会话 ID 和消息 ID 合并，避免把先前已保存的公开上下文丢掉。单份存档上限 12 MiB，超过限制明确报错，不静默截断成完整存档。
+只持久化当前结果和续做所需的公开 `user / assistant` 上下文，不保存隐藏推理、原始工具调用、系统登录凭据或运行锁。每个当前任务 / 角色会话最多保留近期 12 条消息，单条超过 12,000 字符时明确标注为节选；只保留近期 20 条业务记录、12 条制作人指引和群聊补充，旧任务尝试与过期交付不上传。`contextPolicy: {"messageLimit":12,"completeHistory":false}` 明确表示这是续做快照。完整历史仍保留在原 Relay / 工作电脑，不能声称 Git 存档是完整会话备份。单份存档上限 12 MiB，超过限制明确报错。
 
 ```json
 {"hostId":"source-host","sessionId":"source-host:codex:original-thread","path":"captures/demo.mp4","description":"第一关实机演示"}
@@ -87,7 +87,7 @@
 5. “采用远程”：保留数据库需求备份及原 worktree，创建独立的新 worktree，再替换当前业务进度并保持暂停。已有原始审批与失败证据保留；未完成的原生会话不直接复用，准备新的会话用公开上下文续接。
 6. 正在执行、等待工具/用户输入、还有排队消息的需求必须先结束活动执行，再发布或替换进度。不会只因为本地较旧就覆盖正在生产的数据。
 
-默认排除视频、`captures/ screenshots/ frames/ recordings/ cache/ .godot/ node_modules/ build/`、过程目录中的图片二进制、凭据与环境文件、压缩包/引擎可执行文件。`.studio` 只自动纳入文本规格与报告。超过 25 MiB 的改动文件留在本机并在清单中说明；正式大资产请按项目 Git LFS 规则处理。本功能不会清除历史已提交的大文件，也不会强制忽略正式资产目录中的 PNG、GLB、BLEND 等。
+默认排除视频、`captures/ screenshots/ frames/ recordings/ cache/ .godot/ node_modules/ build/`、过程图片、凭据、环境文件、压缩包及引擎可执行文件。未跟踪资产仅纳入当前任务明确交付的资产组及其运行依赖：识别正式资产的版本目录、材质 manifest 和代码 / 场景的 `res://` 引用，跳过未引用的旧版本、validation、重建、试验与预览资料。`.studio` 只纳入当前交付引用的文本规格和制作脚本，超过 1 MiB 的过程报告留在本机；不扫整个旧工作副本上传完整历史。超过 25 MiB 的改动文件留在本机并在清单中说明；正式大资产请按项目 Git LFS 规则处理。已跟踪的正常代码/正式资产修改仍可提交；本功能不清除远程已有的 Git 历史。
 
 ## 新机器读取和续做
 

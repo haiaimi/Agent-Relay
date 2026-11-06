@@ -11,7 +11,7 @@ export interface RepositoryStatus {savedAt?:number;hash?:string;error?:string;at
 declare module './studio.js' {interface StudioRun {repository?:RepositoryStatus;repositoryBusy?:boolean;repositoryReadOnly?:boolean}}
 const tasks=(r:StudioRun)=>[r.planner,...r.tasks,...r.delivery?[r.delivery]:[]];
 export class StudioRepositories {
-  private timer:NodeJS.Timeout;private running=false;private stopped=false;private seen=new Map<string,string>();private failures=new Map<string,{count:number;at:number}>();private jobs=new Map<string,Promise<any>>();private scanned=new Map<string,number>();
+  private timer:NodeJS.Timeout;private running=false;private stopped=false;private seen=new Map<string,string>();private fingerprints=new Map<string,string>();private failures=new Map<string,{count:number;at:number}>();private jobs=new Map<string,Promise<any>>();private scanned=new Map<string,number>();
   constructor(private store:RelayStore,private studio:Studio,private remote:(h:string,a:Action,t?:number)=>Promise<any>,private changed:()=>void){
     store.db.exec('CREATE TABLE IF NOT EXISTS studio_repository_catalog(id TEXT PRIMARY KEY,json TEXT NOT NULL); CREATE TABLE IF NOT EXISTS studio_repository_archives(id TEXT PRIMARY KEY,json TEXT NOT NULL); CREATE TABLE IF NOT EXISTS studio_repository_jobs(id TEXT PRIMARY KEY,request TEXT NOT NULL,json TEXT NOT NULL)');
     for(const row of store.db.prepare('SELECT id,json FROM studio_repository_jobs').all()){const job=JSON.parse(String(row.json));if(job.phase==='running'){job.phase='failed';job.error='服务重启中断了同步核对，请重新检查远程记录；不会自动重复提交。';store.db.prepare('UPDATE studio_repository_jobs SET json=? WHERE id=?').run(JSON.stringify(job),row.id!);}}
@@ -24,24 +24,30 @@ export class StudioRepositories {
   private supported(hostId:string){return this.store.hosts().find(h=>h.id===hostId&&h.online&&h.capabilities?.studioRepository);}
   private async call(hostId:string,projectId:string,repository:RepositoryRequest,workspaceIndex=0){if(!this.supported(hostId))throw Error('工作电脑需运行支持“仓库需求协议”的新版 Relay 连接程序');return this.remote(hostId,{id:randomUUID(),type:'studio-repository',projectId,workspaceIndex,repository},900_000);}
   archive(r:StudioRun):RequirementArchive {
-    const p=this.binding(r),sessionIds=new Set([...tasks(r).flatMap(t=>[t.sessionId,...(t.attempts??[]).map(a=>a.sessionId)]),...(r.chats??[]).map(c=>c.sessionId)].filter((s):s is string=>!!s)),conversations:PublicConversation[]=[];
+    const p=this.binding(r),chats=[...new Map([...(r.chats??[])].sort((a,b)=>a.startedAt-b.startedAt).map(c=>[c.role,c])).values()],sessionIds=new Set([...tasks(r).map(t=>t.sessionId),...chats.map(c=>c.sessionId)].filter((s):s is string=>!!s)),conversations:PublicConversation[]=[];
     for(const sessionId of sessionIds){const messages=new Map<string,PublicConversation['messages'][number]>();
-      const add=(m:any,at?:number)=>{if(!m||!['user','assistant'].includes(m.role)||typeof m.text!=='string'||/thinking|reasoning|思考/i.test(m.label??''))return;messages.set(String(m.id),{id:String(m.id),role:m.role,text:m.text,at:m.timestamp??at});};
-      for(const row of this.store.db.prepare('SELECT json FROM history WHERE session_id=?').all(sessionId))for(const m of JSON.parse(String(row.json)).messages??[])add(m);
-      for(const row of this.store.db.prepare('SELECT json FROM events WHERE session_id=? ORDER BY seq').all(sessionId)){const e=JSON.parse(String(row.json));if(e.type==='message')add(e.data,e.at);}
-      conversations.push({sessionId,messages:[...messages.values()].sort((a,b)=>(a.at??0)-(b.at??0)),coverage:'relay-cached-public-messages'});
+      const add=(m:any,at?:number)=>{if(!m||!['user','assistant'].includes(m.role)||typeof m.text!=='string'||/thinking|reasoning|思考/i.test(m.label??''))return;messages.set(String(m.id),{id:String(m.id),role:m.role,text:m.text.length>12000?'[公开上下文节选；完整记录保留原机器]\n'+m.text.slice(-12000):m.text,at:m.timestamp??at});};
+      for(const m of this.store.cached(sessionId)?.messages??[])add(m);
+      for(const e of this.store.sessionEvents(sessionId))if(e.type==='message')add(e.data,e.at);
+      conversations.push({sessionId,messages:[...messages.values()].sort((a,b)=>(a.at??0)-(b.at??0)).slice(-12),coverage:'relay-cached-public-messages'});
     }
     const prior=this.store.db.prepare('SELECT json FROM studio_repository_archives WHERE id=?').get(r.id);
-    if(prior){const old=JSON.parse(String(prior.json)) as RequirementArchive;for(const c of old.conversations)if(!sessionIds.has(c.sessionId))conversations.push(c);}
+    if(prior){const old=JSON.parse(String(prior.json)) as RequirementArchive;for(const c of old.conversations)if(!sessionIds.has(c.sessionId))conversations.push({...c,messages:c.messages.slice(-12)});}
     const run=structuredClone(r) as any;delete run.workspace;delete run.device;delete run.migration;delete run.repository;delete run.repositoryBusy;delete run.repositoryReadOnly;
-    const group=this.store.db.prepare('SELECT json FROM studio_group_posts WHERE run_id=? ORDER BY at').all(r.id).map(row=>{const g=JSON.parse(String(row.json));return {id:g.id,at:g.at,text:g.text,roles:g.roles,files:(g.files??[]).map((f:any)=>({name:f.name,sha256:f.sha256})),deliveries:[]};});run.publicGroup=group;
+    run.log=(run.log??[]).slice(-20);run.chats=chats;run.guidance=(run.guidance??[]).slice(-12);delete run.deliveryHistory;delete run.feedbackFileHistory;
+    for(const t of [run.planner,...run.tasks,...run.delivery?[run.delivery]:[]]){delete t.attempts;delete t.autoFollowup;delete t.recovery;delete t.preflightRetry;}
+    const group=this.store.db.prepare('SELECT json FROM (SELECT json,at FROM studio_group_posts WHERE run_id=? ORDER BY at DESC LIMIT 12) ORDER BY at').all(r.id).map(row=>{const g=JSON.parse(String(row.json));return {id:g.id,at:g.at,text:g.text,roles:g.roles,files:(g.files??[]).map((f:any)=>({name:f.name,sha256:f.sha256})),deliveries:[]};});run.publicGroup=group;
     const project={id:p.id,name:p.name,roles:p.roles.map(a=>({...a,tools:''})),concurrency:p.concurrency,reviewPlan:p.reviewPlan,createdAt:p.createdAt,updatedAt:p.updatedAt};
     const historical=prior?(JSON.parse(String(prior.json)) as RequirementArchive).media:[];
     const refs=[...(r.attachments??[]),...(r.feedbackFileHistory??[]),...(r.guidance??[]).flatMap(g=>g.files)],sessionId=r.planner.sessionId;
     const media=[...historical,...tasks(r).flatMap(t=>(t.artifacts??[]).filter(a=>!!t.sessionId).map(a=>({hostId:p.hostId,sessionId:t.sessionId,path:a.path,description:a.description}))),...sessionId?refs.map(f=>({hostId:p.hostId,sessionId,path:f.name,description:'制作人参考：'+f.name,fileId:f.id,sha256:f.sha256})):[]];
     const a:RequirementArchive={version:1,projectId:p.id,runId:r.id,branch:'codex/studio-'+r.id,projectRelative:'',project,run,conversations,media:[...new Map(media.map(m=>[JSON.stringify([m.hostId,m.sessionId,m.path]),m])).values()]};validateArchive(a);return a;
   }
-  private async save(r:StudioRun){if(r.repositoryReadOnly||r.workspace?.status!=='ready')return;const a=this.archive(r),hash=archiveHash(a);if(this.seen.get(r.id)===hash)return;const p=this.binding(r);await this.call(p.hostId,p.projectId,{op:'save',runId:r.id,archive:a},p.workspaceIndex);this.seen.set(r.id,hash);const latest=this.studio.runs().find(x=>x.id===r.id);if(latest){latest.repository={...latest.repository,savedAt:Date.now(),error:undefined,attempts:0};this.persist(latest);}this.failures.delete(r.id);}
+  private fingerprint(r:StudioRun){
+    const {repository,repositoryBusy,...business}=r,p=this.binding(r),ids=[...new Set([...tasks(r).flatMap(t=>[t.sessionId,...(t.attempts??[]).map(a=>a.sessionId)]),...(r.chats??[]).map(c=>c.sessionId)].filter(Boolean))];
+    const stamps=ids.map(id=>[id,this.store.db.prepare('SELECT max(seq) n FROM events WHERE session_id=?').get(id!)?.n,this.store.db.prepare('SELECT max(rowid) n FROM history WHERE session_id=?').get(id!)?.n]);return archiveHash({business,projectUpdatedAt:p.updatedAt,stamps});
+  }
+  private async save(r:StudioRun){if(r.repositoryReadOnly||r.workspace?.status!=='ready')return;const fingerprint=this.fingerprint(r);if(this.fingerprints.get(r.id)===fingerprint)return;const a=this.archive(r),hash=archiveHash(a);if(this.seen.get(r.id)===hash){this.fingerprints.set(r.id,fingerprint);return;}const p=this.binding(r);await this.call(p.hostId,p.projectId,{op:'save',runId:r.id,archive:a},p.workspaceIndex);this.seen.set(r.id,hash);this.fingerprints.set(r.id,fingerprint);const latest=this.studio.runs().find(x=>x.id===r.id);if(latest){latest.repository={...latest.repository,savedAt:Date.now(),error:undefined,attempts:0};this.persist(latest);}this.failures.delete(r.id);}
   async tick(){if(this.stopped||this.running)return;this.running=true;try{
     for(const r of this.studio.runs()){if(this.stopped)break;const f=this.failures.get(r.id);if(this.jobs.has(r.id)||!this.supported(this.binding(r).hostId)||f&&(f.count>=5||Date.now()-f.at<60000))continue;
       try{await this.save(r);}catch(e){const count=(f?.count??0)+1;this.failures.set(r.id,{count,at:Date.now()});const latest=this.studio.runs().find(x=>x.id===r.id);if(latest){latest.repository={...latest.repository,error:(e as Error).message,attempts:count,retryAt:count<5?Date.now()+60000:undefined};this.persist(latest);}}
@@ -96,7 +102,7 @@ export class StudioRepositories {
     if(!['publish','restore'].includes(v.op))throw Error('无效同步操作');
     if(tasks(r).some(t=>['running','starting'].includes(t.status))||(r.chats??[]).some(c=>c.sessionId&&['running','waiting'].includes(this.store.getSession(c.sessionId)?.status??'')))throw Error('当前需求仍有执行任务，请先停止并确认结束，之后再同步进度');
     if(v.op==='publish'&&(hostId!==p.hostId||projectId!==p.projectId||r.repositoryReadOnly))throw Error('请从当前需求所在电脑同步本地制作结果');
-    r.paused=true;r.repositoryBusy=true;this.persist(r);
+    if(v.op==='restore')r.paused=true;r.repositoryBusy=true;this.persist(r);
     const backup=join(this.store.dir,'repository-backups',r.id+'-'+randomUUID()+'.json');mkdirSync(join(this.store.dir,'repository-backups'),{recursive:true});writeFileSync(backup,JSON.stringify(r),{mode:0o600});
     try{
       const result=await this.call(hostId,projectId,{op:v.op,runId:r.id,token:v.token,choice:v.op==='publish'?'local':'remote',paths:v.paths},workspaceIndex);

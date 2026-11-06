@@ -5,6 +5,7 @@ export const archivePath=(id:string)=>`.relay/requirements/${id}.json`;
 export const archiveHash=(value:unknown)=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
 export interface PublicConversation {sessionId:string;messages:{id:string;role:'user'|'assistant';text:string;at?:number}[];coverage:'relay-cached-public-messages'}
 export interface RequirementArchive {
+  contextPolicy?:{messageLimit:12;completeHistory:false};
   version:1;projectId:string;runId:string;branch:string;projectRelative:string;
   project:Record<string,any>;run:Record<string,any>;conversations:PublicConversation[];
   media:{hostId:string;sessionId?:string;path:string;description?:string;fileId?:string;sha256?:string}[];
@@ -22,6 +23,7 @@ export function validateArchive(a:any):asserts a is RequirementArchive {
   const visited=new Set<string>(),active=new Set<string>();const visit=(id:string)=>{if(visited.has(id))return;if(active.has(id))throw Error('存档任务依赖循环');const t=tasks.find((t:any)=>t.id===id);if(!t)throw Error('存档任务依赖缺失');active.add(id);t.dependencies.forEach(visit);active.delete(id);visited.add(id);};tasks.forEach((t:any)=>visit(t.id));
   for(const c of a.conversations)if(typeof c.sessionId!=='string'||c.coverage!=='relay-cached-public-messages'||!Array.isArray(c.messages)||c.messages.some((m:any)=>!['user','assistant'].includes(m.role)||typeof m.id!=='string'||typeof m.text!=='string'))throw Error('无效公开会话存档');
   for(const m of a.media)if(typeof m.hostId!=='string'||typeof m.path!=='string'||m.path.length>2000||/[\x00\r\n]/.test(m.path)||m.sessionId!==undefined&&typeof m.sessionId!=='string'||m.fileId!==undefined&&(!repositoryId.test(m.fileId)||!/^[a-f0-9]{64}$/.test(m.sha256??'')))throw Error('无效本机媒体引用');
+  if(a.contextPolicy!==undefined&&(a.contextPolicy.messageLimit!==12||a.contextPolicy.completeHistory!==false))throw Error('不支持完整历史归档模式');
 }
 export function validateRepositoryRequest(v:any):asserts v is RepositoryRequest {
   if(!v||!['save','scan','inspect','publish','restore'].includes(v.op)||v.op!=='scan'&&!repositoryId.test(v.runId??''))throw Error('无效需求同步操作');

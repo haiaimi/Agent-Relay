@@ -5,6 +5,7 @@
   "type": "object",
   "required": ["version", "projectId", "runId", "branch", "projectRelative", "project", "run", "conversations", "media"],
   "properties": {
+    "contextPolicy": {"type":"object","required":["messageLimit","completeHistory"],"properties":{"messageLimit":{"const":12},"completeHistory":{"const":false}}},
     "version": {"const": 1},
     "projectId": {"type": "string", "format": "uuid"},
     "runId": {"type": "string", "format": "uuid"},
