@@ -1,3 +1,4 @@
+import {repositoryTransport} from '../src/bridge/repository-transport.js';
 import {repositoryAddress,repositoryKey} from '../src/shared/repository-url.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -135,7 +136,7 @@ test('project GitHub addresses accept workstation SSH/HTTPS and reject embedded 
 test('connecting a missing project clones and registers it; reconnecting preserves dirty files and the original index',async()=>{
  const f=await fixture();try{
   const address='https://github.com/relay-fixtures/game.git',path=join(f.root,'new-parent','game');
-  const runner:typeof repositoryGit=async(cwd,args,input,env)=>{if(args[0]==='clone'){const changed=args.map(x=>x===address?f.remote:x),result=await repositoryGit(cwd,changed,input,env);await repositoryGit(args.at(-1)!,['remote','set-url','origin',address]);return result;}return repositoryGit(cwd,args.map(x=>args[0]==='fetch'&&x==='origin'?f.remote:x),input,env);};
+  const runner:typeof repositoryGit=async(cwd,args,input,env)=>{if(args[0]==='ls-remote')return repositoryGit(cwd,args.map(x=>x===address?f.remote:x),input,env);if(args[0]==='clone'){const changed=args.map(x=>x===address?f.remote:x),result=await repositoryGit(cwd,changed,input,env);await repositoryGit(args.at(-1)!,['remote','set-url','origin',address]);return result;}return repositoryGit(cwd,args.map(x=>args[0]==='fetch'&&x==='origin'?f.remote:x),input,env);};
   const request:any={op:'connect',path,name:'Game',repositoryUrl:address},connected=await connectRepository(f.store,request,randomUUID(),[],runner);assert.equal(connected.cloned,true);assert.equal(connected.project.path,realpathSync.native(path));assert.equal(connected.project.repositoryUrl,address);assert.equal(readFileSync(join(path,'game.txt'),'utf8'),'baseline');
   writeFileSync(join(path,'game.txt'),'staged content');git(path,'add','game.txt');writeFileSync(join(path,'game.txt'),'unstaged content');const before=git(path,'diff','--cached'),head=git(path,'rev-parse','HEAD');const again=await connectRepository(f.store,request,randomUUID(),[connected.project],runner);assert.equal(again.project.id,connected.project.id);assert.equal(again.workingTreePreserved,true);assert.equal(git(path,'diff','--cached'),before);assert.equal(git(path,'rev-parse','HEAD'),head);assert.equal(readFileSync(join(path,'game.txt'),'utf8'),'unstaged content');
   const registeredCount=f.store.projects().length,native={...connected.project,id:'configured-native'};const nativeResult=await connectRepository(f.store,request,randomUUID(),[native],runner);assert.equal(nativeResult.project.id,native.id);assert.equal(f.store.projects().length,registeredCount,'a configured/native project must not be registered a second time');
@@ -158,4 +159,12 @@ test('authenticated webpage preparation connects a new machine with no registere
   let job:any;for(let n=0;n<800;n++){job=await (await request('/api/studio/repository/job?id='+value.id)).json();if(job.phase!=='running')break;await new Promise(r=>setTimeout(r,50));}assert.equal(job.phase,'done',job.error);assert.equal(job.result.cloned,true);assert.equal(job.result.catalog.requirements[0].id,f.runId);assert.equal(app.studio.runs()[0].paused,true);assert.equal(app.studio.runs()[0].repositoryReadOnly,true);assert.equal(app.studio.projects()[0].repositoryUrl,value.repositoryUrl);assert.equal(bridge.runtime.list().filter(s=>s.provider!=='api').length,0);
   const project=app.studio.projects()[0],roles=JSON.stringify(project.roles);const changed=await request('/api/studio/project/repository',{projectId:project.id,repositoryUrl:'git@github.com:relay-fixtures/game.git'});assert.equal(changed.status,200);assert.equal(JSON.stringify(app.studio.projects()[0].roles),roles);assert.equal(app.studio.runs()[0].paused,true);
  }finally{await bridge?.close();await app.close();for(const n of names)if(env[n]===undefined)delete process.env[n];else process.env[n]=env[n];await f.close();}
+});
+
+
+test('repository preparation tests multiple local SSH identities, chooses only a verified key and never exposes key contents',async()=>{
+ const root=mkdtempSync(join(tmpdir(),'relay-git-keys-'));try{for(const name of ['id_ed25519','id_rsa','id_rsa_secondary','id_rsa_secondary.pub','config','known_hosts'])writeFileSync(join(root,name),'SECRET_CONTENT_MUST_NOT_BE_READ');const probes:any[]=[];
+ const git:typeof repositoryGit=async(_cwd,args,_input,env)=>{assert.equal(args[0],'ls-remote');probes.push({args,env});if(env?.GIT_SSH_COMMAND?.includes('id_rsa_secondary'))return 'a'.repeat(40)+'\trefs/heads/main';throw Error('git@github.com: Permission denied (publickey).');};
+ const selected=await repositoryTransport(root,'https://github.com/test/game.git',[],git,root);assert.equal(selected.url,'git@github.com:test/game.git');assert.match(selected.command!,/id_rsa_secondary/);assert.equal(probes.length,4);assert.ok(probes.slice(1).every(p=>p.env.GIT_SSH_COMMAND.includes('BatchMode=yes')&&p.env.GIT_SSH_COMMAND.includes('IdentitiesOnly=yes')));assert.ok(!JSON.stringify(probes).includes('SECRET_CONTENT'));assert.ok(!JSON.stringify(probes).includes('known_hosts'));
+ }finally{rmSync(root,{recursive:true,force:true});}
 });

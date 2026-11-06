@@ -9,6 +9,7 @@ import type {BridgeStore} from './store.js';
 import type {StudioWorkspace} from './studio-workspace.js';
 import {repositoryAddress,repositoryKey} from '../shared/repository-url.js';
 import {createLocalProject,localProjectFolder} from './projects.js';
+import {repositoryTransport} from './repository-transport.js';
 
 const queues=new Map<string,Promise<any>>();
 async function exclusive<T>(root:string,work:()=>Promise<T>):Promise<T>{const prior=queues.get(root)??Promise.resolve(),job=prior.catch(()=>{}).then(work);queues.set(root,job);try{return await job;}finally{if(queues.get(root)===job)queues.delete(root);}}
@@ -52,13 +53,15 @@ export async function connectRepository(store:BridgeStore,v:RepositoryRequest,id
       await fetchRepository(full,undefined,git);
     }else{
       await mkdir(dirname(full),{recursive:true});let stage='';
+      const transport=await repositoryTransport(dirname(full),url,known,git);
       for(let attempt=0;attempt<5;attempt++){
         stage=join(dirname(full),'.relay-clone-'+id+'-'+attempt);
         if(existsSync(stage))throw Error('上次拉取目录仍存在，请先检查原操作记录：'+stage);
-        try{await git(dirname(full),['clone','--filter=blob:none','--no-tags','--',url,stage]);break;}
+        try{await git(dirname(full),['clone','--filter=blob:none','--no-tags','--',transport.url,stage],undefined,transport.env);break;}
         catch(e){if(attempt===4||!/timed? out|connection|could not resolve|unable to access|network|远程主机/i.test((e as Error).message))throw Error('目标电脑拉取失败；请检查本机 GitHub 登录和网络。原目录未覆盖，检查目录：'+stage+'；'+(e as Error).message);await new Promise(r=>setTimeout(r,60000));}
       }
       if(repositoryKey((await git(stage,['config','--get','remote.origin.url'])).trim())!==repositoryKey(url))throw Error('拉取仓库来源校验失败，暂存目录保留：'+stage);
+      if(transport.command)await git(stage,['config','--local','core.sshCommand',transport.command]);
       if(existsSync(full)){if((await readdir(full)).length)throw Error('拉取期间目标目录有新增内容，未覆盖；暂存目录：'+stage);await rmdir(full);}
       await rename(stage,full);cloned=true;
     }
