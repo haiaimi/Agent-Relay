@@ -2,7 +2,7 @@ import {createStudioStartup} from './studio-startup.js';
 import {studioMainline} from './studio-mainline.js';
 import {studioPlaytests} from './studio-playtests.js';
 import {stageGuidance} from './studio-stage-guide.js';
-import {studioMigration} from './studio-migration.js';
+import {studioRepository} from './studio-repository.js';
 import {taskGuidance} from './studio-guidance.js';
 import {taskFocusKind,revealTaskSection} from './studio-task-focus.js';
 import {studioRepairs} from './studio-repairs.js';
@@ -43,7 +43,7 @@ const date=at=>new Date(at).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit
 function notify(message){const notice=$('notice'),dialog=document.activeElement?.closest('dialog[open]')||[...document.querySelectorAll('dialog[open]')].at(-1);(dialog||document.body).append(notice);notice.textContent=message;notice.hidden=false;clearTimeout(noticeTimer);noticeTimer=setTimeout(()=>notice.hidden=true,6000);}
 const api=createStudioApi({sharedState:()=>embed.state(),onUnauthorized:()=>{studioStarted=false;startup?.stop();void clearConversationCache();$('app').hidden=true;$('login').hidden=false;source?.close();for(const panel of attentionPanels)panel.reset();chats.resetAttention();selfRepair.reset();}});
 function option(value,label){const o=document.createElement('option');o.value=value;o.textContent=label;return o;}
-const migration=studioMigration({api,notify,hosts:()=>relay.hosts,sourceHost:r=>projectForRun(r).hostId,devices:r=>state.projects.find(p=>p.id===r.projectId)?.devices??[],changed:()=>refresh(true)});
+const repository=studioRepository({api,notify,refresh:()=>refresh(true),hosts:()=>relay.hosts,binding:projectForRun,current});
 function button(label,fn,cls='quiet'){const b=node('button',cls,label);b.type='button';b.onclick=()=>Promise.resolve().then(fn).catch(e=>notify(e.message));return b;}
 function link(label,url){const a=node('a','button quiet',label);a.href=url;return a;}
 function show(id){if(!$(id).open)$(id).showModal();updateAttention();}
@@ -65,6 +65,7 @@ function renderSyncStatus(){for(const el of document.querySelectorAll('[data-stu
 const refresh=coalescedRefresh(async force=>{if(!force&&(Date.now()<studioRetryAt||studioSyncFailures>=5||Date.now()-studioReadAt<2000))return;if(force){studioSyncFailures=0;studioRetryAt=0;}studioReadAt=Date.now();try{const values=await Promise.all([api('studio'),api('state')]);state=values[0];relay=values[1];selfRepair.checkVersion(state.features?.repairVersion);studioSyncedAt=Date.now();studioSyncError='';studioSyncFailures=0;studioRetryAt=0;selectedProject();const signature=JSON.stringify([state,relay.hosts.map(h=>[h.id,h.online,h.agents,h.projects]),studioSessionSignature(state,relay)]);if(force||signature!==lastSignature){lastSignature=signature;render();if($('run-dialog').open&&!hasPlayingVideo('run-dialog'))renderRun();if($('task-dialog').open&&!hasPlayingVideo('task-dialog'))renderTask();if(hasPlayingVideo('run-dialog')||hasPlayingVideo('task-dialog'))lastSignature='';}chats.update();brainstorms.update();updateAttention();$('connection').textContent=relay.hosts.filter(h=>h.online).length+' 台工作电脑在线';$('connection').dataset.offline=String(!relay.hosts.some(h=>h.online));renderSyncStatus();}catch(e){studioSyncFailures++;studioRetryAt=Date.now()+60000;studioSyncError=e.message+(studioSyncFailures<5?'（一分钟后重试 '+studioSyncFailures+'/5）':'（已尝试五次，请手动刷新核对）');renderSyncStatus();if($('task-dialog').open&&!hasPlayingVideo('task-dialog'))renderTask();if(force)throw e;}});
 function render(){
   publishStudioSidebar();
+  if(!$('repository-discover')){const discover=button('读取仓库需求',()=>repository.discovery());discover.id='repository-discover';$('new-brief').after(discover);}
   updateAttention();
   brainstorms.render();const brain=$('tab-brainstorm').getAttribute('aria-selected')==='true';$('brainstorm-view').hidden=!brain||!current();$('studio-brainstorm-nav').classList.toggle('active',brain);
   const picker=$('project-picker');picker.replaceChildren(...state.projects.map(p=>option(p.id,p.name)));picker.value=selected;picker.disabled=!current();$('edit-team').disabled=!current();$('new-brief').disabled=!current();$('empty').hidden=!!current();$('board-view').hidden=brain||!current()||$('tab-team').getAttribute('aria-selected')==='true';$('team-view').hidden=brain||!current()||$('tab-team').getAttribute('aria-selected')!=='true';
@@ -250,7 +251,7 @@ let renderedRunKey='';
 function renderRun(){
   renderRunContent();
   const r=state.runs.find(x=>x.id===activeRun);if(!r)return;
-  const root=$('run-content');root.querySelector('[data-migration]')?.remove();root.prepend(migration.panel(r));
+  const root=$('run-content');root.querySelector('[data-repository]')?.remove();root.prepend(repository.panel(r));
 }
 function renderRunContent(){
   const r=state.runs.find(x=>x.id===activeRun);if(!r)return;

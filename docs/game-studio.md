@@ -163,3 +163,8 @@ Windows 启动入口安装当前用户的 Task Scheduler 后台任务，分别�
 制作提示按实际新制、修复、复用操作确定工具要求。纯复用不为了流程名称重建资产，但历史未验的冷加载、UV2/receiver 和质量门禁仍须补验。程序已完成后的合法文件更新与未经授权资产变化分开核对，最新实现交付优先补入上下文。
 
 `STUDIO_RESULT` 可附 `blockers: [{category, code, details, remedy}]`，类别包括 environment、provenance、upstream、quality、other。仍有硬阻断不能声明 done。任务详情显示证据与恢复步骤；“复核阻断并继续原任务”使用原会话、原分支和文件，仅重验本任务，不重跑已完成的前置阶段或批准视觉方向。需要前置/审批完成、原会话空闲、最后投递结果明确；未知投递和正在执行的任务不会自动重发。
+## 仓库中的需求、进度和上下文
+
+按 [Relay 需求仓库协议 v1](requirement-repository-protocol.md) 保存制作资料：主干 `.relay/requirements.json` 为需求索引；每个需求的 `codex/studio-<UUID>` 分支保存 `.relay/requirements/<UUID>.json`、代码和正式资产。保存不自动提交；制作人点击“同步需求”才提交和推送，可选择采用本地或远程进度。原暂存区和旧工作副本保留。
+
+目标电脑正常拉取项目后，本机 Relay 自动读取已获取分支里的需求与进度。也可点“读取仓库需求”选择电脑和仓库。新读取的需求保持暂停，不会重发原消息；“同步需求 → 在此电脑继续”创建独立 worktree。无需源电脑在线迁移整个目录，但未同步的数据仍仅存在源电脑。过程视频与图片不要求入库，源电脑在线时按需转发；正式运行资产仍随代码同步。服务器和 Bridge 均需支持 `studioRepository` 能力。

@@ -161,3 +161,9 @@ main{max-width:1160px}.workspace-bar{background:transparent}.stat{background:tra
 
 /* Keep large delivery previews inside their own scroll area, above the composer. */
 #chat-dialog .chat-main{overflow:hidden}#chat-dialog #chat-attention{flex:0 1 auto;min-height:0;max-height:30%;overflow:auto;overscroll-behavior:contain}#chat-dialog #chat-context{flex:0 1 auto;min-height:0;max-height:18%;overflow:auto}#chat-dialog #chat-timeline{min-height:0;flex:1 1 80px}#chat-dialog #chat-form{flex:0 0 auto;min-height:0;max-height:42%;overflow:auto}#chat-dialog #chat-text{min-height:56px;max-height:110px}#chat-dialog #chat-files{max-height:100px;overflow:auto}#chat-dialog .chat-toolbar,#chat-dialog .chat-record-toolbar{flex-shrink:0}
+.repository-dialog { width: min(760px, calc(100vw - 24px)); max-height: calc(100dvh - 32px); overflow-y: auto; box-sizing: border-box; }
+.repository-dialog > div { display: grid; gap: 12px; min-width: 0; }
+.repository-dialog pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
+.repository-dialog select { width: 100%; min-width: 0; font-size: 16px; }
+.repository-dialog .check { display: flex; align-items: flex-start; gap: 8px; overflow-wrap: anywhere; font-size: 14px; }
+.repository-dialog .actions { display: flex; flex-wrap: wrap; gap: 8px; }

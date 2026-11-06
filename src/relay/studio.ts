@@ -138,10 +138,10 @@ export class Studio {
   }
   projects():StudioProject[]{return this.store.db.prepare('SELECT json FROM studio_projects ORDER BY rowid DESC').all().map(r=>JSON.parse(String(r.json)));}
   runs():StudioRun[]{return this.store.db.prepare('SELECT json FROM studio_runs ORDER BY rowid DESC').all().map(r=>JSON.parse(String(r.json)));}
-  state(){return {features:{continuation:true,migration:true},roles:STUDIO_ROLES.map(([id,name,description])=>({id,name,description})),projects:this.projects(),runs:this.runs()};}
+  state(){return {features:{continuation:true,migration:true,repository:true},roles:STUDIO_ROLES.map(([id,name,description])=>({id,name,description})),projects:this.projects(),runs:this.runs()};}
   migrate(v:any){assertMainlineIdle(this.store,v.runId);return this.migrations.start(v);}
   projectForRun(r:StudioRun):StudioProject {const p=this.project(r.projectId);return r.device?{...p,...r.device,toolchain:r.device.hostId===p.hostId&&r.device.projectId===p.projectId?p.toolchain:p.devices?.find(x=>x.hostId===r.device!.hostId&&x.projectId===r.device!.projectId)?.toolchain??r.device.toolchain}:p;}
-  private assertNotMigrating(r:StudioRun){if(migrationPending(r))throw Error('此需求正在迁移接力，原记录已保留；请在接力面板查看进度或重试');}
+  private assertNotMigrating(r:StudioRun){if(r.repositoryBusy||r.repositoryReadOnly)throw Error('请先在仓库同步面板准备本机副本或等待同步完成');if(migrationPending(r))throw Error('此需求正在迁移接力，原记录已保留；请在接力面板查看进度或重试');}
   private project(id:string){const p=this.projects().find(p=>p.id===id);if(!p)throw Error('团队项目不存在');return p;}
   private run(id:string){const r=this.runs().find(r=>r.id===id);if(!r)throw Error('制作需求不存在');return r;}
   private receipt(id?:string){const row=id?this.store.db.prepare('SELECT result FROM actions WHERE id=?').get(id):undefined;return row?.result?JSON.parse(String(row.result)):undefined;}
@@ -282,7 +282,7 @@ export class Studio {
   }
   visualArtifact(runId:string,taskId:string,index:number,kind='image'){
     const r=this.run(runId),p=this.projectForRun(r),t=this.allTasks(r).find(t=>t.id===taskId),artifact=Number.isInteger(index)&&index>=0?t?.artifacts?.[index]:undefined,s=(t?.artifactSessionId??t?.sessionId)?this.store.getSession((t!.artifactSessionId??t!.sessionId)!):undefined;
-    if(!artifact||!(kind==='video'?/\.(mp4|webm|mov|m4v)$/i.test(artifact.path):visualPath(artifact.path))||!t?.sessionId||!s||s.hostId!==p.hostId||s.projectId!==this.execution(r).id)throw Error('原画不属于此需求的工作副本');
+    if(!artifact||!(kind==='video'?/\.(mp4|webm|mov|m4v)$/i.test(artifact.path):visualPath(artifact.path))||!(t?.artifactSessionId??t?.sessionId)||!s||s.hostId!==p.hostId||s.projectId!==this.execution(r).id)throw Error('原画不属于此需求的工作副本');
     return {hostId:p.hostId,sessionId:(t.artifactSessionId??t.sessionId)!,path:artifact.path};
   }
   private resetTask(t:Task,feedback?:string){
@@ -354,7 +354,7 @@ export class Studio {
     if(r.projectId!==p.id)throw Error('上游需求不属于当前项目组');
     if(r.status!=='accepted'||r.workspace?.status!=='ready'||!w||r.delivery?.status!=='done'||!r.tasks.every(released))throw Error('请先完成并交付上游需求，再继续制作');
     if(this.chatBusy(r)||this.allTasks(r).some(t=>{const s=t.sessionId?this.store.getSession(t.sessionId):undefined;return s&&(['running','waiting'].includes(s.status)||s.pendingCount);}))throw Error('上游职能对话正在执行，请结束后再复制交付');
-    const hostId=r.migration?.phase==='complete'?r.device?.hostId:(r.planner.sessionId?this.store.getSession(r.planner.sessionId)?.hostId:undefined);
+    const hostId=(r.migration?.phase==='complete'||r.repository?.imported&&!r.planner.sessionId)?r.device?.hostId:(r.planner.sessionId?this.store.getSession(r.planner.sessionId)?.hostId:undefined);
     if(hostId!==p.hostId)throw Error('上游工作副本所在电脑与当前团队不一致，请恢复原工作电脑');
     return r;
   }
@@ -801,7 +801,7 @@ export class Studio {
       const busy=new Map<string,number>();
       for(const r of active){const p=this.projectForRun(r),key=r.id;busy.set(key,this.allTasks(r).filter(t=>['starting','running'].includes(t.status)).length+(r.chats??[]).filter(c=>!c.sessionId&&!c.error||c.sessionId&&['running','waiting'].includes(this.store.getSession(c.sessionId)?.status??'')).length);}
       for(const r of active){
-        const p=this.projectForRun(r);if(migrationPending(r)||!this.online(p.hostId)||this.flowUpgrades.has(r.id))continue;const key=r.id;
+        const p=this.projectForRun(r);if(r.repositoryBusy||r.repositoryReadOnly||migrationPending(r)||!this.online(p.hostId)||this.flowUpgrades.has(r.id))continue;const key=r.id;
         if(r.workspace?.status!=='ready'){if(r.workspace?.status==='queued'&&!r.paused)this.prepare(r,p);continue;}
         for(const t of this.allTasks(r)){
           if(this.reconcileProducerResume(r,t))busy.set(key,(busy.get(key)??0)+1);

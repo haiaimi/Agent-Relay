@@ -83,7 +83,7 @@ export function compileScenePlan(input:Task[],workflow:SceneWorkflow,roles:{role
   while(remaining.length){const ready=remaining.filter(t=>t.dependencies.every(id=>done.has(id))).sort((a,b)=>(order[a.stage!]??8)-(order[b.stage!]??8));if(!ready.length)throw Error('场景任务无法按依赖排序');const next=ready[0];sorted.push(next);done.add(next.id);remaining.splice(remaining.indexOf(next),1);}workflow.version=2;return sorted;
 }
 export function visualReferences(tasks:Task[],gate:Task){
-  const references=tasks.filter(t=>gate.dependencies.includes(t.id)).flatMap(t=>(t.artifacts??[]).flatMap((a,index)=>visualPath(a.path)?[{taskId:t.id,index,path:a.path,description:a.description,sessionId:t.sessionId}]:[]));
+  const references=tasks.filter(t=>gate.dependencies.includes(t.id)).flatMap(t=>(t.artifacts??[]).flatMap((a,index)=>visualPath(a.path)?[{taskId:t.id,index,path:a.path,description:a.description,sessionId:t.artifactSessionId??t.sessionId}]:[]));
   if(!references.length)throw Error('原画没有可查看的图片交付物，请先补齐实际图片');
   if(references.length>12)throw Error('本轮视觉确认最多 12 张图片，请统筹整理必要原画');return references;
 }

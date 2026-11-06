@@ -1,3 +1,4 @@
+import {StudioRepository} from './studio-repository.js';
 import {studioVideo} from './studio-video.js';
 import { randomUUID } from 'node:crypto';
 import {DatabaseSync} from 'node:sqlite';
@@ -324,6 +325,16 @@ export class AgentRuntime {
       const project=action.type==='start'?this.projects().find(p=>p.id===action.projectId):undefined;
       const path=project?(project.roots??[project.path])[action.workspaceIndex??0]:action.sessionId?(this.managed.get(action.sessionId)??this.history.get(action.sessionId))?.cwd:undefined;
       if(path&&this.migrationFrozen(path))throw Error('此工作副本已冻结用于跨电脑接力，请在新电脑的接力会话继续');
+    }
+    if(action.type==='studio-repository'){
+      const configured=this.projects().find(p=>p.id===action.projectId);if(!configured)throw Error('仓库不在本机允许范围');const path=(configured.roots??[configured.path])[action.workspaceIndex??0];if(!path)throw Error('游戏工作目录不存在');const project={...configured,path};assertProjectPath(project.path,this.roots());
+      this.store.db.exec('CREATE TABLE IF NOT EXISTS studio_workspaces(id TEXT PRIMARY KEY,json TEXT NOT NULL)');
+      const op=action.repository!.op;if(['publish','restore'].includes(op)){const row=this.store.db.prepare("SELECT json FROM studio_workspaces WHERE id=?").get(action.repository!.runId!),w=row?JSON.parse(String(row.json)):undefined;
+        if(w&&this.list().some(s=>(s.projectId===w.project.id||s.cwd===w.project.path)&&(['running','waiting'].includes(s.status)||s.pendingCount||this.busy.has(s.id))))throw Error('此需求仍在执行或有待发消息，请先停止并确认结束后同步');
+      }
+      const result:any=await new StudioRepository(this.store,this.config.dataDir).handle(project,action.repository!);
+      if(result.workspace){const w=result.workspace,nativeId='repository-'+randomUUID();const session:Session={id:sessionKey(this.config.hostId,'api',nativeId),hostId:this.config.hostId,provider:'api',nativeId,title:'仓库需求历史与本机产物',cwd:w.project.path,updatedAt:Date.now(),status:'idle',managed:true,projectId:w.project.id,projectName:w.project.name};this.managed.set(session.id,session);this.save(session);return {...result,session};}
+      return result;
     }
     if(action.type==='studio-migration'){
       const m=action.migration!,cache=new MigrationCache(this.config.dataDir,m.id);

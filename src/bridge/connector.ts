@@ -14,6 +14,7 @@ export function startBridge(config:BridgeConfig,token:string){
   if(!/^[a-zA-Z0-9_-]{1,60}$/.test(config.hostId)||!config.name||!Array.isArray(config.projects))throw new Error('Invalid bridge identity or projects');
   const store=new BridgeStore(config.dataDir);
   let socket:WebSocket|undefined;let ready=false;let stopped=false;let retries=0;
+  const repositoryActions=new Set<Promise<void>>();
   let reconnect:NodeJS.Timeout|undefined;let syncing=false;
   const inflight=new Set<string>();const fingerprints=new Map<string,string>();
   let projectFingerprint='';
@@ -66,15 +67,15 @@ export function startBridge(config:BridgeConfig,token:string){
       const command=validateAction(value);id=command.id;
       if(command.sessionId&&!command.sessionId.startsWith(config.hostId+':'))throw new Error('Session belongs to another computer');
       if(command.type==='direct'){if(command.relay&&!command.iceServers?.length)throw new Error('缺少加密中转配置');const result=await direct.accept(runtime.directScope(command),command.offer!,command.relay?command.iceServers:undefined);send({type:'result',id,result});return;}
-      if(command.type==='asset'||command.type==='file'||command.type==='upload'||command.type==='studio-artifact'||command.type==='studio-video'||command.type==='studio-migration'){
-        const result=await runtime.handle(command);if(command.type==='studio-migration'&&['freeze','import'].includes(command.migration!.op))await sync();send({type:'result',id,result});return;
+      if(command.type==='asset'||command.type==='file'||command.type==='upload'||command.type==='studio-artifact'||command.type==='studio-video'||command.type==='studio-migration'||command.type==='studio-repository'&&['save','scan','inspect'].includes(command.repository!.op)){
+        const result=await runtime.handle(command);if(command.type==='studio-migration'&&['freeze','import'].includes(command.migration!.op)||command.type==='studio-repository'&&command.repository!.op==='restore')await sync();send({type:'result',id,result});return;
       }
       if(command.type==='history'||command.type==='models'||command.type==='commands'){
         if(!command.live)await sync();const result=await runtime.handle(command);send({type:'result',id,result});return;
       }
       const previous=store.begin(id,command);
       if(!previous.fresh){const result=previous.result;send(result?.error?{type:'result',id,error:result.error}:{type:'result',id,result});return;}
-      try{const result=await runtime.handle(command);if(['create-project','prepare-workspace','prepare-brainstorm','studio-migration'].includes(command.type))await sync();store.finish(id,result);send({type:'result',id,result});}
+      try{const result=await runtime.handle(command);if(['create-project','prepare-workspace','prepare-brainstorm','studio-migration'].includes(command.type)||command.type==='studio-repository'&&command.repository!.op==='restore')await sync();store.finish(id,result);send({type:'result',id,result});}
       catch(err){store.finish(id,{error:(err as Error).message});throw err;}
     }catch(err){send({type:'result',id,error:(err as Error).message});}
   }
@@ -84,7 +85,7 @@ export function startBridge(config:BridgeConfig,token:string){
     let lastActivity=Date.now();
     const watchdog=setInterval(()=>{if(Date.now()-lastActivity>70_000)socket?.terminate();},15_000);
     socket.on('ping',()=>{lastActivity=Date.now();});
-    socket.on('open',()=>socket!.send(JSON.stringify({type:'hello',host:{service:config.service,id:config.hostId,name:config.name,hostname:hostname(),platform:`${platform()} ${arch()}`,projects:config.projects,agents:runtime.agents.catalog(),capabilities:{createProject:true,permissions:true,studioWorkspaces:true,studioArtifacts:true,studioMigration:true,brainstorm:true}}})));
+    socket.on('open',()=>socket!.send(JSON.stringify({type:'hello',host:{service:config.service,id:config.hostId,name:config.name,hostname:hostname(),platform:`${platform()} ${arch()}`,projects:config.projects,agents:runtime.agents.catalog(),capabilities:{createProject:true,permissions:true,studioWorkspaces:true,studioArtifacts:true,studioMigration:true,studioRepository:true,brainstorm:true}}})));
     socket.on('message',raw=>{
       lastActivity=Date.now();
       try{
@@ -93,7 +94,9 @@ export function startBridge(config:BridgeConfig,token:string){
         else if(message.type==='ack'){store.ack(message.id);inflight.delete(message.id);drain();}
         else if(message.type==='history.ack'){const p=cacheWaits.get(message.jobId);if(p){clearTimeout(p.timer);cacheWaits.delete(message.jobId);p.resolve();}}
         else if(message.type==='file.ack'){const p=cacheWaits.get(message.jobId);if(p){clearTimeout(p.timer);cacheWaits.delete(message.jobId);message.error?p.reject(new Error(message.error)):p.resolve();}}
-        else if(message.type==='action')void action(message.action);
+        else if(message.type==='action'){
+          const job=action(message.action);if(message.action?.type==='studio-repository'){repositoryActions.add(job);void job.finally(()=>repositoryActions.delete(job));}
+        }
       }catch(err){console.error('Relay message rejected:',(err as Error).message);socket?.close(1008,'Invalid message');}
     });
     socket.on('error',err=>console.error('Relay connection error:',err.message.replaceAll(token,'[redacted]')));
@@ -101,5 +104,5 @@ export function startBridge(config:BridgeConfig,token:string){
   }
   const interval=setInterval(()=>{void sync();drain();void backfill();},Math.max(5,config.syncIntervalSeconds??15)*1000);
   connect();
-  return {runtime,store,async close(){stopped=true;questionHook.close();direct.close();clearInterval(interval);if(reconnect)clearTimeout(reconnect);ready=false;socket?.terminate();await runtime.close();store.close();}};
+  return {runtime,store,async close(){stopped=true;questionHook.close();direct.close();clearInterval(interval);if(reconnect)clearTimeout(reconnect);ready=false;socket?.terminate();await runtime.close();await Promise.allSettled(repositoryActions);store.close();}};
 }

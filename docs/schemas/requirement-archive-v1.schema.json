@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:agent-relay:requirement-archive:v1",
+  "title": "Relay requirement archive v1",
+  "type": "object",
+  "required": ["version", "projectId", "runId", "branch", "projectRelative", "project", "run", "conversations", "media"],
+  "properties": {
+    "version": {"const": 1},
+    "projectId": {"type": "string", "format": "uuid"},
+    "runId": {"type": "string", "format": "uuid"},
+    "branch": {"type": "string", "pattern": "^codex/studio-[a-f0-9-]{36}$"},
+    "projectRelative": {"type": "string"},
+    "project": {"type":"object", "required":["id","name","roles"], "properties":{"id":{"type":"string","format":"uuid"},"name":{"type":"string"},"roles":{"type":"array"}}},
+    "run": {
+      "type":"object", "required":["id","title","brief","status","revision","createdAt","updatedAt","planner","tasks","log"],
+      "properties": {
+        "id":{"type":"string","format":"uuid"}, "title":{"type":"string"}, "brief":{"type":"string"},
+        "status":{"enum":["planning","plan-review","executing","delivery","review","accepted","cancelled"]},
+        "revision":{"type":"integer","minimum":0}, "createdAt":{"type":"number"}, "updatedAt":{"type":"number"},
+        "planner":{"$ref":"#/$defs/task"}, "tasks":{"type":"array","maxItems":150,"items":{"$ref":"#/$defs/task"}},
+        "delivery":{"$ref":"#/$defs/task"}, "log":{"type":"array"}
+      }
+    },
+    "conversations": {"type":"array","items":{"type":"object","required":["sessionId","coverage","messages"],"properties":{
+      "sessionId":{"type":"string"},"coverage":{"const":"relay-cached-public-messages"},"messages":{"type":"array","items":{"type":"object","required":["id","role","text"],"properties":{"id":{"type":"string"},"role":{"enum":["user","assistant"]},"text":{"type":"string"},"at":{"type":"number"}}}}
+    }}},
+    "media":{"type":"array","items":{"type":"object","required":["hostId","path"],"properties":{"hostId":{"type":"string"},"sessionId":{"type":"string"},"path":{"type":"string"},"description":{"type":"string"}}}}
+  },
+  "$defs": {"task":{"type":"object","required":["id","title","role","dependencies","status"],"properties":{
+    "id":{"type":"string","pattern":"^[a-zA-Z0-9_-]{1,100}$"},"title":{"type":"string"},"role":{"type":"string"},"dependencies":{"type":"array","items":{"type":"string"}},"status":{"enum":["queued","starting","running","done","blocked","skipped","cancelled","awaiting-review"]},"approvedAt":{"type":"number"},"reviewId":{"type":"string"}
+  }}}
+}
