@@ -30,7 +30,7 @@ test('direct assets stream multi-chunk content, reject corrupted uploads and enf
 test('signaling only accepts a single authenticated data channel offer and refuses relay candidates',()=>{
   const sdp='v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\na=fingerprint:sha-256 01:02\r\n';
   assert.equal(validDirectSdp({type:'offer',sdp},'offer'),true);
-  assert.equal(validDirectSdp({type:'offer',sdp:sdp+'a=candidate:1 1 udp 1 1.2.3.4 1234 typ relay\r\n'},'offer'),false);
+  assert.equal(validDirectSdp({type:'offer',sdp:sdp+'a=candidate:1 1 udp 1 203.0.113.10 1234 typ relay\r\n'},'offer'),false);
   assert.equal(validDirectSdp({type:'offer',sdp:sdp+'m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n'},'offer'),false);
   assert.throws(()=>validateAction({id:randomUUID(),type:'direct',offer:{type:'offer',sdp}}),/目标/);
   assert.throws(()=>validateAction({id:randomUUID(),type:'direct',projectId:'work',sessionId:'other',offer:{type:'offer',sdp}}),/目标/);

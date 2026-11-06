@@ -10,7 +10,7 @@ The workstation connects outward to synchronize conversations. Images and attach
 
 ## Try it and see the interface
 
-**[Open the interactive preview](https://43.161.245.226:8443/preview/)** · No access key required. Works on desktop and mobile.
+**[Run the interactive preview locally](preview/README.md)** · No access key required. Works on desktop and mobile. Private server addresses are not published in this repository.
 
 Explore nine sample Codex / Claude / API agent conversations, two virtual workstations, images, and running, completed, or waiting-for-answer states. Try sending messages, queues, steering, answering questions, model selection, and permissions. Demo actions only affect the current browser page. Reload to reset. The preview does not connect to a real agent.
 

@@ -11,7 +11,7 @@ import {createRelay} from '../src/relay/server.js';
 import {validDirectSdp} from '../src/shared/direct.js';
 
 const turn={urls:['turn:relay.example:3478?transport=tcp'],secret:'a'.repeat(64)};
-const sdp='v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\na=fingerprint:sha-256 01:02\r\na=candidate:1 1 udp 1 1.2.3.4 1234 typ relay\r\n';
+const sdp='v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\na=fingerprint:sha-256 01:02\r\na=candidate:1 1 udp 1 203.0.113.10 1234 typ relay\r\n';
 test('TURN credentials expire, use independent random identities, and do not expose the shared secret',()=>{
   const first=turnCredentials(turn,1000000),second=turnCredentials(turn,1000000),server=first.iceServers[0];
   assert.equal(first.expiresAt,1600000);assert.match(server.username!,/^1600:/);assert.notEqual(server.username,second.iceServers[0].username);
