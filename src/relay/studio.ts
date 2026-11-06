@@ -1,3 +1,4 @@
+import {assertMainlineIdle} from './studio-mainline.js';
 import {launchTargets,type LaunchTarget} from '../shared/playtests.js';
 import {functionalTestTask,launcherInstructions} from './studio-playtest-task.js';
 import {blockerSignature,repeatedFailure,deferredChecks,followupInstructions,type TaskFollowup,type DeferredCheck} from './studio-followups.js';
@@ -37,7 +38,8 @@ type TaskState='queued'|'starting'|'running'|'done'|'blocked'|'skipped'|'cancell
 interface TaskSkip {at:number;reason:string;previousStatus:'blocked';summary?:string;error?:string;blockers?:StudioBlocker[]}
 // A producer waiver releases dependencies; it never changes the recorded verification result.
 const released=(t:Task)=>t.status==='done'||t.status==='skipped'&&!!t.skip;
-export interface Task {launchers?:LaunchTarget[]}
+export interface Task {launchers?:LaunchTarget[];feedbackFiles?:FileRef[]}
+export interface StudioRun {feedbackFiles?:FileRef[];feedbackFileHistory?:FileRef[]}
 export interface StudioRun {functionalTestRequested?:boolean;deliveryHistory?:Task[]}
 export interface Task {remediationFor?:{taskId:string;blockerKey:string;sourceActionId:string};autoFollowup?:TaskFollowup;deferred?:DeferredCheck[]}
 export interface Task {skip?:TaskSkip;planRepairs?:number;showcase?:boolean}
@@ -247,7 +249,7 @@ export class Studio {
     return [...messages.values()].join('\n').slice(-60000);
   }
   private execution(r:StudioRun){if(r.workspace?.status!=='ready'||!r.workspace.value)throw Error('需求的独立分支尚未准备完成');return r.workspace.value.project;}
-  private inputRefs(r:StudioRun){const refs=[...this.groupPosts(r.id).slice().reverse().flatMap(p=>p.files),...(r.guidance??[]).slice().reverse().flatMap(g=>g.files),...(r.attachments??[])],selected:FileRef[]=[];let size=0;for(const f of refs)if(!selected.some(x=>x.id===f.id)&&selected.length<5&&size+f.size<=MAX_UPLOAD_BYTES){selected.push(f);size+=f.size;}return selected;}
+  private inputRefs(r:StudioRun){const refs=[...(r.feedbackFiles??[]),...this.groupPosts(r.id).slice().reverse().flatMap(p=>p.files),...(r.guidance??[]).slice().reverse().flatMap(g=>g.files),...(r.attachments??[])],selected:FileRef[]=[];let size=0;for(const f of refs)if(!selected.some(x=>x.id===f.id)&&selected.length<5&&size+f.size<=MAX_UPLOAD_BYTES){selected.push(f);size+=f.size;}return selected;}
   private linkAttachments(r:StudioRun,sessionId:string){const p=this.project(r.projectId);for(const file of this.inputRefs(r))this.files?.link(p.hostId+'|project:'+this.execution(r).id,p.hostId+'|'+sessionId,file.id);}
   private async resumeAttachments(r:StudioRun,sessionId:string){
     if(!this.files)return;const p=this.project(r.projectId),scope=p.hostId+'|project:'+this.execution(r).id,target=p.hostId+'|'+sessionId;
@@ -259,7 +261,14 @@ export class Studio {
       const result=await this.remote(p.hostId,{id:randomUUID(),type:'upload',upload:{scope:target,file,data:bytes.toString('base64')}});if(result?.file?.sha256!==file.sha256)throw Error('原会话尚未收到续做参考附件：'+file.name);this.files.link(scope,target,file.id);
     }
   }
-  file(runId:string,id:string){const r=this.run(runId);if(!(r.attachments??[]).some(f=>f.id===id)&&!this.groupPosts(r.id).some(p=>p.files.some(f=>f.id===id)))throw Error('附件不属于此需求');if(!this.files)throw Error('附件服务未启用');return this.files.read('studio:'+r.id,id);}
+  file(runId:string,id:string){const r=this.run(runId);if(![...(r.attachments??[]),...(r.feedbackFileHistory??[]),...(r.feedbackFiles??[]),...this.allTasks(r).flatMap(t=>t.feedbackFiles??[])].some(f=>f.id===id)&&!this.groupPosts(r.id).some(p=>p.files.some(f=>f.id===id)))throw Error('附件不属于此需求');if(!this.files)throw Error('附件服务未启用');return this.files.read('studio:'+r.id,id);}
+  private feedbackAttachments(r:StudioRun,t:Task,v:any){
+    if(v.attachmentIds!==undefined&&(!Array.isArray(v.attachmentIds)||!v.attachmentIds.every((id:unknown)=>typeof id==='string'&&uploadId.test(id))))throw Error('无效返工附件');
+    if(v.attachmentIds?.length&&!this.files)throw Error('附件服务未启用');
+    const p=this.project(r.projectId),scope=p.hostId+'|project:'+this.execution(r).id,refs=this.files?.refs(scope,v.attachmentIds??[])??[];
+    for(const file of refs)this.files!.link(scope,'studio:'+r.id,file.id);
+    r.feedbackFileHistory=[...(r.feedbackFileHistory??[]),...refs.filter(f=>!(r.feedbackFileHistory??[]).some(old=>old.id===f.id))];r.feedbackFiles=refs;t.feedbackFiles=refs;
+  }
   visualArtifact(runId:string,taskId:string,index:number,kind='image'){
     const r=this.run(runId),p=this.project(r.projectId),t=this.allTasks(r).find(t=>t.id===taskId),artifact=Number.isInteger(index)&&index>=0?t?.artifacts?.[index]:undefined,s=t?.sessionId?this.store.getSession(t.sessionId):undefined;
     if(!artifact||!(kind==='video'?/\.(mp4|webm|mov|m4v)$/i.test(artifact.path):visualPath(artifact.path))||!t?.sessionId||!s||s.hostId!==p.hostId||s.projectId!==this.execution(r).id)throw Error('原画不属于此需求的工作副本');
@@ -311,6 +320,7 @@ export class Studio {
       const existing=this.runs().find(r=>r.id===v.requestId);
       if(existing){if(!existing.continuation||existing.continuation.requestHash!==requestHash||existing.continuation.parentRunId!==v.parentRunId)throw Error('创建 ID 已用于其他内容，请重新发起');return existing;}
     }
+    if(v.parentRunId)assertMainlineIdle(this.store,v.parentRunId);
     const p=this.project(v.projectId);if(!this.online(p.hostId))throw Error('工作电脑离线，请上线后发起');
     if(!this.store.hosts().find(h=>h.id===p.hostId)?.capabilities?.studioWorkspaces)throw Error('请先升级工作电脑连接程序，以支持每个需求独立分支');
     if(v.attachmentIds!==undefined&&(!Array.isArray(v.attachmentIds)||!v.attachmentIds.every((id:unknown)=>typeof id==='string'&&uploadId.test(id))))throw Error('无效需求附件');
@@ -336,6 +346,7 @@ export class Studio {
     return r;
   }
   async command(v:any){
+    assertMainlineIdle(this.store,v.runId);
     const r=this.run(v.runId),p=this.project(r.projectId),task=this.allTasks(r).find(t=>t.id===v.taskId);
     if(v.op==='record-showcase'){if(this.continuationCopying(r.id))throw Error('正在复制本次交付，请稍后再补录');if(r.status==='cancelled'||r.workspace?.status!=='ready'||!this.online(p.hostId))throw Error('请确认需求工作副本可用且工作电脑在线');if(r.tasks.some(t=>t.showcase))return r;if(this.chatBusy(r)||!r.tasks.length||!r.tasks.every(released)||this.allTasks(r).some(t=>['starting','running'].includes(t.status)))throw Error('请先完成制作、审批和当前执行');r.tasks=withShowcase(r.tasks,true);r.recordVideo=true;r.autoAccepted=undefined;r.status='executing';r.paused=false;this.saveRun(r,'制作人补录成果展示视频，保留原分支、已完成任务和审批',r.tasks.find(t=>t.showcase));void this.tick();return this.run(r.id);}
     if(r.status==='cancelled'||r.status==='accepted'&&!['bind-chat','resolve-chat','add-functional-test'].includes(v.op))throw Error('需求已结束');
@@ -344,7 +355,7 @@ export class Studio {
     if(v.op==='approve-step'||v.op==='reject-step'){
       if(task?.kind!=='producer-review'||task.status!=='awaiting-review'||task.reviewId!==v.reviewId||!this.dependenciesReady(r,task))throw Error('本轮审批内容已变化，请重新查看');
       if(v.op==='approve-step'){task.status='done';task.approvedAt=Date.now();task.finishedAt=task.approvedAt;task.summary='制作人已确认本轮交付，开放后续环节';this.saveRun(r,'制作人批准：'+task.title,task);}
-      else{const feedback=text(v.feedback,3000,'修改意见'),affected=this.dependentTasks(r,task.dependencies);if(this.chatBusy(r)||this.allTasks(r).some(t=>['starting','running'].includes(t.status)))throw Error('请等待当前执行结束再退回修改');for(const t of r.tasks)if(affected.has(t.id))this.resetTask(t,task.dependencies.includes(t.id)?feedback:'制作人打回上游，重新验证本轮交付');r.delivery=undefined;r.status='executing';r.feedback=feedback;this.saveRun(r,'制作人打回：'+task.title,task);}
+      else{const feedback=text(v.feedback,3000,'修改意见'),affected=this.dependentTasks(r,task.dependencies);if(this.chatBusy(r)||this.allTasks(r).some(t=>['starting','running'].includes(t.status)))throw Error('请等待当前执行结束再退回修改');this.feedbackAttachments(r,task,v);for(const t of r.tasks)if(affected.has(t.id))this.resetTask(t,task.dependencies.includes(t.id)?feedback:'制作人打回上游，重新验证本轮交付');r.delivery=undefined;r.status='executing';r.feedback=feedback;this.saveRun(r,'制作人打回：'+task.title,task);}
       void this.tick();return this.run(r.id);
     }
     if(v.op==='skip-task'){
@@ -412,6 +423,7 @@ export class Studio {
     else if(v.op==='reject-visual'&&task?.kind==='visual-review'){
       if(task.status!=='awaiting-review'||v.reviewId!==task.reviewId)throw Error('本轮原画已变化，请重新查看');const feedback=text(v.feedback,3000,'原画修改意见'),affected=this.dependentTasks(r,task.dependencies);
       if(r.tasks.some(t=>affected.has(t.id)&&['starting','running'].includes(t.status)))throw Error('相关任务仍在执行，请先停止后调整原画');
+      this.feedbackAttachments(r,task,v);
       for(const t of r.tasks)if(affected.has(t.id))this.resetTask(t,task.dependencies.includes(t.id)?feedback:'原画返工，旧视觉确认失效，需重新验收上游交付');r.delivery=undefined;r.status='executing';r.feedback=feedback;this.saveRun(r,'制作人要求修改原画；视觉确认与下游结果已失效',task);
     }
     else if(v.op==='accept'&&r.status==='review'){if(r.workflow?.error)throw Error(r.workflow.error);if(r.workflow?.kind==='scene'&&(!r.workflow.selection||r.workflow.selection.approvals.visual)&&!r.tasks.some(t=>t.kind==='visual-review'&&t.status==='done'&&t.approvedAt&&t.visualSnapshots?.length))throw Error('本轮视觉确认尚未完成，不能验收');if(!r.tasks.every(released)||!r.tasks.filter(t=>t.role==='qa').every(t=>t.status==='done'))throw Error('制作任务与最终 QA 尚未完成，不能验收');const skipped=r.tasks.filter(t=>t.status==='skipped');if(skipped.length&&v.acknowledgeSkipped!==true)throw Error('存在制作人跳过记录，请查看遗留问题并明确确认后验收');if(this.chatBusy(r))throw Error('请等待角色对话结束或先停止，再验收');r.status='accepted';this.saveRun(r,skipped.length?'制作人确认跳过记录与遗留问题后验收：'+skipped.map(t=>t.id).join('、'):'制作人验收通过');}
@@ -436,6 +448,7 @@ export class Studio {
       if(task.kind)throw Error('请对审批上游制作任务提出返工，视觉确认不能绑定或重试为 Agent 任务');
       const feedback=text(v.feedback,3000,'返工 / 重试说明');
       if(this.chatBusy(r)||this.allTasks(r).some(t=>['starting','running'].includes(t.status)))throw Error('请等待当前任务和角色对话结束，或先停止，再发起返工');
+      this.feedbackAttachments(r,task,v);
       const affected=this.dependentTasks(r,[task.id]);
       if(task===r.planner){r.tasks=[];r.delivery=undefined;r.status='planning';if(r.workflow)r.workflow.error=undefined;}
       else if(task===r.delivery){r.status='delivery';}
@@ -510,6 +523,7 @@ export class Studio {
   group(runId:string,before?:string){const r=this.run(runId);return groupPage(groupEntries(r,this.groupPosts(r.id),this.store,id=>STUDIO_ROLES.find(x=>x[0]===id)?.[1]??id,[...r.log.filter(l=>!l.id),...this.store.db.prepare('SELECT json FROM studio_group_records WHERE run_id=? ORDER BY at').all(r.id).map(row=>JSON.parse(String(row.json)))]),before);}
   async groupChat(v:any){const job=this.groupAction(v);this.launches.add(job);try{return await job;}finally{this.launches.delete(job);}}
   private async groupAction(v:any){
+    assertMainlineIdle(this.store,v.runId);
     const r=this.run(v.runId),p=this.project(r.projectId),execution=this.execution(r);
     if(r.status==='cancelled')throw Error('此需求已取消');
     if(typeof v.id!=='string'||!uploadId.test(v.id)||!Array.isArray(v.roles)||v.roles.length>13||new Set(v.roles).size!==v.roles.length||v.roles.some((role:string)=>!p.roles.some(a=>a.role===role&&a.enabled)))throw Error('请选择该团队中已启用的接收角色');
@@ -575,6 +589,7 @@ export class Studio {
   }
   async chat(v:any){const job=this.chatAction(v);this.launches.add(job);try{return await job;}finally{this.launches.delete(job);}}
   private async chatAction(v:any,groupContext=''){
+    assertMainlineIdle(this.store,v.runId);
     const r=this.run(v.runId),p=this.project(r.projectId),execution=this.execution(r),a=p.roles.find(a=>a.role===v.role&&a.enabled);
     if(this.continuationCopying(r.id))throw Error('正在复制本次交付，请稍后再发起职能对话');
     if(!a||r.status==='cancelled')throw Error('此需求或职能已停止接收消息');

@@ -180,3 +180,5 @@ node --env-file=.env --import tsx scripts/verify-remote.ts https://relay.example
 本地 Agent 接口使用 Codex app-server 和 Claude Agent SDK，具体版本由依赖锁文件固定。
 
 游戏工作室默认通过本机脚本启动、验证和录制，不依赖 Computer Use 或访达绑定；证据分类和权限边界见 [脚本优先验收](docs/scripted-validation.md)。
+
+- [返工附件、持续对话与主干合入](docs/studio-rework-and-mainline.md)

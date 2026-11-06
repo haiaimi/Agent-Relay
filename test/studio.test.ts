@@ -70,6 +70,17 @@ async function fixture(prepareFailure=false,inspectVisual:()=>Promise<{sha256:st
   const finish=(t:any,output:string,status:Session['status']='idle')=>{const s=store.getSession(t.sessionId)!;assert.ok(s);store.event({id:randomUUID(),hostId:s.hostId,sessionId:s.id,type:'message',data:{id:randomUUID(),role:'assistant',text:output},at:Date.now()});store.session({...s,status,updatedAt:Date.now()});};
   return {dir,store,studio,project,actions,files,run,finish,settle,setOnline:(v:boolean)=>{online=v;},setSendError:(v:boolean)=>{sendError=v;},setSteerError:(v:boolean)=>{steerError=v;},async close(){await studio.close();store.close();rmSync(dir,{recursive:true,force:true});}};
 }
+test('rework attachments are scoped to the demand, delivered to agents and retained for review',async()=>{
+ const f=await fixture();try{
+  f.studio.saveProject({...f.project,reviewPlan:false});f.studio.createRun({workflow:'general',projectId:f.project.id,title:'附件返工',brief:'制作'});await f.settle();f.finish(f.run().planner,plan([task('scene')]));await f.settle();f.finish(f.run().tasks[0],result('blocked','需要调整'));await f.settle();
+  const r=f.run(),t=r.tasks[0],bytes=Buffer.from('reference file'),ref={id:randomUUID(),name:'changes.txt',size:bytes.length,mime:'application/octet-stream',sha256:createHash('sha256').update(bytes).digest('hex')};
+  f.files.put('workstation|project:other',ref,bytes);
+  await assert.rejects(f.studio.command({op:'retry',runId:r.id,taskId:t.id,feedback:'按附件修改',attachmentIds:[ref.id]}),/不属于/);assert.equal(f.run().tasks[0].status,'blocked');
+  f.files.put('workstation|project:'+r.workspace!.value!.project.id,ref,bytes);
+  await f.studio.command({op:'retry',runId:r.id,taskId:t.id,feedback:'按附件修改',attachmentIds:[ref.id]});await f.settle();
+  assert.deepEqual(f.actions.at(-1)!.attachmentIds,[ref.id]);assert.deepEqual(f.run().tasks[0].feedbackFiles,[ref]);assert.deepEqual(f.studio.file(r.id,ref.id).bytes,bytes);assert.deepEqual(f.run().feedbackFiles,[ref]);
+ }finally{await f.close();}
+});
 test('producer skip releases the next QA with failure evidence, remains durable and is not acceptance',async()=>{
   const f=await fixture();try{
     f.studio.saveProject({...f.project,reviewPlan:false});f.studio.createRun({workflow:'general',projectId:f.project.id,title:'独立验收',brief:'检查跳过后的行为'});await f.settle();f.finish(f.run().planner,plan([task('prior'),task('integration',['prior'])]));await f.settle();f.finish(f.run().tasks[0],result());await f.settle();

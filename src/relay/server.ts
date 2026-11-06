@@ -1,3 +1,4 @@
+import {StudioMainline} from './studio-mainline.js';
 import {StudioPlaytests} from './studio-playtests.js';
 import {QuestionState} from './question-state.js';
 import {streamStudioVideo} from './studio-video.js';
@@ -33,6 +34,7 @@ const staticFiles: Record<string,[string,string]> = {
   '/conversation-cache.js':['conversation-cache.js','text/javascript; charset=utf-8'],
   '/studio-sidebar.js':['studio-sidebar.js','text/javascript; charset=utf-8'],
   '/studio-playtests.js':['studio-playtests.js','text/javascript; charset=utf-8'],
+  '/studio-mainline.js':['studio-mainline.js','text/javascript; charset=utf-8'],
   '/studio-stage-guide.js':['studio-stage-guide.js','text/javascript; charset=utf-8'],
   '/studio-attention.js':['studio-attention.js','text/javascript; charset=utf-8'],
   '/studio-api.js':['studio-api.js','text/javascript; charset=utf-8'],
@@ -163,6 +165,7 @@ export function createRelay(options: Options) {
   }
   const autoAnswers=new StudioAutoAnswers(store,studio,attention,remote,(host,action,reason)=>submitAnswer(host,action,true,reason),host=>bridges.get(host)?.readyState===WebSocket.OPEN,()=>emit('studio',{}));
   const followups=new StudioFollowups(store,studio,remote,host=>bridges.get(host)?.readyState===WebSocket.OPEN);
+  const mainline=new StudioMainline(store,studio,remote,host=>bridges.get(host)?.readyState===WebSocket.OPEN,()=>emit('studio',{}));
   const playtests=new StudioPlaytests(store,studio,remote,host=>launcherBridges.get(host)?.readyState===WebSocket.OPEN,()=>emit('studio',{}));
   const brains=new Brainstorms(store,studio,remote,host=>bridges.get(host)?.readyState===WebSocket.OPEN,()=>emit('studio',{}),files,media);
   const server=createServer(async(req,res)=>{
@@ -219,6 +222,8 @@ export function createRelay(options: Options) {
       if(req.method==='POST'&&url.pathname==='/api/studio/project')return json(res,200,{project:studio.saveProject(await body(req,256_000))});
       if(req.method==='POST'&&url.pathname==='/api/studio/toolchain')return json(res,200,{project:studio.saveToolchain(await body(req))});
       if(req.method==='POST'&&url.pathname==='/api/studio/run')return json(res,200,{run:studio.createRun(await body(req))});
+      if(req.method==='GET'&&url.pathname==='/api/studio/mainline')return json(res,200,{jobs:mainline.list(url.searchParams.get('runId')??'')});
+      if(req.method==='POST'&&url.pathname==='/api/studio/mainline')return json(res,200,{job:await mainline.start(await body(req))});
       if(req.method==='GET'&&url.pathname==='/api/studio/playtests')return json(res,200,playtests.list(url.searchParams.get('runId')??''));
       if(req.method==='POST'&&url.pathname==='/api/studio/playtests/start')return json(res,200,{launch:await playtests.start(await body(req))});
       if(req.method==='GET'&&url.pathname==='/api/studio/playtests/status')return json(res,200,{launch:await playtests.status(url.searchParams.get('runId')??'',url.searchParams.get('id')??'')});
