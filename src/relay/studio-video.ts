@@ -13,11 +13,14 @@ export async function streamStudioVideo(req:IncomingMessage,res:ServerResponse,t
   if(!Number.isSafeInteger(start)||!Number.isSafeInteger(end)||start<0||start> end||start>=info.size){res.writeHead(416,{...headers,'Content-Range':'bytes */'+info.size,'Content-Length':0});res.end();return;}
   res.writeHead(range?206:200,{...headers,'Content-Length':end-start+1,...range?{'Content-Range':`bytes ${start}-${end}/${info.size}`}:{}});
   if(req.method==='HEAD'){res.end();return;}
-  for(let offset=start;offset<=end&&!res.destroyed;){
-    const length=Math.min(256*1024,end-offset+1),part=await remote(target.hostId,{id:randomUUID(),...action,videoOffset:offset,videoLength:length,videoVersion:info.version});
-    if(res.destroyed)return;const bytes=Buffer.from(part.data??'','base64');
-    if(part.version!==info.version||part.offset!==offset||bytes.length!==length)throw Error('视频分段不完整或文件已变化');
-    offset+=bytes.length;if(!res.write(bytes))await new Promise<void>(resolve=>{const done=()=>{res.off('drain',done);res.off('close',done);resolve();};res.once('drain',done);res.once('close',done);});
+  // Keep at most 1 MiB in flight; ordered writes support seeking without a
+  // full-file server cache or paying one network round trip for every chunk.
+  let next=start;const pending:Promise<{bytes:Buffer;error?:never}|{error:unknown;bytes?:never}>[]=[];
+  const fill=()=>{while(next<=end&&pending.length<4&&!res.destroyed){const offset=next,length=Math.min(256*1024,end-offset+1);next+=length;pending.push((async()=>{try{const part=await remote(target.hostId,{id:randomUUID(),...action,videoOffset:offset,videoLength:length,videoVersion:info.version});const bytes=Buffer.from(part.data??'','base64');if(part.version!==info.version||part.offset!==offset||bytes.length!==length)throw Error('视频分段不完整或文件已变化');return {bytes};}catch(error){return {error};}})());}};
+  fill();while(pending.length&&!res.destroyed){
+    const part=await pending.shift()!;if(res.destroyed)return;if('error'in part)throw part.error;
+    if(!res.write(part.bytes!))await new Promise<void>(resolve=>{const done=()=>{res.off('drain',done);res.off('close',done);resolve();};res.once('drain',done);res.once('close',done);});
+    fill();
   }
   if(!res.destroyed)res.end();
 }
