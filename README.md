@@ -36,6 +36,8 @@
 
 ## 游戏工作室
 
+可单独选择“功能白模与操作验证”：在白模中操控本次真实角色，复用同一套 3C 与交互逻辑。交付页可一键通知工作电脑启动功能测试或真实游戏，显示工作副本、操作说明和本机日志。见[功能验证与一键启动](docs/studio-playtests.md)。
+
 执行中的普通设计和实现问题默认由团队根据需求、已确认方案和最新指引自动回答，未完成项自动交回原 Agent 补做，同类阻断反复出现时安排阶段内程序协作修复，关闭浏览器后仍继续；你勾选的制作人审批节点保留人工确认。创建需求和需求详情可关闭自动回答，决策及依据保存在制作记录中。见[自动回答与审批](docs/studio-confirmations.md#执行问题自动回答)。
 
 `/studio` 与会话工作台共用侧边栏，电脑直接切换，手机滑出侧边栏查看当前团队的需求和职能进度。独立桌面窗口可直接打开工作室，选择本机工程路径；手机填写路径时，路径指向所选工作电脑。
@@ -176,3 +178,5 @@ node --env-file=.env --import tsx scripts/verify-remote.ts https://relay.example
 - [yetone/magpie](https://github.com/yetone/magpie)，研究版本 838d12d6f876cfca67d6127950311a9647b1f2e2：原生会话与历史浏览。
 
 本地 Agent 接口使用 Codex app-server 和 Claude Agent SDK，具体版本由依赖锁文件固定。
+
+游戏工作室默认通过本机脚本启动、验证和录制，不依赖 Computer Use 或访达绑定；证据分类和权限边界见 [脚本优先验收](docs/scripted-validation.md)。
