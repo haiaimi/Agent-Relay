@@ -2,7 +2,7 @@ import {studioVideo} from './studio-video.js';
 import { randomUUID } from 'node:crypto';
 import {DatabaseSync} from 'node:sqlite';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join,relative,isAbsolute } from 'node:path';
 import { query, type Query, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import { CodexRpc } from './codex.js';
 import {CodexDesktop,codexIpcPath} from './codex-desktop.js';
@@ -22,6 +22,8 @@ import {codexPermissions,claudePermissions} from './permissions.js';
 import {prepareBrainstorm,brainProject,brainstormTools,brainstormInstructions} from './brainstorm.js';
 import {studioArtifact} from './studio-artifact.js';
 import {prepareStudioWorkspace} from './studio-workspace.js';
+import {exportMigration,importMigration,migrationWorkspace,probeMigrationProject} from './studio-migration.js';
+import {MigrationCache} from '../shared/studio-migration.js';
 import {createLocalProject} from './projects.js';
 import {toolActivity} from './activity.js';
 import {codexSettings,claudeSettings,type SessionSettings} from './settings.js';
@@ -37,6 +39,11 @@ export interface BridgeConfig {
   codexHome?:string;claudeHome?:string;discoverCodexProjects?:boolean;syncHistory?:boolean;
 }
 export class AgentRuntime {
+  private migrationOperations=new Map<string,{signature:string;job:Promise<any>}>();
+  private migrationFrozen(path:string){
+    this.store.db.exec('CREATE TABLE IF NOT EXISTS studio_migration_locks(id TEXT PRIMARY KEY,path TEXT NOT NULL)');
+    return this.store.db.prepare('SELECT path FROM studio_migration_locks').all().some(row=>{const rel=relative(String(row.path),path);return rel===''||!rel.startsWith('..')&&!isAbsolute(rel);});
+  }
   readonly agents:AgentRegistry;
   private apiRuns=new Map<string,{runner:ApiAgentRun;promise:Promise<void>}>();
   private managed=new Map<string,Session>();
@@ -307,7 +314,46 @@ export class AgentRuntime {
       this.event(s,'message',{id:`btw-answer:${id}`,role:'assistant',label:'CLAUDE · 旁问',text:answer.response});
     }catch(e){this.event(s,'error',{message:'/btw 旁问失败：'+(e as Error).message});}finally{release();active?.close();if(active)this.sideQueries.delete(active);}
   }
-  async handle(action:Action,fromQueue=false):Promise<any>{
+  async handle(action:Action,fromQueue=false,migrationOwned=false):Promise<any>{
+    if(!migrationOwned&&action.type==='studio-migration'&&['freeze','export','import'].includes(action.migration!.op)){
+      const m=action.migration!,key=m.id+':'+m.op,signature=JSON.stringify([action.workspaceId,action.projectId,m.paths]),prior=this.migrationOperations.get(key);
+      if(prior){if(prior.signature!==signature)throw Error('同一迁移正在处理其他绑定');return prior.job;}
+      const job=Promise.resolve().then(()=>this.handle(action,fromQueue,true));this.migrationOperations.set(key,{signature,job});try{return await job;}finally{this.migrationOperations.delete(key);}
+    }
+    if(['start','send','steer','answer','approve'].includes(action.type)){
+      const project=action.type==='start'?this.projects().find(p=>p.id===action.projectId):undefined;
+      const path=project?(project.roots??[project.path])[action.workspaceIndex??0]:action.sessionId?(this.managed.get(action.sessionId)??this.history.get(action.sessionId))?.cwd:undefined;
+      if(path&&this.migrationFrozen(path))throw Error('此工作副本已冻结用于跨电脑接力，请在新电脑的接力会话继续');
+    }
+    if(action.type==='studio-migration'){
+      const m=action.migration!,cache=new MigrationCache(this.config.dataDir,m.id);
+      if(m.op==='status'){if(!m.manifest)throw Error('缺少迁移清单');cache.save(m.manifest);return {offsets:m.manifest.repositories.map((_,i)=>cache.size(i))};}
+      if(m.op==='read')return cache.read(m.file!,m.offset!);
+      if(m.op==='write'){if(m.manifest)cache.save(m.manifest);return {offset:cache.write(m.file!,m.offset!,m.data!)};}
+      const project=this.projects().find(p=>p.id===action.projectId);if(!project)throw Error('迁移工程不在本机允许范围内');assertProjectPath(project.path,this.roots());
+      if(m.op==='probe')return probeMigrationProject(project);
+      if(m.op==='import'){
+        const workspace=await importMigration(this.store,this.config.dataDir,project,action.workspaceId!,m.id),nativeId='migration-'+m.id;
+        const session:Session={id:sessionKey(this.config.hostId,'api',nativeId),hostId:this.config.hostId,provider:'api',nativeId,title:'接力历史产物',cwd:workspace.project.path,updatedAt:Date.now(),status:'idle',managed:true,projectId:workspace.project.id,projectName:workspace.project.name};
+        this.managed.set(session.id,session);this.save(session);return {workspace,session};
+      }
+      const workspace=migrationWorkspace(this.store,action.workspaceId!);if(workspace.project.id!==project.id||workspace.project.path!==project.path)throw Error('迁移源工作副本不匹配');
+      this.store.db.exec('CREATE TABLE IF NOT EXISTS studio_migration_locks(id TEXT PRIMARY KEY,path TEXT NOT NULL)');
+      if(m.op==='freeze'){
+        const sessions=this.list().filter(s=>s.cwd===project.path||s.projectId===project.id);
+        if(sessions.some(s=>s.pendingCount)||this.store.queued().some(a=>sessions.some(s=>s.id===a.sessionId)))throw Error('仍有排队消息，请处理完排队消息后重试迁移，消息不会被丢弃');
+        const old=this.store.db.prepare('SELECT path FROM studio_migration_locks WHERE id=?').get(m.id);if(old&&old.path!==project.path)throw Error('迁移冻结目录不匹配');
+        this.store.db.prepare('INSERT OR IGNORE INTO studio_migration_locks VALUES(?,?)').run(m.id,project.path);
+        for(const s of sessions)if(['running','waiting'].includes(s.status)||this.busy.has(s.id))await this.handle({id:randomUUID(),type:'stop',sessionId:s.id});
+        for(let attempt=0;attempt<40;attempt++){
+          if(!this.list().some(s=>(s.projectId===project.id||s.cwd===project.path)&&(['running','waiting'].includes(s.status)||this.busy.has(s.id))))return {ok:true};
+          await new Promise(r=>setTimeout(r,500));
+        }
+        throw Error('原会话仍在结束中，副本已冻结；请稍后重试迁移');
+      }
+      if(!this.migrationFrozen(project.path)||this.list().some(s=>(s.projectId===project.id||s.cwd===project.path)&&(['running','waiting'].includes(s.status)||this.busy.has(s.id)||s.pendingCount)))throw Error('请先停止原会话并冻结工作副本');
+      return {manifest:await exportMigration(this.store,this.config.dataDir,action.workspaceId!,m.id,m.paths)};
+    }
     if(action.type==='start')this.agents.enabled(action.provider!,action.agentId);
     if(action.type==='send'){const current=this.get(action.sessionId!);if(!action.text?.trimStart().startsWith('/'))this.agents.enabled(current.provider,current.agentId);}
     if(action.type==='prepare-brainstorm'){const p=this.projects().find(p=>p.id===action.projectId);if(!p)throw Error('工程不存在');const source=assertProjectPath((p.roots??[p.path])[action.workspaceIndex??0],this.roots());return {project:prepareBrainstorm(this.store,this.config.dataDir,action.workspaceId!,source)};}

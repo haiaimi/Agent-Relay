@@ -66,15 +66,15 @@ export function startBridge(config:BridgeConfig,token:string){
       const command=validateAction(value);id=command.id;
       if(command.sessionId&&!command.sessionId.startsWith(config.hostId+':'))throw new Error('Session belongs to another computer');
       if(command.type==='direct'){if(command.relay&&!command.iceServers?.length)throw new Error('缺少加密中转配置');const result=await direct.accept(runtime.directScope(command),command.offer!,command.relay?command.iceServers:undefined);send({type:'result',id,result});return;}
-      if(command.type==='asset'||command.type==='file'||command.type==='upload'||command.type==='studio-artifact'||command.type==='studio-video'){
-        const result=await runtime.handle(command);send({type:'result',id,result});return;
+      if(command.type==='asset'||command.type==='file'||command.type==='upload'||command.type==='studio-artifact'||command.type==='studio-video'||command.type==='studio-migration'){
+        const result=await runtime.handle(command);if(command.type==='studio-migration'&&['freeze','import'].includes(command.migration!.op))await sync();send({type:'result',id,result});return;
       }
       if(command.type==='history'||command.type==='models'||command.type==='commands'){
         if(!command.live)await sync();const result=await runtime.handle(command);send({type:'result',id,result});return;
       }
       const previous=store.begin(id,command);
       if(!previous.fresh){const result=previous.result;send(result?.error?{type:'result',id,error:result.error}:{type:'result',id,result});return;}
-      try{const result=await runtime.handle(command);if(['create-project','prepare-workspace','prepare-brainstorm'].includes(command.type))await sync();store.finish(id,result);send({type:'result',id,result});}
+      try{const result=await runtime.handle(command);if(['create-project','prepare-workspace','prepare-brainstorm','studio-migration'].includes(command.type))await sync();store.finish(id,result);send({type:'result',id,result});}
       catch(err){store.finish(id,{error:(err as Error).message});throw err;}
     }catch(err){send({type:'result',id,error:(err as Error).message});}
   }
@@ -84,7 +84,7 @@ export function startBridge(config:BridgeConfig,token:string){
     let lastActivity=Date.now();
     const watchdog=setInterval(()=>{if(Date.now()-lastActivity>70_000)socket?.terminate();},15_000);
     socket.on('ping',()=>{lastActivity=Date.now();});
-    socket.on('open',()=>socket!.send(JSON.stringify({type:'hello',host:{service:config.service,id:config.hostId,name:config.name,hostname:hostname(),platform:`${platform()} ${arch()}`,projects:config.projects,agents:runtime.agents.catalog(),capabilities:{createProject:true,permissions:true,studioWorkspaces:true,studioArtifacts:true,brainstorm:true}}})));
+    socket.on('open',()=>socket!.send(JSON.stringify({type:'hello',host:{service:config.service,id:config.hostId,name:config.name,hostname:hostname(),platform:`${platform()} ${arch()}`,projects:config.projects,agents:runtime.agents.catalog(),capabilities:{createProject:true,permissions:true,studioWorkspaces:true,studioArtifacts:true,studioMigration:true,brainstorm:true}}})));
     socket.on('message',raw=>{
       lastActivity=Date.now();
       try{

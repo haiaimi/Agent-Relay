@@ -81,3 +81,15 @@ test('relay shutdown drains companion disconnect handlers before closing the dat
   const disconnected=Promise.all([once(main,'close'),once(launcher,'close')]);await app.close();closed=true;await disconnected;
  }finally{main?.terminate();launcher?.terminate();if(!closed)await app.close();rmSync(dir,{recursive:true,force:true});}
 });
+
+
+test('migrated delivery launches on the imported device session while retaining original conversation history',async()=>{
+ const dir=mkdtempSync(join(tmpdir(),'migrated-launch-')),store=new RelayStore(dir),rid=randomUUID(),original='old:codex:one',imported='new:api:migration';
+ const target=launchTargets([{id:'game',kind:'game',title:'迁移后试玩',script:'Play.sh',cwd:'.',scene:'res://game.tscn',controls:'移动和重置'}])[0];
+ const run:any={id:rid,projectId:'p',device:{hostId:'new'},status:'review',workspace:{status:'ready',value:{project:{id:'studio-'+rid,path:dir}}},planner:{status:'done'},tasks:[{id:'code',status:'done',sessionId:original,artifactSessionId:imported,launchers:[target]}]};
+ for(const [id,hostId] of [[original,'old'],[imported,'new']])store.session({id,hostId,projectId:'studio-'+rid,provider:hostId==='new'?'api':'codex',nativeId:id,title:'history',cwd:dir,status:'idle',updatedAt:1});
+ const calls:any[]=[],studio:any={runs:()=>[run],projects:()=>[{id:'p',hostId:'old'}],projectForRun:()=>({id:'p',hostId:'new'})};
+ const service=new StudioPlaytests(store,studio,async(host,a)=>{calls.push({host,a});return a.launch!.op==='inspect'?{hash:'a'.repeat(64),worktree:dir}:{status:'started',pid:123};},()=>true,()=>{});
+ try{const response=await service.start({id:randomUUID(),runId:rid,targetId:'code:game'});assert.equal(response.phase,'finished');assert.equal(calls.length,2);assert.ok(calls.every(c=>c.host==='new'&&c.a.sessionId===imported));assert.equal(run.tasks[0].sessionId,original);}
+ finally{store.close();rmSync(dir,{recursive:true,force:true});}
+});

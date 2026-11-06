@@ -5,7 +5,7 @@ import type { Session, Host, RelayEvent, HistoryPage } from '../shared/protocol.
 
 export class RelayStore {
   db: DatabaseSync;
-  constructor(dir: string) {
+  constructor(readonly dir: string) {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(join(dir, 'relay.sqlite'));
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=3000;

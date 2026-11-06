@@ -40,6 +40,7 @@ const staticFiles: Record<string,[string,string]> = {
   '/studio-stage-guide.js':['studio-stage-guide.js','text/javascript; charset=utf-8'],
   '/studio-attention.js':['studio-attention.js','text/javascript; charset=utf-8'],
   '/studio-api.js':['studio-api.js','text/javascript; charset=utf-8'],
+  '/studio-migration.js':['studio-migration.js','text/javascript; charset=utf-8'],
   '/studio-repairs.js':['studio-repairs.js','text/javascript; charset=utf-8'],
   '/studio-task-focus.js':['studio-task-focus.js','text/javascript; charset=utf-8'],
   '/studio-guidance.js':['studio-guidance.js','text/javascript; charset=utf-8'],
@@ -88,7 +89,7 @@ async function body(req: IncomingMessage,limit=64_000): Promise<any> {
   return JSON.parse(text || '{}');
 }
 export function createRelay(options: Options) {
-  const uiRevision=createHash('sha256').update(['studio-mainline.js','studio-startup.js','studio-playtests.js','studio-stage-guide.js','studio.js','studio-sidebar.js','studio-scene.js','studio-guidance.js','studio-task-focus.js','studio-repairs.js','studio-attention.js','studio.css','studio.html','workspace-shell.js','app.js'].map(file=>readFileSync(fileURLToPath(new URL(`../../web/${file}`,import.meta.url)))).reduce((all,part)=>Buffer.concat([all,part]),Buffer.alloc(0))).digest('hex');
+  const uiRevision=createHash('sha256').update(['studio-migration.js','studio-mainline.js','studio-startup.js','studio-playtests.js','studio-stage-guide.js','studio.js','studio-sidebar.js','studio-scene.js','studio-guidance.js','studio-task-focus.js','studio-repairs.js','studio-attention.js','studio.css','studio.html','workspace-shell.js','app.js'].map(file=>readFileSync(fileURLToPath(new URL(`../../web/${file}`,import.meta.url)))).reduce((all,part)=>Buffer.concat([all,part]),Buffer.alloc(0))).digest('hex');
   if(options.turn)turnCredentials(options.turn);
   requireSecret(options.phoneToken,'PHONE_TOKEN'); requireSecret(options.bridgeToken,'BRIDGE_TOKEN');
   if (equalSecret(options.phoneToken, options.bridgeToken)) throw new Error('Use separate phone and bridge secrets');
@@ -229,6 +230,7 @@ export function createRelay(options: Options) {
       if(req.method==='GET'&&url.pathname==='/api/studio/playtests')return json(res,200,playtests.list(url.searchParams.get('runId')??''));
       if(req.method==='POST'&&url.pathname==='/api/studio/playtests/start')return json(res,200,{launch:await playtests.start(await body(req))});
       if(req.method==='GET'&&url.pathname==='/api/studio/playtests/status')return json(res,200,{launch:await playtests.status(url.searchParams.get('runId')??'',url.searchParams.get('id')??'')});
+      if(req.method==='POST'&&url.pathname==='/api/studio/migrate')return json(res,202,{run:studio.migrate(await body(req))});
       if(req.method==='POST'&&url.pathname==='/api/studio/command')return json(res,200,{run:await studio.command(await body(req))});
       if(['GET','HEAD'].includes(req.method??'')&&url.pathname==='/api/studio/video'){const target=studio.visualArtifact(url.searchParams.get('runId')??'',url.searchParams.get('taskId')??'',Number(url.searchParams.get('index')??'-1'),'video');try{await streamStudioVideo(req,res,target,remote);}catch(error){if(res.headersSent)res.destroy();else throw error;}return;}
       if(req.method==='GET'&&url.pathname==='/api/studio/artifact'){
@@ -353,7 +355,7 @@ export function createRelay(options: Options) {
       }
       if(req.method==='POST' && url.pathname==='/api/actions') {
         const value=await body(req); const action=validateAction(value);
-        if(action.type==='studio-launch'||action.type==='history'||action.type==='asset'||action.type==='file'||action.type==='models'||action.type==='commands'||action.type==='upload'||action.type==='direct'||action.type==='prepare-workspace'||action.type==='prepare-brainstorm'||action.type==='studio-artifact'||action.type==='studio-video') return json(res,400,{error:'Use the dedicated endpoint'});
+        if(action.type==='studio-migration'||action.type==='studio-launch'||action.type==='history'||action.type==='asset'||action.type==='file'||action.type==='models'||action.type==='commands'||action.type==='upload'||action.type==='direct'||action.type==='prepare-workspace'||action.type==='prepare-brainstorm'||action.type==='studio-artifact'||action.type==='studio-video') return json(res,400,{error:'Use the dedicated endpoint'});
         const host=['start','create-project'].includes(action.type) ? value.hostId : store.getSession(action.sessionId!)?.hostId;
         if(typeof host!=='string' || !store.hosts().some(h=>h.id===host)) return json(res,404,{error:'电脑或会话不存在'});
         if(!bridges.has(host)) return json(res,409,{error:'本地电脑离线'});
@@ -388,7 +390,7 @@ export function createRelay(options: Options) {
           if((service||launcher)&&!store.hosts().some(h=>h.id===msg.host.id))throw Error('Connect the main computer bridge first');
           hostId=msg.host.id;clearTimeout(helloTimer);connections.set(hostId,ws);
           if(launcher){const prior=store.hosts().find(h=>h.id===hostId)!;store.host({...prior,capabilities:{...prior.capabilities,studioLaunch:true}});emit('state',{});ws.send(JSON.stringify({type:'welcome'}));return;}
-          const host:Host={id:hostId,name:msg.host.name,hostname:typeof msg.host.hostname==='string'?msg.host.hostname.slice(0,100):undefined,platform:typeof msg.host.platform==='string'?msg.host.platform.slice(0,80):undefined,projects:msg.host.projects,online:true,lastSeen:Date.now(),agents:publicAgents(msg.host.agents),capabilities:{createProject:msg.host.capabilities?.createProject===true,permissions:msg.host.capabilities?.permissions===true,studioWorkspaces:msg.host.capabilities?.studioWorkspaces===true,studioLaunch:launcherBridges.has(hostId),studioArtifacts:msg.host.capabilities?.studioArtifacts===true,brainstorm:msg.host.capabilities?.brainstorm===true}};const prior=store.hosts().find(h=>h.id===hostId);store.host(service?{...prior!,capabilities:{...prior!.capabilities,brainstorm:true}}:{...host,projects:[...host.projects,...(prior?.projects??[]).filter(p=>p.id.startsWith('brainstorm-')&&!host.projects.some(x=>x.id===p.id))],capabilities:{...host.capabilities,brainstorm:host.capabilities?.brainstorm||brainstormBridges.has(hostId)}});emit('state',{});
+          const host:Host={id:hostId,name:msg.host.name,hostname:typeof msg.host.hostname==='string'?msg.host.hostname.slice(0,100):undefined,platform:typeof msg.host.platform==='string'?msg.host.platform.slice(0,80):undefined,projects:msg.host.projects,online:true,lastSeen:Date.now(),agents:publicAgents(msg.host.agents),capabilities:{createProject:msg.host.capabilities?.createProject===true,permissions:msg.host.capabilities?.permissions===true,studioWorkspaces:msg.host.capabilities?.studioWorkspaces===true,studioLaunch:launcherBridges.has(hostId),studioMigration:msg.host.capabilities?.studioMigration===true,studioArtifacts:msg.host.capabilities?.studioArtifacts===true,brainstorm:msg.host.capabilities?.brainstorm===true}};const prior=store.hosts().find(h=>h.id===hostId);store.host(service?{...prior!,capabilities:{...prior!.capabilities,brainstorm:true}}:{...host,projects:[...host.projects,...(prior?.projects??[]).filter(p=>p.id.startsWith('brainstorm-')&&!host.projects.some(x=>x.id===p.id))],capabilities:{...host.capabilities,brainstorm:host.capabilities?.brainstorm||brainstormBridges.has(hostId)}});emit('state',{});
           ws.send(JSON.stringify({type:'welcome'}));return;
         }
         if(!hostId) throw new Error('Hello required');

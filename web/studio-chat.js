@@ -16,7 +16,7 @@ export function studioChat({snapshot,api,refresh,roleName,notify,review}){
   const drafts=new Map(),pages=new Map(),rows=new Map(),seen=new Set(),expanded=new Set();
   let contextSignature='',rolesSignature='',choicesSignature='',historyCursor=null,loadJob;
   const tasks=runTasks;
-  const run=()=>snapshot().state.runs.find(r=>r.id===runId),team=()=>snapshot().state.projects.find(p=>p.id===run()?.projectId);
+  const run=()=>snapshot().state.runs.find(r=>r.id===runId),team=()=>({...snapshot().state.projects.find(p=>p.id===run()?.projectId),...run()?.device});
   const sessions=()=>run()?roleSessions(run(),role):[];
   const selection=()=>sessions().find(s=>s.id===sessionId);
   const cache=pagedConversationCache({target:()=>run()&&(role==='team'||sessionId)?{identity:JSON.stringify([team().hostId,runId,role,role==='team'?'':sessionId,run().workspace?.value?.project?.path]),generation}:null,pages,cursor:()=>historyCursor,view:()=>$('chat-timeline'),restore:value=>{historyCursor=value.cursor;$('chat-earlier').hidden=historyCursor===null;$('chat-earlier').dataset.cursor=String(historyCursor??'');renderTimeline();},note:()=>$('chat-cache-note').textContent='已显示浏览器缓存 · 正在同步最新记录…'});

@@ -6,7 +6,7 @@ import {join,resolve,relative,isAbsolute,dirname} from 'node:path';
 import type {Project} from '../shared/protocol.js';
 import type {BridgeStore} from './store.js';
 
-export interface StudioWorkspace {runId:string;project:Project;branch:string;sourcePath:string;sourceBranch:string;head:string;trackedSnapshot:boolean;untrackedFiles:number;createdAt:number;submodules?:number;skippedCaptures?:number}
+export interface StudioWorkspace {migrationId?:string;runId:string;project:Project;branch:string;sourcePath:string;sourceBranch:string;head:string;trackedSnapshot:boolean;untrackedFiles:number;createdAt:number;submodules?:number;skippedCaptures?:number}
 function git(cwd:string,args:string[],input?:Buffer):Promise<Buffer>{
   return new Promise((resolveResult,reject)=>{
     const child=spawn('git',['-c','core.quotePath=false','-c','core.fsmonitor=false',...args],{cwd,windowsHide:true,shell:false,stdio:'pipe'});let size=0,errors='',finished=false;const chunks:Buffer[]=[];

@@ -7,6 +7,7 @@ import {withShowcase,videoPath} from './studio-showcase.js';
 import {normalizeProductionFlow,productionFlowInstructions,productionRoleIds,ProductionPlanError} from './studio-flow.js';
 import {validateToolchain,validateBlockers,toolchainInstructions,type StudioToolchain,type StudioBlocker} from './studio-tools.js';
 import {renderingInstructions} from './studio-rendering.js';
+import {StudioMigrations,migrationPending,type StudioMigrationState} from './studio-migration.js';
 import {createHash,randomUUID} from 'node:crypto';
 import {continuationSnapshot,continuationInstructions,type StudioContinuation} from './studio-continuation.js';
 import {modelConnectionFailure,pendingProducerInput,handoffContext,MODEL_RETRIES,MODEL_RETRY_MS,type StudioRecovery} from './studio-recovery.js';
@@ -45,6 +46,7 @@ export interface Task {remediationFor?:{taskId:string;blockerKey:string;sourceAc
 export interface Task {skip?:TaskSkip;planRepairs?:number;showcase?:boolean}
 export interface Task {recovery?:StudioRecovery}
 export interface Task {preflightRetry?:PreflightRetry}
+export interface Task {migrationContext?:string;artifactSessionId?:string}
 export interface Task {blockers?:StudioBlocker[];checkpoint?:{at:number;sessionId:string;reason:string}}
 interface Assignment {role:string;enabled:boolean;provider:Provider;agentId?:string;model?:string;effort?:string;instructions:string;tools:string}
 export interface StudioProject {toolchain?:StudioToolchain;includeCaptures?:boolean;id:string;name:string;hostId:string;projectId:string;workspaceIndex:number;roles:Assignment[];permissionMode:PermissionMode;concurrency:number;reviewPlan:boolean;createdAt:number;updatedAt:number}
@@ -54,6 +56,10 @@ interface RoleChat {role:string;actionId:string;sessionId?:string;error?:string;
 interface SkipBlocker {kind:'receipt'|'active'|'queue'|'state'|'dependency';title:string;message:string;sessionId?:string;taskId?:string;canStop?:boolean;canCancelQueue?:boolean}
 export interface StudioRun {chatPermissions?:Partial<Record<string,PermissionMode>>}
 export interface StudioRun {continuation?:StudioContinuation}
+export interface StudioRun {migration?:StudioMigrationState}
+export interface StudioDevice {hostId:string;projectId:string;workspaceIndex:number;path?:string;toolchain?:StudioToolchain}
+export interface StudioProject {devices?:StudioDevice[]}
+export interface StudioRun {device?:StudioDevice}
 export interface StageDirection {id:string;taskId:string;text:string;sessionId?:string;at:number;status:'saved'|'sending'|'delivered'|'queued'|'uncertain';error?:string}
 export interface StudioRun {autoAnswerQuestions?:boolean;directions?:StageDirection[];recordVideo?:boolean;autoAccepted?:boolean;id:string;projectId:string;title:string;brief:string;status:'planning'|'plan-review'|'executing'|'delivery'|'review'|'accepted'|'cancelled';paused:boolean;tasks:Task[];planner:Task;delivery?:Task;workflow?:SceneWorkflow;createdAt:number;updatedAt:number;revision:number;feedback?:string;log:{id?:string;at:number;text:string;taskId?:string;taskTitle?:string;sessionId?:string;role?:string;skip?:TaskSkip;handoff?:{id:string;role:string;title:string;summary?:string;artifacts?:Artifact[]}[]}[];attachments?:FileRef[];workspace?:{status:'queued'|'preparing'|'ready'|'blocked';actionId?:string;value?:StudioWorkspace;error?:string};chats?:RoleChat[];guidance?:{id:string;role:string;text:string;files:FileRef[];at:number;sessionId:string;automatic?:boolean}[]}
 const roleIds=new Set<string>(STUDIO_ROLES.map(r=>r[0]));
@@ -86,6 +92,7 @@ export function parseStudioPlan(output:string,roles:Assignment[],workflow?:Scene
   return tasks;
 }
 export class Studio {
+  private migrations:StudioMigrations;
   private flowUpgrades=new Map<string,Promise<StudioRun>>();
   private ticking=false;private closed=false;private launches=new Set<Promise<unknown>>();
   private timer:NodeJS.Timeout;
@@ -97,10 +104,10 @@ export class Studio {
         run.workflow=sceneWorkflow(undefined,run.title,run.brief);
         if(run.tasks.some(t=>['concept','model','environment'].includes(t.role)))run.workflow.kind='scene';
         if(run.workflow.kind==='scene'&&!['accepted','cancelled'].includes(run.status)){
-          try{requireSceneRoles(run.workflow,this.project(run.projectId).roles);
+          try{requireSceneRoles(run.workflow,this.projectForRun(run).roles);
             if(run.tasks.length){
               if(run.tasks.some(t=>t.status!=='queued'||t.sessionId))throw Error('旧场景计划已经开始执行，已暂停后续分发；请核对并对统筹重新拆解，原执行记录保留');
-              const qa=run.tasks.find(t=>t.id.startsWith('studio-final-qa'));run.tasks=compileScenePlan(run.tasks.filter(t=>t!==qa),run.workflow,this.project(run.projectId).roles);if(qa){qa.stage='validation';qa.dependencies=run.tasks.map(t=>t.id);run.tasks.push(qa);}run.planner.summary='已按场景生产流程补齐任务与视觉确认节点';
+              const qa=run.tasks.find(t=>t.id.startsWith('studio-final-qa'));run.tasks=compileScenePlan(run.tasks.filter(t=>t!==qa),run.workflow,this.projectForRun(run).roles);if(qa){qa.stage='validation';qa.dependencies=run.tasks.map(t=>t.id);run.tasks.push(qa);}run.planner.summary='已按场景生产流程补齐任务与视觉确认节点';
             }
           }catch(e){run.workflow.error=(e as Error).message;run.paused=true;}
         }
@@ -117,7 +124,7 @@ export class Studio {
         }else{run.workspace={status:'blocked',error:'旧需求未建立隔离分支，已暂停后续分发；请新建需求使用独立分支。'};run.paused=true;this.saveRun(run);}
       }
       if(run.workspace.status==='preparing'){const result=this.receipt(run.workspace.actionId);try{this.verifyWorkspace(run,result?.workspace);run.workspace={status:'ready',value:result.workspace};}catch(e){run.workspace={status:'blocked',error:result?.workspace?(e as Error).message:'工作副本准备结果未确认。检查后可点击重新核对；不会在原工程启动。'};}this.saveRun(run);}
-      if(run.workspace.status==='ready'&&run.workspace.value){const p=this.project(run.projectId);for(const f of run.attachments??[])this.files?.link(p.hostId+'|project:'+p.projectId,p.hostId+'|project:'+run.workspace.value.project.id,f.id);}
+      if(run.workspace.status==='ready'&&run.workspace.value){const p=this.projectForRun(run);for(const f of run.attachments??[])this.files?.link(p.hostId+'|project:'+p.projectId,p.hostId+'|project:'+run.workspace.value.project.id,f.id);}
       for(const chat of run.chats??[])if(!chat.sessionId&&!chat.error&&!chat.resolved){const result=this.receipt(chat.actionId);if(result?.sessionId)chat.sessionId=result.sessionId;else chat.error='会话启动结果未确认，请先核对会话工作台，系统不会重复发送。';this.saveRun(run);}
     }
     for(const run of this.runs())for(const task of this.allTasks(run))if(task.status==='starting'){
@@ -126,17 +133,21 @@ export class Studio {
       else{task.status='blocked';task.error='服务重启时投递结果尚未确认。请先查看会话，核对后绑定或重试，系统不会自动重发。';}
       this.saveRun(run,'恢复未完成的任务状态',task);
     }
+    this.migrations=new StudioMigrations({store,files,remote,online,changed,run:id=>this.run(id),project:id=>this.project(id),binding:r=>this.projectForRun(r),tasks:r=>this.allTasks(r),save:(r,note)=>this.saveRun(r,note),settle:r=>{for(const t of this.allTasks(r))if(t.status==='running'){this.complete(r,t);this.checkpoint(r,t);}}});
     this.timer=setInterval(()=>void this.tick(),2000);this.timer.unref();
   }
   projects():StudioProject[]{return this.store.db.prepare('SELECT json FROM studio_projects ORDER BY rowid DESC').all().map(r=>JSON.parse(String(r.json)));}
   runs():StudioRun[]{return this.store.db.prepare('SELECT json FROM studio_runs ORDER BY rowid DESC').all().map(r=>JSON.parse(String(r.json)));}
-  state(){return {features:{continuation:true},roles:STUDIO_ROLES.map(([id,name,description])=>({id,name,description})),projects:this.projects(),runs:this.runs()};}
+  state(){return {features:{continuation:true,migration:true},roles:STUDIO_ROLES.map(([id,name,description])=>({id,name,description})),projects:this.projects(),runs:this.runs()};}
+  migrate(v:any){assertMainlineIdle(this.store,v.runId);return this.migrations.start(v);}
+  projectForRun(r:StudioRun):StudioProject {const p=this.project(r.projectId);return r.device?{...p,...r.device,toolchain:r.device.hostId===p.hostId&&r.device.projectId===p.projectId?p.toolchain:p.devices?.find(x=>x.hostId===r.device!.hostId&&x.projectId===r.device!.projectId)?.toolchain??r.device.toolchain}:p;}
+  private assertNotMigrating(r:StudioRun){if(migrationPending(r))throw Error('此需求正在迁移接力，原记录已保留；请在接力面板查看进度或重试');}
   private project(id:string){const p=this.projects().find(p=>p.id===id);if(!p)throw Error('团队项目不存在');return p;}
   private run(id:string){const r=this.runs().find(r=>r.id===id);if(!r)throw Error('制作需求不存在');return r;}
   private receipt(id?:string){const row=id?this.store.db.prepare('SELECT result FROM actions WHERE id=?').get(id):undefined;return row?.result?JSON.parse(String(row.result)):undefined;}
   private canCheckpoint(r:StudioRun,t:Task,allowSavedIdle=false){
     if(t.kind||!t.sessionId||!['running','blocked'].includes(t.status)||r.workspace?.status!=='ready')return false;
-    const s=this.store.getSession(t.sessionId),p=this.project(r.projectId);
+    const s=this.store.getSession(t.sessionId),p=this.projectForRun(r);
     if(!s||s.hostId!==p.hostId||s.projectId!==this.execution(r).id||s.pendingCount)return false;
     if(!['interrupted','failed'].includes(s.status)){
       // Native history can report an ended failed turn as idle. A durable checkpoint
@@ -176,7 +187,7 @@ export class Studio {
     if(!row?.result)return false;
     try{
       const request=JSON.parse(String(row.request)),result=JSON.parse(String(row.result)),s=this.store.getSession(t.sessionId);
-      if(!['send','answer'].includes(request.type)||request.sessionId!==t.sessionId||row.host_id!==this.project(r.projectId).hostId||result.error||!(result.ok===true||result.sessionId===t.sessionId)||!s||s.hostId!==row.host_id||s.projectId!==this.execution(r).id)return false;
+      if(!['send','answer'].includes(request.type)||request.sessionId!==t.sessionId||row.host_id!==this.projectForRun(r).hostId||result.error||!(result.ok===true||result.sessionId===t.sessionId)||!s||s.hostId!==row.host_id||s.projectId!==this.execution(r).id)return false;
     }catch{return false;}
     t.status='running';t.actionId=guidance.id;t.checkpoint=undefined;t.recovery=undefined;t.error=undefined;t.finishedAt=undefined;
     this.saveRun(r,'已确认制作人回复送达原会话，恢复任务跟踪；未重复投递',t);return true;
@@ -250,9 +261,9 @@ export class Studio {
   }
   private execution(r:StudioRun){if(r.workspace?.status!=='ready'||!r.workspace.value)throw Error('需求的独立分支尚未准备完成');return r.workspace.value.project;}
   private inputRefs(r:StudioRun){const refs=[...(r.feedbackFiles??[]),...this.groupPosts(r.id).slice().reverse().flatMap(p=>p.files),...(r.guidance??[]).slice().reverse().flatMap(g=>g.files),...(r.attachments??[])],selected:FileRef[]=[];let size=0;for(const f of refs)if(!selected.some(x=>x.id===f.id)&&selected.length<5&&size+f.size<=MAX_UPLOAD_BYTES){selected.push(f);size+=f.size;}return selected;}
-  private linkAttachments(r:StudioRun,sessionId:string){const p=this.project(r.projectId);for(const file of this.inputRefs(r))this.files?.link(p.hostId+'|project:'+this.execution(r).id,p.hostId+'|'+sessionId,file.id);}
+  private linkAttachments(r:StudioRun,sessionId:string){const p=this.projectForRun(r);for(const file of this.inputRefs(r))this.files?.link(p.hostId+'|project:'+this.execution(r).id,p.hostId+'|'+sessionId,file.id);}
   private async resumeAttachments(r:StudioRun,sessionId:string){
-    if(!this.files)return;const p=this.project(r.projectId),scope=p.hostId+'|project:'+this.execution(r).id,target=p.hostId+'|'+sessionId;
+    if(!this.files)return;const p=this.projectForRun(r),scope=p.hostId+'|project:'+this.execution(r).id,target=p.hostId+'|'+sessionId;
     for(const file of this.inputRefs(r)){
       let bytes:Buffer;try{bytes=this.files.read(scope,file.id).bytes;}catch{
         const scopes=this.store.db.prepare('SELECT scope FROM upload_files WHERE id=?').all(file.id).map(x=>String(x.scope)),source=scopes.map(s=>s.slice(p.hostId.length+1)).find(id=>this.store.getSession(id)?.hostId===p.hostId);
@@ -265,14 +276,14 @@ export class Studio {
   private feedbackAttachments(r:StudioRun,t:Task,v:any){
     if(v.attachmentIds!==undefined&&(!Array.isArray(v.attachmentIds)||!v.attachmentIds.every((id:unknown)=>typeof id==='string'&&uploadId.test(id))))throw Error('无效返工附件');
     if(v.attachmentIds?.length&&!this.files)throw Error('附件服务未启用');
-    const p=this.project(r.projectId),scope=p.hostId+'|project:'+this.execution(r).id,refs=this.files?.refs(scope,v.attachmentIds??[])??[];
+    const p=this.projectForRun(r),scope=p.hostId+'|project:'+this.execution(r).id,refs=this.files?.refs(scope,v.attachmentIds??[])??[];
     for(const file of refs)this.files!.link(scope,'studio:'+r.id,file.id);
     r.feedbackFileHistory=[...(r.feedbackFileHistory??[]),...refs.filter(f=>!(r.feedbackFileHistory??[]).some(old=>old.id===f.id))];r.feedbackFiles=refs;t.feedbackFiles=refs;
   }
   visualArtifact(runId:string,taskId:string,index:number,kind='image'){
-    const r=this.run(runId),p=this.project(r.projectId),t=this.allTasks(r).find(t=>t.id===taskId),artifact=Number.isInteger(index)&&index>=0?t?.artifacts?.[index]:undefined,s=t?.sessionId?this.store.getSession(t.sessionId):undefined;
+    const r=this.run(runId),p=this.projectForRun(r),t=this.allTasks(r).find(t=>t.id===taskId),artifact=Number.isInteger(index)&&index>=0?t?.artifacts?.[index]:undefined,s=(t?.artifactSessionId??t?.sessionId)?this.store.getSession((t!.artifactSessionId??t!.sessionId)!):undefined;
     if(!artifact||!(kind==='video'?/\.(mp4|webm|mov|m4v)$/i.test(artifact.path):visualPath(artifact.path))||!t?.sessionId||!s||s.hostId!==p.hostId||s.projectId!==this.execution(r).id)throw Error('原画不属于此需求的工作副本');
-    return {hostId:p.hostId,sessionId:t.sessionId,path:artifact.path};
+    return {hostId:p.hostId,sessionId:(t.artifactSessionId??t.sessionId)!,path:artifact.path};
   }
   private resetTask(t:Task,feedback?:string){
     t.launchers=undefined;t.checkpoint=undefined;t.blockers=undefined;t.skip=undefined;t.recovery=undefined;t.autoFollowup=undefined;t.deferred=undefined;
@@ -308,7 +319,8 @@ export class Studio {
     if(!roles.find(r=>r.role==='director')?.enabled||!roles.find(r=>r.role==='qa')?.enabled)throw Error('制作统筹和 QA 必须启用');
     if(!['request','auto','full'].includes(v.permissionMode)||!Number.isInteger(v.concurrency)||v.concurrency<1||v.concurrency>4||typeof v.reviewPlan!=='boolean')throw Error('无效执行设置');
     const old=v.id?this.project(v.id):undefined,now=Date.now();
-    const p:StudioProject={id:old?.id??randomUUID(),name:text(v.name,100,'团队名称'),hostId:host.id,projectId:project.id,workspaceIndex:v.workspaceIndex,roles,permissionMode:v.permissionMode,concurrency:v.concurrency,reviewPlan:v.reviewPlan,includeCaptures:v.includeCaptures===true,toolchain:validateToolchain(v.toolchain===undefined?old?.toolchain:v.toolchain),createdAt:old?.createdAt??now,updatedAt:now};
+    const p:StudioProject={devices:old?.devices,id:old?.id??randomUUID(),name:text(v.name,100,'团队名称'),hostId:host.id,projectId:project.id,workspaceIndex:v.workspaceIndex,roles,permissionMode:v.permissionMode,concurrency:v.concurrency,reviewPlan:v.reviewPlan,includeCaptures:v.includeCaptures===true,toolchain:validateToolchain(v.toolchain===undefined?old?.toolchain:v.toolchain),createdAt:old?.createdAt??now,updatedAt:now};
+    const device:StudioDevice={hostId:p.hostId,projectId:p.projectId,workspaceIndex:p.workspaceIndex,path:(project.roots??[project.path])[p.workspaceIndex],toolchain:p.toolchain};p.devices=[...(old?.devices??[]).filter(d=>d.hostId!==device.hostId||d.projectId!==device.projectId||d.workspaceIndex!==device.workspaceIndex),device];
     if(old&&this.runs().some(r=>r.projectId===old.id&&!['accepted','cancelled'].includes(r.status)))throw Error('该团队仍有制作需求，请完成或取消后再修改配置');
     this.store.db.prepare('INSERT OR REPLACE INTO studio_projects VALUES(?,?)').run(p.id,JSON.stringify(p));this.changed();return p;
   }
@@ -321,7 +333,7 @@ export class Studio {
       if(existing){if(!existing.continuation||existing.continuation.requestHash!==requestHash||existing.continuation.parentRunId!==v.parentRunId)throw Error('创建 ID 已用于其他内容，请重新发起');return existing;}
     }
     if(v.parentRunId)assertMainlineIdle(this.store,v.parentRunId);
-    const p=this.project(v.projectId);if(!this.online(p.hostId))throw Error('工作电脑离线，请上线后发起');
+    const base=this.project(v.projectId),parentDevice=v.parentRunId?this.run(v.parentRunId).device:undefined,p=parentDevice?{...base,...parentDevice}:base;if(!this.online(p.hostId))throw Error('工作电脑离线，请上线后发起');
     if(!this.store.hosts().find(h=>h.id===p.hostId)?.capabilities?.studioWorkspaces)throw Error('请先升级工作电脑连接程序，以支持每个需求独立分支');
     if(v.attachmentIds!==undefined&&(!Array.isArray(v.attachmentIds)||!v.attachmentIds.every((id:unknown)=>typeof id==='string'&&uploadId.test(id))))throw Error('无效需求附件');
     if(v.attachmentIds?.length&&!this.files)throw Error('附件服务未启用');
@@ -330,6 +342,7 @@ export class Studio {
     if(v.recordVideo!==undefined&&typeof v.recordVideo!=='boolean')throw Error('无效展示视频选项');
     const parent=v.parentRunId?this.continuationParent(v.parentRunId,p):undefined;
     const now=Date.now(),r:StudioRun={autoAnswerQuestions:v.autoAnswerQuestions!==false,recordVideo:v.recordVideo===true,id:parent?v.requestId:randomUUID(),projectId:p.id,title,brief,workflow,status:'planning',paused:false,tasks:[],planner:{id:'studio-plan',title:'需求拆解与制作计划',role:'director',brief:'拆解制作人需求',acceptance:'任务依赖与验收标准完整',dependencies:[],status:'queued'},createdAt:now,updatedAt:now,revision:0,log:[]};
+    r.device={hostId:p.hostId,projectId:p.projectId,workspaceIndex:p.workspaceIndex,toolchain:p.toolchain};
     if(parent)r.continuation=continuationSnapshot(parent,p.hostId,requestHash!);
     r.workspace={status:'queued'};r.chats=[];r.guidance=[];r.attachments=this.files?.refs(p.hostId+'|project:'+p.projectId,v.attachmentIds??[])??[];
     for(const file of r.attachments)this.files?.link(p.hostId+'|project:'+p.projectId,'studio:'+r.id,file.id);
@@ -337,17 +350,18 @@ export class Studio {
   }
   private continuationCopying(id:string){return this.runs().some(r=>r.continuation?.parentRunId===id&&['queued','preparing'].includes(r.workspace?.status??''));}
   private continuationParent(id:string,p:StudioProject){
-    const r=this.run(id),w=r.workspace?.value;
+    const r=this.run(id),w=r.workspace?.value;this.assertNotMigrating(r);
     if(r.projectId!==p.id)throw Error('上游需求不属于当前项目组');
     if(r.status!=='accepted'||r.workspace?.status!=='ready'||!w||r.delivery?.status!=='done'||!r.tasks.every(released))throw Error('请先完成并交付上游需求，再继续制作');
     if(this.chatBusy(r)||this.allTasks(r).some(t=>{const s=t.sessionId?this.store.getSession(t.sessionId):undefined;return s&&(['running','waiting'].includes(s.status)||s.pendingCount);}))throw Error('上游职能对话正在执行，请结束后再复制交付');
-    const hostId=r.planner.sessionId?this.store.getSession(r.planner.sessionId)?.hostId:undefined;
+    const hostId=r.migration?.phase==='complete'?r.device?.hostId:(r.planner.sessionId?this.store.getSession(r.planner.sessionId)?.hostId:undefined);
     if(hostId!==p.hostId)throw Error('上游工作副本所在电脑与当前团队不一致，请恢复原工作电脑');
     return r;
   }
   async command(v:any){
     assertMainlineIdle(this.store,v.runId);
-    const r=this.run(v.runId),p=this.project(r.projectId),task=this.allTasks(r).find(t=>t.id===v.taskId);
+    const r=this.run(v.runId),p=this.projectForRun(r),task=this.allTasks(r).find(t=>t.id===v.taskId);
+    this.assertNotMigrating(r);
     if(v.op==='record-showcase'){if(this.continuationCopying(r.id))throw Error('正在复制本次交付，请稍后再补录');if(r.status==='cancelled'||r.workspace?.status!=='ready'||!this.online(p.hostId))throw Error('请确认需求工作副本可用且工作电脑在线');if(r.tasks.some(t=>t.showcase))return r;if(this.chatBusy(r)||!r.tasks.length||!r.tasks.every(released)||this.allTasks(r).some(t=>['starting','running'].includes(t.status)))throw Error('请先完成制作、审批和当前执行');r.tasks=withShowcase(r.tasks,true);r.recordVideo=true;r.autoAccepted=undefined;r.status='executing';r.paused=false;this.saveRun(r,'制作人补录成果展示视频，保留原分支、已完成任务和审批',r.tasks.find(t=>t.showcase));void this.tick();return this.run(r.id);}
     if(r.status==='cancelled'||r.status==='accepted'&&!['bind-chat','resolve-chat','add-functional-test'].includes(v.op))throw Error('需求已结束');
     if(v.op==='add-functional-test'){if(!p.roles.some(a=>a.role==='engineering'&&a.enabled)||r.workspace?.status!=='ready')throw Error('请先准备工作副本并启用程序职能');if(r.tasks.some(t=>t.stage==='functional-test'))return r;r.functionalTestRequested=true;this.saveRun(r,'制作人追加可操作功能白模与双启动入口；保留已有成果和审批');void this.tick();return this.run(r.id);}
@@ -461,7 +475,7 @@ export class Studio {
     void this.tick();return this.run(r.id);
   }
   skipState(runId:string,taskId:string){
-    const r=this.run(runId),p=this.project(r.projectId),task=r.tasks.find(t=>t.id===taskId);if(!task||task.kind||task.role==='qa')throw Error('只能核对制作任务；审批和最终 QA 不能跳过');
+    const r=this.run(runId),p=this.projectForRun(r),task=r.tasks.find(t=>t.id===taskId);if(!task||task.kind||task.role==='qa')throw Error('只能核对制作任务；审批和最终 QA 不能跳过');
     const blockers:SkipBlocker[]=[],session=task.sessionId?this.store.getSession(task.sessionId):undefined;
     const row=task.actionId?this.store.db.prepare('SELECT host_id,request,result FROM actions WHERE id=?').get(task.actionId):undefined;
     let receipt:any,request:any;try{if(row?.result)receipt=JSON.parse(String(row.result));if(row?.request)request=JSON.parse(String(row.request));}catch{/* An invalid receipt is unconfirmed. */}
@@ -499,9 +513,10 @@ export class Studio {
   }
   private chatBusy(r:StudioRun){return (r.chats??[]).some(c=>!c.resolved&&(!c.sessionId||['running','waiting'].includes(this.store.getSession(c.sessionId)?.status??'')||this.store.getSession(c.sessionId)?.pendingCount));}
   private groupPosts(runId:string):GroupPost[]{return this.store.db.prepare('SELECT json FROM studio_group_posts WHERE run_id=? ORDER BY at').all(runId).map(row=>JSON.parse(String(row.json)));}
-  channels(runId:string){const r=this.run(runId);return studioChannels(r,this.project(r.projectId),this.store,this.groupPosts(r.id));}
+  channels(runId:string){const r=this.run(runId);return studioChannels(r,this.projectForRun(r),this.store,this.groupPosts(r.id));}
   async chatSettings(v:any){
-    const r=this.run(v.runId),p=this.project(r.projectId),assignment=p.roles.find(a=>a.role===v.role&&a.enabled);
+    this.assertNotMigrating(this.run(v.runId));
+    const r=this.run(v.runId),p=this.projectForRun(r),assignment=p.roles.find(a=>a.role===v.role&&a.enabled);
     if(r.status==='cancelled'||!assignment)throw Error('此需求或职能已停止接收设置');
     this.execution(r);
     if(typeof v.id!=='string'||!uploadId.test(v.id)||!['request','auto','full'].includes(v.permissionMode)||v.sessionId!==undefined&&(typeof v.sessionId!=='string'||!v.sessionId))throw Error('请选择有效的会话权限');
@@ -524,7 +539,7 @@ export class Studio {
   async groupChat(v:any){const job=this.groupAction(v);this.launches.add(job);try{return await job;}finally{this.launches.delete(job);}}
   private async groupAction(v:any){
     assertMainlineIdle(this.store,v.runId);
-    const r=this.run(v.runId),p=this.project(r.projectId),execution=this.execution(r);
+    const r=this.run(v.runId),p=this.projectForRun(r),execution=this.execution(r);this.assertNotMigrating(r);
     if(r.status==='cancelled')throw Error('此需求已取消');
     if(typeof v.id!=='string'||!uploadId.test(v.id)||!Array.isArray(v.roles)||v.roles.length>13||new Set(v.roles).size!==v.roles.length||v.roles.some((role:string)=>!p.roles.some(a=>a.role===role&&a.enabled)))throw Error('请选择该团队中已启用的接收角色');
     const body=text(v.text??'',12000,'群消息',true);if(!body&&!v.attachmentIds?.length)throw Error('请输入群消息或添加附件');
@@ -551,10 +566,10 @@ export class Studio {
   }
   async guideTask(v:any){const job=this.guideTaskAction(v);this.launches.add(job);try{return await job;}finally{this.launches.delete(job);}}
   private async guideTaskAction(v:any){
-    const r=this.run(v.runId),p=this.project(r.projectId),t=this.allTasks(r).find(t=>t.id===v.taskId);
+    const r=this.run(v.runId),p=this.projectForRun(r),t=this.allTasks(r).find(t=>t.id===v.taskId);
     if(typeof v.id!=='string'||!uploadId.test(v.id))throw Error('无效指引 ID');
     const body=text(v.text,8000,'当前阶段指引');
-    r.directions??=[];
+    this.assertNotMigrating(r);r.directions??=[];
     const old=r.directions.find(d=>d.id===v.id);
     if(old){if(old.taskId!==v.taskId||old.text!==body||(old.sessionId??null)!==(v.expectedSessionId??null))throw Error('指引 ID 已用于其他内容');if(['sending','uncertain'].includes(old.status))throw Error('这条指引的投递尚未确认，请核对原会话，不会重复发送');return old;}
     if(!t||t.kind||!['queued','blocked','running'].includes(t.status)||['accepted','cancelled'].includes(r.status))throw Error('请选择尚未结束的制作任务，审批请使用确认或退回入口');
@@ -590,7 +605,7 @@ export class Studio {
   async chat(v:any){const job=this.chatAction(v);this.launches.add(job);try{return await job;}finally{this.launches.delete(job);}}
   private async chatAction(v:any,groupContext=''){
     assertMainlineIdle(this.store,v.runId);
-    const r=this.run(v.runId),p=this.project(r.projectId),execution=this.execution(r),a=p.roles.find(a=>a.role===v.role&&a.enabled);
+    const r=this.run(v.runId),p=this.projectForRun(r),execution=this.execution(r),a=p.roles.find(a=>a.role===v.role&&a.enabled);this.assertNotMigrating(r);
     if(this.continuationCopying(r.id))throw Error('正在复制本次交付，请稍后再发起职能对话');
     if(!a||r.status==='cancelled')throw Error('此需求或职能已停止接收消息');
     if(!this.online(p.hostId))throw Error('工作电脑离线');
@@ -599,6 +614,7 @@ export class Studio {
     if(v.attachmentIds!==undefined&&(!Array.isArray(v.attachmentIds)||!v.attachmentIds.every((id:unknown)=>typeof id==='string'&&uploadId.test(id))))throw Error('无效消息附件');
     const sessions=[...this.allTasks(r).filter(t=>t.role===v.role).flatMap(t=>t.sessionId?[t.sessionId]:[]),...(r.chats??[]).filter(c=>c.role===v.role).flatMap(c=>c.sessionId?[c.sessionId]:[])];
     if(v.sessionId&&!sessions.includes(v.sessionId))throw Error('会话不属于该需求的职能');
+    if(v.sessionId&&r.migration?.phase==='complete'&&(this.store.getSession(v.sessionId)?.hostId!==p.hostId||this.store.getSession(v.sessionId)?.cwd!==execution.path)){groupContext+='\n跨电脑接力的旧会话记录：\n'+handoffContext(this.store.sessionEvents(v.sessionId),'')+'\n制作人新消息：\n';v={...v,sessionId:undefined};}
     if(!v.sessionId&&this.allTasks(r).some(t=>t.role===v.role&&['starting','running'].includes(t.status)))throw Error('职能任务正在启动或执行，请刷新后选择当前会话发送');
     if(!v.sessionId&&(r.chats??[]).some(c=>c.role===v.role&&!c.sessionId&&!c.resolved&&c.actionId!==v.id))throw Error('该角色的会话启动结果未确认，请先核对执行记录');
     const scope=p.hostId+'|'+(v.sessionId??'project:'+execution.id),refs=this.files?.refs(scope,v.attachmentIds??[])??[];
@@ -692,6 +708,12 @@ export class Studio {
     }catch(e){const latest=this.run(r.id);latest.workspace={status:'blocked',error:(e as Error).message};this.saveRun(latest,'工作副本准备失败，已停止分发');}})();this.launches.add(job);void job.finally(()=>this.launches.delete(job));
   }
   private prompt(r:StudioRun,t:Task,p:StudioProject){
+    const note=t.migrationContext?`跨电脑接力：旧会话仅作历史，请核对当前副本，只继续未完成步骤；旧电脑绝对路径必须映射到当前副本。沿用已完成任务和制作人审批；工具结果须核实，不重复导出或发布。\n${t.migrationContext}\n`:'';
+    const body=this.taskPrompt(r,t,p),limit=MAX_TEXT-note.length;if(body.length<=limit)return note+body;
+    const tail=body.slice(-6000),marker='\n部分上下文已截断，请从当前工程交付文件核对；以下保留任务交付格式。\n';
+    return note+body.slice(0,limit-tail.length-marker.length)+marker+tail;
+  }
+  private taskPrompt(r:StudioRun,t:Task,p:StudioProject){
     const a=p.roles.find(a=>a.role===t.role)!,role=STUDIO_ROLES.find(x=>x[0]===t.role)!;
     const contextNotes=`独立需求分支：${r.workspace!.value!.branch}\n当前工作副本：${this.execution(r).path}。源工程 ${r.workspace!.value!.sourcePath} 只用于识别，不在源目录执行或修改文件。任务说明中若提到源工程绝对路径，必须映射到当前工作副本；引擎子模块也使用副本内的 engine 目录。禁止切换或修改源工程 / 主干。\n制作人参考附件：${(r.attachments??[]).map(f=>f.name).join('、')||'无'}。图片随输入提供；视频和其他文件通过输入附带的本机路径读取，视频可用已有工具抽帧；工具不可用时明确报告，不能声称已经观看。\n团队群聊补充：\n${this.groupPosts(r.id).slice(-8).map(m=>'制作人 @'+m.roles.join(',')+': '+m.text+' [附件 '+m.files.map(f=>f.name).join(',')+']').join('\n').slice(-2500)}\n后续制作人补充：\n${(r.guidance??[]).slice(-12).map(g=>(g.automatic?'团队自动决策 ':'制作人 ')+g.role+': '+g.text+' [附件 '+g.files.map(f=>f.name).join(',')+']').join('\n').slice(r.workflow?.kind==='scene'?-3000:-5000)}\n`;
     const resumeNote=t.resumeSessionId?['继续同一个任务、同一份工程与已有实现，从原代码续做，不另起一套玩法。先检查原会话记录、已有文件与验证结果，从未完成的步骤继续；不得重跑已完成的前置任务，也不得跳过制作人审批。','断点前的公开执行记录（可能不完整，须核对工程）：',(t.output??'').slice(-5000),''].join('\n'):'';
@@ -722,7 +744,7 @@ export class Studio {
         if(r.workflow?.kind==='scene'&&(!r.workflow.selection||r.workflow.selection.approvals.visual)&&['balance','implementation','asset-spec','assets','assembly','integration','validation'].includes(t.stage??'')){
           const gate=r.tasks.find(g=>g.kind==='visual-review')!;
           if(!this.inspectVisual)throw Error('无法核对本轮已确认原画，请升级工作电脑连接程序');
-          for(const snapshot of gate.visualSnapshots??[]){const concept=r.tasks.find(c=>c.id===snapshot.taskId)!;const current=await this.inspectVisual(p.hostId,concept.sessionId!,snapshot.path);if(current.sha256!==snapshot.sha256)throw Error('已确认原画文件发生变化，请对原画任务返工并重新确认，尚未启动本任务');}
+          for(const snapshot of gate.visualSnapshots??[]){const concept=r.tasks.find(c=>c.id===snapshot.taskId)!;const current=await this.inspectVisual(p.hostId,(concept.artifactSessionId??concept.sessionId)!,snapshot.path);if(current.sha256!==snapshot.sha256)throw Error('已确认原画文件发生变化，请对原画任务返工并重新确认，尚未启动本任务');}
           const latest=this.run(r.id),current=this.allTasks(latest).find(x=>x.id===t.id);if(latest.paused||latest.status==='cancelled'||current?.actionId!==action.id||!this.dependenciesReady(latest,current)){if(current?.actionId===action.id){current.status=latest.status==='cancelled'?'cancelled':'queued';current.actionId=undefined;this.saveRun(latest,'原画核对期间分发状态变化，尚未启动任务',current);}return;}
         }
         if(t.resumeSessionId)await this.resumeAttachments(r,t.resumeSessionId);
@@ -740,7 +762,7 @@ export class Studio {
     if(s.status!=='idle'){t.status='blocked';t.error='Agent '+(s.status==='failed'?'执行失败':'执行已停止')+'，请查看记录';return;}
     const output=this.taskOutput(t);t.output=output;t.finishedAt=Date.now();
     try{
-      if(t===r.planner){r.tasks=parseStudioPlan(output,this.project(r.projectId).roles,r.workflow);if(r.recordVideo)r.tasks=withShowcase(r.tasks);if(r.workflow)r.workflow.error=undefined;t.summary='已拆解 '+r.tasks.length+' 个任务'+(r.tasks.some(x=>x.role==='qa')?'（含 QA）':'（未安排 QA）');r.status=(r.workflow?.selection?.approvals.plan??this.project(r.projectId).reviewPlan)?'plan-review':'executing';}
+      if(t===r.planner){r.tasks=parseStudioPlan(output,this.projectForRun(r).roles,r.workflow);if(r.recordVideo)r.tasks=withShowcase(r.tasks);if(r.workflow)r.workflow.error=undefined;t.summary='已拆解 '+r.tasks.length+' 个任务'+(r.tasks.some(x=>x.role==='qa')?'（含 QA）':'（未安排 QA）');r.status=(r.workflow?.selection?.approvals.plan??this.projectForRun(r).reviewPlan)?'plan-review':'executing';}
       else{const value=structured(output,'result');if(!['done','blocked'].includes(value.outcome))throw Error('交付 outcome 必须为 done 或 blocked');
         t.summary=text(value.summary,16000,'交付摘要');t.launchers=launchTargets(value.launchers);t.blockers=validateBlockers(value.blockers);t.deferred=deferredChecks(value.deferred,r);if(t.deferred.some(d=>t.blockers!.some(b=>b.code===d.code)))throw Error('同一检查不能同时声明为必需阻断与延期');if(value.outcome==='done'&&t.blockers.length)throw Error('仍有硬阻断，不能声明完成');
         if(!Array.isArray(value.artifacts)||value.artifacts.length>80||!Array.isArray(value.checks)||value.checks.length>80)throw Error('交付物或验证记录格式无效');
@@ -756,7 +778,7 @@ export class Studio {
       t.status='blocked';t.error=(e as Error).message;
       // A completed, acknowledged planner turn may correct its invalid scope.
       // This never retries an uncertain dispatch or runs an invalid production plan.
-      const p=this.project(r.projectId),receipt=t.actionId?this.store.db.prepare('SELECT result FROM actions WHERE id=?').get(t.actionId):undefined;
+      const p=this.projectForRun(r),receipt=t.actionId?this.store.db.prepare('SELECT result FROM actions WHERE id=?').get(t.actionId):undefined;
       if(t===r.planner&&e instanceof ProductionPlanError&&(t.planRepairs??0)<2&&!r.paused&&s.hostId===p.hostId&&s.projectId===this.execution(r).id&&receipt?.result&&!JSON.parse(String(receipt.result)).error&&!this.chatBusy(r)){
         t.planRepairs=(t.planRepairs??0)+1;
         t.attempts=[...(t.attempts??[]),{sessionId:t.sessionId,output:t.output,at:Date.now()}];
@@ -777,9 +799,9 @@ export class Studio {
       const active=this.runs().filter(r=>!['accepted','cancelled'].includes(r.status)||r.functionalTestRequested&&r.status!=='cancelled');
       // A workspace has one writing lane by default, including across team configurations.
       const busy=new Map<string,number>();
-      for(const r of active){const p=this.project(r.projectId),key=r.id;busy.set(key,this.allTasks(r).filter(t=>['starting','running'].includes(t.status)).length+(r.chats??[]).filter(c=>!c.sessionId&&!c.error||c.sessionId&&['running','waiting'].includes(this.store.getSession(c.sessionId)?.status??'')).length);}
+      for(const r of active){const p=this.projectForRun(r),key=r.id;busy.set(key,this.allTasks(r).filter(t=>['starting','running'].includes(t.status)).length+(r.chats??[]).filter(c=>!c.sessionId&&!c.error||c.sessionId&&['running','waiting'].includes(this.store.getSession(c.sessionId)?.status??'')).length);}
       for(const r of active){
-        const p=this.project(r.projectId);if(!this.online(p.hostId)||this.flowUpgrades.has(r.id))continue;const key=r.id;
+        const p=this.projectForRun(r);if(migrationPending(r)||!this.online(p.hostId)||this.flowUpgrades.has(r.id))continue;const key=r.id;
         if(r.workspace?.status!=='ready'){if(r.workspace?.status==='queued'&&!r.paused)this.prepare(r,p);continue;}
         for(const t of this.allTasks(r)){
           if(this.reconcileProducerResume(r,t))busy.set(key,(busy.get(key)??0)+1);
@@ -800,7 +822,7 @@ export class Studio {
       }
     }finally{this.ticking=false;}
   }
-  async close(){this.closed=true;clearInterval(this.timer);await Promise.allSettled([...this.launches]);}
+  async close(){this.closed=true;clearInterval(this.timer);await this.migrations.close();await Promise.allSettled([...this.launches]);}
 }
 function validateAssignment(a:Assignment,host:Host){
   if(a.agentId!==undefined&&!/^[a-zA-Z0-9_-]{1,60}$/.test(a.agentId))throw Error('无效 Agent ID');

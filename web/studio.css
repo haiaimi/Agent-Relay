@@ -157,5 +157,7 @@ main{max-width:1160px}.workspace-bar{background:transparent}.stat{background:tra
 
 .stage-guide{display:grid;gap:10px}.stage-guide textarea{width:100%;box-sizing:border-box;min-height:96px;font-size:16px;text-align:left;resize:vertical}.stage-guide>button{justify-self:end}.stage-guide-history{min-width:0}.stage-guide-record{border-top:1px solid var(--border,#333);padding-top:10px;margin-top:6px}.stage-guide-record p{white-space:pre-wrap;overflow-wrap:anywhere;text-align:left;margin:6px 0}
 
+.migration-dialog{width:min(520px,calc(100vw - 24px))}.migration-dialog form{display:grid;gap:16px}.migration-dialog label{display:grid;gap:8px}.migration-dialog input,.migration-dialog select{width:100%;min-height:44px}.workspace-summary[data-migration] p{overflow-wrap:anywhere}.workspace-summary[data-migration] progress{width:min(280px,80%);margin-right:12px}
+
 /* Keep large delivery previews inside their own scroll area, above the composer. */
 #chat-dialog .chat-main{overflow:hidden}#chat-dialog #chat-attention{flex:0 1 auto;min-height:0;max-height:30%;overflow:auto;overscroll-behavior:contain}#chat-dialog #chat-context{flex:0 1 auto;min-height:0;max-height:18%;overflow:auto}#chat-dialog #chat-timeline{min-height:0;flex:1 1 80px}#chat-dialog #chat-form{flex:0 0 auto;min-height:0;max-height:42%;overflow:auto}#chat-dialog #chat-text{min-height:56px;max-height:110px}#chat-dialog #chat-files{max-height:100px;overflow:auto}#chat-dialog .chat-toolbar,#chat-dialog .chat-record-toolbar{flex-shrink:0}

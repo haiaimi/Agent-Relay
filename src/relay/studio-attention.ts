@@ -12,7 +12,7 @@ export class StudioAttention {
   constructor(private store:RelayStore,private studio:Studio,private remote:(host:string,action:Action,timeout?:number)=>Promise<any>,private changed:(event:any)=>void,private isOnline:(host:string)=>boolean,private additional:(runId:string)=>{hostId:string;projectId:string;sessionId:string;taskId:string;title:string;role:string;status:string}[]=()=>[]){}
   private context(id:string){
     const run=this.studio.runs().find(r=>r.id===id);if(!run)throw Error('制作需求不存在');
-    const project=this.studio.projects().find(p=>p.id===run.projectId);if(!project)throw Error('项目组不存在');
+    const team=this.studio.projects().find(p=>p.id===run.projectId);if(!team)throw Error('项目组不存在');const project={...team,...run.device};
     const tasks=[run.planner,...run.tasks,...run.delivery?[run.delivery]:[]],ids=new Set<string>();
     const base=[...tasks.map(t=>({sessionId:t.sessionId,taskId:t.id,title:t.title,role:t.role,status:t.status})),...(run.chats??[]).filter(c=>!c.resolved).map(c=>({sessionId:c.sessionId,taskId:undefined,title:'职能对话',role:c.role,status:'chat'}))].map(e=>({...e,hostId:project.hostId,projectId:run.workspace?.value?.project.id}));
     const entries=[...base,...this.additional(id)].filter(entry=>{

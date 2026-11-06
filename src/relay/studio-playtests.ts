@@ -8,7 +8,7 @@ export class StudioPlaytests {
  private jobs=new Set<string>();
  constructor(private store:RelayStore,private studio:Studio,private remote:(host:string,a:Action,timeout?:number)=>Promise<any>,private available:(host:string)=>boolean,private changed:()=>void){store.db.exec('CREATE TABLE IF NOT EXISTS studio_playtest_requests(id TEXT PRIMARY KEY,json TEXT NOT NULL)');}
  private run(id:string){const r=this.studio.runs().find(r=>r.id===id);if(!r)throw Error('制作需求不存在');return r;}
- private targets(r:StudioRun){return r.tasks.filter(t=>t.status==='done'&&t.sessionId).flatMap(t=>launchTargets(t.launchers).map(target=>({id:t.id+':'+target.id,taskId:t.id,sessionId:t.sessionId!,target:{...target,revision:String(t.finishedAt??0)}})));}
+ private targets(r:StudioRun){return r.tasks.filter(t=>t.status==='done'&&t.sessionId).flatMap(t=>launchTargets(t.launchers).map(target=>({id:t.id+':'+target.id,taskId:t.id,sessionId:t.artifactSessionId??t.sessionId!,target:{...target,revision:String(t.finishedAt??0)}})));}
  private project(r:StudioRun){const p=(this.studio as Studio&{projectForRun?:(r:StudioRun)=>any}).projectForRun?.(r)??this.studio.projects().find(p=>p.id===r.projectId);if(!p)throw Error('项目组不存在');return p;}
  private saved(id:string){const row=this.store.db.prepare('SELECT json FROM studio_playtest_requests WHERE id=?').get(id);return row?JSON.parse(String(row.json)) as Request:undefined;}
  private save(j:Request){this.store.db.prepare('INSERT OR REPLACE INTO studio_playtest_requests VALUES(?,?)').run(j.id,JSON.stringify(j));this.changed();}
