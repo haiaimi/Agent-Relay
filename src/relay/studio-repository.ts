@@ -1,7 +1,8 @@
+import {repositoryAddress} from '../shared/repository-url.js';
 import {randomUUID} from 'node:crypto';
 import {mkdirSync,writeFileSync} from 'node:fs';
 import {join} from 'node:path';
-import {archiveHash,validateArchive,repositoryId,type RequirementArchive,type RepositoryRequest,type PublicConversation} from '../shared/studio-repository.js';
+import {archiveHash,validateArchive,validateRepositoryRequest,repositoryId,type RequirementArchive,type RepositoryRequest,type PublicConversation} from '../shared/studio-repository.js';
 import {STUDIO_ROLES,type Studio,type StudioRun,type StudioProject,type Task} from './studio.js';
 import type {RelayStore} from './store.js';
 import type {Action} from '../shared/protocol.js';
@@ -37,7 +38,7 @@ export class StudioRepositories {
     run.log=(run.log??[]).slice(-20);run.chats=chats;run.guidance=(run.guidance??[]).slice(-12);delete run.deliveryHistory;delete run.feedbackFileHistory;
     for(const t of [run.planner,...run.tasks,...run.delivery?[run.delivery]:[]]){delete t.attempts;delete t.autoFollowup;delete t.recovery;delete t.preflightRetry;}
     const group=this.store.db.prepare('SELECT json FROM (SELECT json,at FROM studio_group_posts WHERE run_id=? ORDER BY at DESC LIMIT 12) ORDER BY at').all(r.id).map(row=>{const g=JSON.parse(String(row.json));return {id:g.id,at:g.at,text:g.text,roles:g.roles,files:(g.files??[]).map((f:any)=>({name:f.name,sha256:f.sha256})),deliveries:[]};});run.publicGroup=group;
-    const project={id:p.id,name:p.name,roles:p.roles.map(a=>({...a,tools:''})),concurrency:p.concurrency,reviewPlan:p.reviewPlan,createdAt:p.createdAt,updatedAt:p.updatedAt};
+    const project={id:p.id,name:p.name,repositoryUrl:p.repositoryUrl,roles:p.roles.map(a=>({...a,tools:''})),concurrency:p.concurrency,reviewPlan:p.reviewPlan,createdAt:p.createdAt,updatedAt:p.updatedAt};
     const historical=prior?(JSON.parse(String(prior.json)) as RequirementArchive).media:[];
     const refs=[...(r.attachments??[]),...(r.feedbackFileHistory??[]),...(r.guidance??[]).flatMap(g=>g.files)],sessionId=r.planner.sessionId;
     const media=[...historical,...tasks(r).flatMap(t=>(t.artifacts??[]).filter(a=>!!t.sessionId).map(a=>({hostId:p.hostId,sessionId:t.sessionId,path:a.path,description:a.description}))),...sessionId?refs.map(f=>({hostId:p.hostId,sessionId,path:f.name,description:'制作人参考：'+f.name,fileId:f.id,sha256:f.sha256})):[]];
@@ -47,7 +48,7 @@ export class StudioRepositories {
     const {repository,repositoryBusy,...business}=r,p=this.binding(r),ids=[...new Set([...tasks(r).flatMap(t=>[t.sessionId,...(t.attempts??[]).map(a=>a.sessionId)]),...(r.chats??[]).map(c=>c.sessionId)].filter(Boolean))];
     const stamps=ids.map(id=>[id,this.store.db.prepare('SELECT max(seq) n FROM events WHERE session_id=?').get(id!)?.n,this.store.db.prepare('SELECT max(rowid) n FROM history WHERE session_id=?').get(id!)?.n]);return archiveHash({business,projectUpdatedAt:p.updatedAt,stamps});
   }
-  private async save(r:StudioRun){if(r.repositoryReadOnly||r.workspace?.status!=='ready')return;const fingerprint=this.fingerprint(r);if(this.fingerprints.get(r.id)===fingerprint)return;const a=this.archive(r),hash=archiveHash(a);if(this.seen.get(r.id)===hash){this.fingerprints.set(r.id,fingerprint);return;}const p=this.binding(r);await this.call(p.hostId,p.projectId,{op:'save',runId:r.id,archive:a},p.workspaceIndex);this.seen.set(r.id,hash);this.fingerprints.set(r.id,fingerprint);const latest=this.studio.runs().find(x=>x.id===r.id);if(latest){latest.repository={...latest.repository,savedAt:Date.now(),error:undefined,attempts:0};this.persist(latest);}this.failures.delete(r.id);}
+  private async save(r:StudioRun){if(r.repositoryReadOnly||r.workspace?.status!=='ready')return;const fingerprint=this.fingerprint(r);if(this.fingerprints.get(r.id)===fingerprint)return;const a=this.archive(r),hash=archiveHash(a);if(this.seen.get(r.id)===hash){this.fingerprints.set(r.id,fingerprint);return;}const p=this.binding(r);const saved=await this.call(p.hostId,p.projectId,{op:'save',runId:r.id,archive:a},p.workspaceIndex);if(saved.repositoryUrl&&!p.repositoryUrl)this.studio.saveRepository({projectId:p.id,repositoryUrl:saved.repositoryUrl});this.seen.set(r.id,hash);this.fingerprints.set(r.id,fingerprint);const latest=this.studio.runs().find(x=>x.id===r.id);if(latest){latest.repository={...latest.repository,savedAt:Date.now(),error:undefined,attempts:0};this.persist(latest);}this.failures.delete(r.id);}
   async tick(){if(this.stopped||this.running)return;this.running=true;try{
     for(const r of this.studio.runs()){if(this.stopped)break;const f=this.failures.get(r.id);if(this.jobs.has(r.id)||!this.supported(this.binding(r).hostId)||f&&(f.count>=5||Date.now()-f.at<60000))continue;
       try{await this.save(r);}catch(e){const count=(f?.count??0)+1;this.failures.set(r.id,{count,at:Date.now()});const latest=this.studio.runs().find(x=>x.id===r.id);if(latest){latest.repository={...latest.repository,error:(e as Error).message,attempts:count,retryAt:count<5?Date.now()+60000:undefined};this.persist(latest);}}
@@ -70,7 +71,7 @@ export class StudioRepositories {
   }
   private import(a:RequirementArchive,hostId:string,projectId:string,workspace?:any,session?:any,backupPath?:string,workspaceIndex=0){
     validateArchive(a);let p=this.studio.projects().find(p=>p.id===a.projectId);
-    if(!p){const roles=STUDIO_ROLES.map(([role])=>{const source=Array.isArray(a.project.roles)?a.project.roles.find((r:any)=>r.role===role):undefined;return {role,enabled:source?.enabled!==false,provider:['codex','claude','api'].includes(source?.provider)?source.provider:'codex',model:typeof source?.model==='string'?source.model:undefined,effort:typeof source?.effort==='string'?source.effort:undefined,instructions:String(source?.instructions??'').slice(0,8000),tools:''};});p={id:a.projectId,name:String(a.project.name??'Git 项目'),hostId,projectId,workspaceIndex,roles,permissionMode:'request',concurrency:1,reviewPlan:true,createdAt:Date.now(),updatedAt:Date.now()};this.store.db.prepare('INSERT OR REPLACE INTO studio_projects VALUES(?,?)').run(p.id,JSON.stringify(p));}
+    if(!p){const roles=STUDIO_ROLES.map(([role])=>{const source=Array.isArray(a.project.roles)?a.project.roles.find((r:any)=>r.role===role):undefined;return {role,enabled:source?.enabled!==false,provider:['codex','claude','api'].includes(source?.provider)?source.provider:'codex',model:typeof source?.model==='string'?source.model:undefined,effort:typeof source?.effort==='string'?source.effort:undefined,instructions:String(source?.instructions??'').slice(0,8000),tools:''};});p={repositoryUrl:repositoryAddress(a.project.repositoryUrl??this.store.hosts().find(h=>h.id===hostId)?.projects.find(p=>p.id===projectId)?.repositoryUrl),id:a.projectId,name:String(a.project.name??'Git 项目'),hostId,projectId,workspaceIndex,roles,permissionMode:'request',concurrency:1,reviewPlan:true,createdAt:Date.now(),updatedAt:Date.now()};this.store.db.prepare('INSERT OR REPLACE INTO studio_projects VALUES(?,?)').run(p.id,JSON.stringify(p));}
     const r=this.safeRun(a);r.repository!.importHash=archiveHash(a);r.device={hostId,projectId,workspaceIndex};if(workspace){r.workspace={status:'ready',value:workspace};r.repositoryReadOnly=false;r.repository={imported:true,backupPath,savedAt:Date.now()};if(session){this.store.session(session);for(const t of tasks(r))t.artifactSessionId=session.id;}}
     this.store.db.exec('BEGIN IMMEDIATE');try{this.persist(r);this.store.db.prepare('INSERT OR REPLACE INTO studio_repository_archives VALUES(?,?)').run(r.id,JSON.stringify(a));for(const g of (a.run.publicGroup??[])){if(typeof g.id!=='string'||typeof g.text!=='string')continue;const value={...g,runId:r.id,files:[],deliveries:[]};this.store.db.prepare('INSERT OR IGNORE INTO studio_group_posts VALUES(?,?,?,?)').run(g.id,r.id,Number(g.at)||0,JSON.stringify(value));}this.store.db.exec('COMMIT');}catch(e){this.store.db.exec('ROLLBACK');throw e;}
     return r;
@@ -88,6 +89,15 @@ export class StudioRepositories {
   media(runId:string):RequirementArchive['media']{const row=this.store.db.prepare('SELECT json FROM studio_repository_archives WHERE id=?').get(runId);if(row)return (JSON.parse(String(row.json)) as RequirementArchive).media;const r=this.studio.runs().find(r=>r.id===runId);if(!r)throw Error('需求不存在');const hostId=this.binding(r).hostId;return [...new Map(tasks(r).flatMap(t=>t.sessionId?(t.artifacts??[]).map(a=>({hostId,sessionId:t.sessionId,path:a.path,description:a.description})):[]).map(m=>[m.path,m])).values()];}
   mediaTarget(runId:string,index:number){const target=Number.isInteger(index)&&index>=0?this.media(runId)[index]:undefined;if(!target?.sessionId||this.store.getSession(target.sessionId)?.hostId!==target.hostId)throw Error('原机器媒体未连接或历史会话不可用；媒体没有存入 Git');return {...target,sessionId:target.sessionId};}
   async command(v:any){
+    if(v.op==='connect'){
+      const host=this.supported(v.hostId);if(!host?.capabilities?.studioRepositoryConnect)throw Error('目标电脑需要更新到支持网页准备工程的 Relay 版本');
+      const p=v.studioProjectId?this.studio.projects().find(p=>p.id===v.studioProjectId):undefined;if(v.studioProjectId&&!p)throw Error('请选择有效的团队项目');
+      const request:RepositoryRequest={op:'connect',path:v.path,repositoryUrl:repositoryAddress(v.repositoryUrl??p?.repositoryUrl),name:v.name??p?.name??'Git 项目'};validateRepositoryRequest(request);
+      const result=await this.remote(host.id,{id:v.id,type:'studio-repository',repository:request},900_000);
+      const latest=this.store.hosts().find(h=>h.id===host.id)!;this.store.host({...latest,projects:[...latest.projects.filter(p=>p.id!==result.project.id),result.project]});
+      if(p&&p.repositoryUrl!==request.repositoryUrl)this.studio.saveRepository({projectId:p.id,repositoryUrl:request.repositoryUrl});
+      const catalog=await this.discover(host.id,result.project.id,result.workspaceIndex??0);return {...result,hostId:host.id,catalog};
+    }
     if(v.op==='scan'){if(typeof v.hostId!=='string'||typeof v.projectId!=='string')throw Error('请选择工作电脑和项目');if(v.workspaceIndex!==undefined&&(!Number.isInteger(v.workspaceIndex)||v.workspaceIndex<0))throw Error('Invalid workspace index');return this.discover(v.hostId,v.projectId,v.workspaceIndex??0);}
     const r=this.studio.runs().find(r=>r.id===v.runId);if(!r||!repositoryId.test(v.runId??''))throw Error('需求不存在');if(this.jobs.has(r.id))throw Error('此需求正在同步，请等待最新结果');assertMainlineIdle(this.store,r.id);
     r.repository={...r.repository,jobId:v.id,pending:true,operation:v.op};this.persist(r);

@@ -6,7 +6,7 @@
 
 | 所在位置 | 路径 | 内容 |
 | --- | --- | --- |
-| 主干及需求分支 | `.relay/project.json` | 项目稳定 UUID、协议版本、显示名称；不含设备登录信息 |
+| 主干及需求分支 | `.relay/project.json` | 项目稳定 UUID、协议版本、显示名称、项目 GitHub 仓库地址；不含设备登录信息 |
 | 主干 | `.relay/requirements.json` | 全项目轻量需求索引：需求 UUID、标题、分支、修订、状态、更新时间；已推送条目还含提交 ID 和存档 SHA-256 |
 | `codex/studio-<需求 UUID>` | `.relay/requirements/<需求 UUID>.json` | 此需求的完整业务存档：制作要求、任务依赖、任务状态、审批、结果、公开会话、原机器媒体引用 |
 | 需求分支 | `.studio/<需求 UUID>/<任务 ID>/` | Agent 产出的文本计划、规格、报告；正式游戏代码和资产沿用游戏工程自己的路径 |
@@ -21,7 +21,7 @@
 ## 项目与索引
 
 ```json
-{"version":1,"id":"11111111-1111-4111-8111-111111111111","name":"LightGame"}
+{"version":1,"id":"11111111-1111-4111-8111-111111111111","name":"LightGame","repositoryUrl":"git@github.com:owner/LightGame.git"}
 ```
 
 ```json
@@ -89,6 +89,14 @@
 
 默认排除视频、`captures/ screenshots/ frames/ recordings/ cache/ .godot/ node_modules/ build/`、过程图片、凭据、环境文件、压缩包及引擎可执行文件。未跟踪资产仅纳入当前任务明确交付的资产组及其运行依赖：识别正式资产的版本目录、材质 manifest 和代码 / 场景的 `res://` 引用，跳过未引用的旧版本、validation、重建、试验与预览资料。`.studio` 只纳入当前交付引用的文本规格、图表和制作脚本，以及当前原画任务或有效视觉审批引用的正式图片，超过 1 MiB 的过程报告留在本机；复用资产的间接依赖只取实际引用文件，不因为引用一个旧版参数表就提交同目录的整套旧模型。已取消需求仅同步当前进度和续做上下文，不遍历或上传废弃资产。不扫整个旧工作副本上传完整历史。超过 25 MiB 的改动文件留在本机并在清单中说明；正式大资产请按项目 Git LFS 规则处理。已跟踪的正常代码/正式资产修改仍可提交；本功能不清除远程已有的 Git 历史。
 
+## 网页配置仓库与新机器工程路径
+
+团队配置中的 `repositoryUrl` 是项目本身的 GitHub 仓库地址，支持 HTTPS 或 SSH，不另设测试仓库。可在制作期间单独保存仓库地址，不重设团队、任务或审批。地址也进入需求存档的 `project.repositoryUrl` 与下一次手动同步的 `.relay/project.json`；不保存用户名、密码或令牌，使用目标电脑已有的 GitHub 登录。
+
+点击“读取仓库需求”或需求同步面板的“在新电脑或新路径准备工程”，选择在线电脑、填写该电脑上的绝对路径。目录不存在或为空时自动创建父目录，并在独立暂存目录拉取项目，完成后再登记为本机允许工程；已有非空目录必须是仓库根目录，且 origin 必须匹配。已有工程只更新远程 refs，不 pull/reset、覆盖文件或改动暂存区。克隆仅取按需 Git 对象，过程媒体规则不变。
+
+`connect` 使用持久化后台任务和 Bridge 投递回执。网页超时后按同一操作 ID 查询，不重放未知克隆；失败目录保留，连接错误最多五次、每次间隔一分钟。目录有新增内容或仓库来源不匹配时停止，不覆盖。准备完成后自动读取需求，但不会替换线上需求绑定、直接开工或自动通过审批；进入具体需求选择“在此电脑继续”才创建需求 worktree。
+
 ## 新机器读取和续做
 
 正常 clone / pull 后，在本机 Relay 登记该游戏仓库。新版服务会扫描已拉取的 `origin/codex/studio-*` 分支，不切换当前工作分支即可读取存档；主干索引和分支存档都保留稳定 ID。未准备本机副本的需求仅以暂停的只读进度展示。若尚未更新 refs，可在“读取仓库需求”中选择电脑与仓库；检查同步差异也会 fetch 最新 refs。
@@ -99,8 +107,10 @@
 
 ## 服务接口
 
-`POST /api/studio/repository` 创建持久化后台操作，传入 UUID `id` 和 `op: scan / inspect / publish / restore`。返回任务 ID；用 `GET /api/studio/repository/job?id=...` 查看结果。同一个 ID 内容必须相同，页面超时重连只读取原任务，不重新提交。`publish / restore` 还需要 inspect 返回的 `token`。
+`POST /api/studio/repository` 创建持久化后台操作，传入 UUID `id` 和 `op: connect / scan / inspect / publish / restore`。返回任务 ID；用 `GET /api/studio/repository/job?id=...` 查看结果。同一个 ID 内容必须相同，页面超时重连只读取原任务，不重新提交。`publish / restore` 还需要 inspect 返回的 `token`。
 
 Bridge 内部使用 `studio-repository` 操作，另有 `save` 用于自动落盘；仅允许已登记仓库，禁止通过普通 `/api/actions` 任意发起。能力标记 `capabilities.studioRepository`。服务器与工作电脑均需此版本。
 
 `GET /api/studio/repository/history?runId=...` 查看公开上下文；`GET /api/studio/repository/video?runId=...&index=...` 可转发已导入媒体索引中的视频，沿用原设备认证与路径校验，不接受浏览器任意路径。
+
+`connect` 参数为 `hostId`、`path`、`repositoryUrl`、`name`，可带 `studioProjectId` 复用项目配置。无需预先登记本机项目；成功后返回登记的 project 与需求目录。目标电脑能力标记 `studioRepositoryConnect`。项目地址可通过 `POST /api/studio/project/repository` 单独保存。

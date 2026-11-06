@@ -1,3 +1,4 @@
+import {repositoryAddress} from '../shared/repository-url.js';
 import {assertMainlineIdle} from './studio-mainline.js';
 import {launchTargets,type LaunchTarget} from '../shared/playtests.js';
 import {functionalTestTask,launcherInstructions} from './studio-playtest-task.js';
@@ -49,7 +50,7 @@ export interface Task {preflightRetry?:PreflightRetry}
 export interface Task {migrationContext?:string;artifactSessionId?:string}
 export interface Task {blockers?:StudioBlocker[];checkpoint?:{at:number;sessionId:string;reason:string}}
 interface Assignment {role:string;enabled:boolean;provider:Provider;agentId?:string;model?:string;effort?:string;instructions:string;tools:string}
-export interface StudioProject {toolchain?:StudioToolchain;includeCaptures?:boolean;id:string;name:string;hostId:string;projectId:string;workspaceIndex:number;roles:Assignment[];permissionMode:PermissionMode;concurrency:number;reviewPlan:boolean;createdAt:number;updatedAt:number}
+export interface StudioProject {repositoryUrl?:string;toolchain?:StudioToolchain;includeCaptures?:boolean;id:string;name:string;hostId:string;projectId:string;workspaceIndex:number;roles:Assignment[];permissionMode:PermissionMode;concurrency:number;reviewPlan:boolean;createdAt:number;updatedAt:number}
 interface Artifact {path:string;description:string}
 export interface Task {resumeSessionId?:string;flowStopId?:string;id:string;title:string;role:string;brief:string;acceptance:string;dependencies:string[];status:TaskState;stage?:SceneStage;kind?:'visual-review'|'producer-review';reviewType?:'design'|'scene';reviewId?:string;approvedAt?:number;visualSnapshots?:{taskId:string;path:string;sha256:string}[];actionId?:string;sessionId?:string;startedAt?:number;finishedAt?:number;output?:string;summary?:string;artifacts?:Artifact[];checks?:string[];error?:string;feedback?:string;attempts?:{sessionId?:string;output?:string;at:number}[]}
 interface RoleChat {role:string;actionId:string;sessionId?:string;error?:string;startedAt:number;resolved?:boolean;afterDelivery?:boolean;sourceSessionId?:string}
@@ -305,6 +306,7 @@ export class Studio {
     for(const r of this.runs().filter(r=>r.projectId===p.id&&!['accepted','cancelled'].includes(r.status)))this.saveRun(r,'团队工具环境已更新；后续制作与原会话复核使用最新路径，当前任务不重复投递');
     this.changed();return p;
   }
+  saveRepository(v:any){const p=this.project(v.projectId);p.repositoryUrl=repositoryAddress(v.repositoryUrl);p.updatedAt=Date.now();this.store.db.prepare('INSERT OR REPLACE INTO studio_projects VALUES(?,?)').run(p.id,JSON.stringify(p));this.changed();return p;}
   saveProject(v:any){
     const host=this.store.hosts().find(h=>h.id===v.hostId),project=host?.projects.find(p=>p.id===v.projectId);
     if(!host||!project)throw Error('请选择工作电脑和允许的工程');
@@ -319,7 +321,7 @@ export class Studio {
     if(!roles.find(r=>r.role==='director')?.enabled||!roles.find(r=>r.role==='qa')?.enabled)throw Error('制作统筹和 QA 必须启用');
     if(!['request','auto','full'].includes(v.permissionMode)||!Number.isInteger(v.concurrency)||v.concurrency<1||v.concurrency>4||typeof v.reviewPlan!=='boolean')throw Error('无效执行设置');
     const old=v.id?this.project(v.id):undefined,now=Date.now();
-    const p:StudioProject={devices:old?.devices,id:old?.id??randomUUID(),name:text(v.name,100,'团队名称'),hostId:host.id,projectId:project.id,workspaceIndex:v.workspaceIndex,roles,permissionMode:v.permissionMode,concurrency:v.concurrency,reviewPlan:v.reviewPlan,includeCaptures:v.includeCaptures===true,toolchain:validateToolchain(v.toolchain===undefined?old?.toolchain:v.toolchain),createdAt:old?.createdAt??now,updatedAt:now};
+    const p:StudioProject={repositoryUrl:repositoryAddress(v.repositoryUrl===undefined?old?.repositoryUrl??project.repositoryUrl:v.repositoryUrl),devices:old?.devices,id:old?.id??randomUUID(),name:text(v.name,100,'团队名称'),hostId:host.id,projectId:project.id,workspaceIndex:v.workspaceIndex,roles,permissionMode:v.permissionMode,concurrency:v.concurrency,reviewPlan:v.reviewPlan,includeCaptures:v.includeCaptures===true,toolchain:validateToolchain(v.toolchain===undefined?old?.toolchain:v.toolchain),createdAt:old?.createdAt??now,updatedAt:now};
     const device:StudioDevice={hostId:p.hostId,projectId:p.projectId,workspaceIndex:p.workspaceIndex,path:(project.roots??[project.path])[p.workspaceIndex],toolchain:p.toolchain};p.devices=[...(old?.devices??[]).filter(d=>d.hostId!==device.hostId||d.projectId!==device.projectId||d.workspaceIndex!==device.workspaceIndex),device];
     if(old&&this.runs().some(r=>r.projectId===old.id&&!['accepted','cancelled'].includes(r.status)))throw Error('该团队仍有制作需求，请完成或取消后再修改配置');
     this.store.db.prepare('INSERT OR REPLACE INTO studio_projects VALUES(?,?)').run(p.id,JSON.stringify(p));this.changed();return p;

@@ -96,6 +96,7 @@ function workspaces(index=0,updatePath=true){
   if(!p)$('team-workspace').append(option('','使用下方自定义工程路径'));
   $('team-workspace').value=p?String(index):'';$('team-workspace').required=!!p;$('team-workspace').disabled=!p;
   if(updatePath)$('team-path').value=p?(p.roots??[p.path])[index]||p.path:'';
+  if(p?.repositoryUrl&&!$('team-repository-url').value)$('team-repository-url').value=p.repositoryUrl;
   updatePathNote(p);
 }
 function updatePathNote(project){$('team-path-note').textContent=project?'已匹配工程：'+project.name+'。每个需求将在独立工作副本中执行。':$('team-path').value.trim()?'自定义源工程；保存后登记，每个需求创建独立分支和工作副本。':'输入工程文件夹绝对路径，或选择一个已有工程。';}
@@ -124,7 +125,7 @@ function roleEditor(role,assignment){
 function assignments(){return [...$('role-editors').children].map(card=>{const field=k=>card.querySelector(`[data-field="${k}"]`),[provider,agentId]=field('agent').value.split(':');return {role:card.dataset.role,enabled:field('enabled').checked,provider,agentId:agentId||undefined,model:field('model').value||undefined,effort:field('effort').value||undefined,instructions:field('instructions').value,tools:field('tools').value};});}
 function readToolchain(){return {blender:$('tool-blender').value,python:$('tool-python').value,engine:$('tool-engine').value,discoveryScript:$('tool-discovery').value,pythonPaths:$('tool-python-paths').value.split(/\r?\n/).filter(x=>x.trim()),searchRoots:$('tool-search-roots').value.split(/\r?\n/).filter(x=>x.trim())};}
 $('save-toolchain').onclick=async()=>{$('save-toolchain').disabled=true;try{await api('studio/toolchain',{projectId:editing,toolchain:readToolchain()});await refresh(true);$('toolchain-note').textContent='已保存，后续制作和原任务复核将使用这些路径。';}catch(e){$('toolchain-note').textContent=e.message;}finally{$('save-toolchain').disabled=!editing;}};
-function openTeam(p){editing=p?.id||null;$('save-toolchain').disabled=!editing;$('toolchain-note').textContent=editing?'可在制作过程中单独更新工具环境；已有任务和审批会保留。':'新团队请先保存团队。';$('team-dialog-title').textContent=p?'团队配置':'组建游戏团队';$('team-error').textContent='';$('team-name').value=p?.name||'';$('team-host').replaceChildren(...relay.hosts.map(h=>option(h.id,h.name+(h.online?' · 在线':' · 离线'))));if(p)$('team-host').value=p.hostId;else if(relay.hosts.some(h=>h.id===desktopHostId))$('team-host').value=desktopHostId;else if(relay.hosts.some(h=>h.online))$('team-host').value=relay.hosts.find(h=>h.online).id;hostProjects(p?.projectId,p?.workspaceIndex);$('team-concurrency').value=p?.concurrency||1;$('team-permission').value=p?.permissionMode||'request';$('team-review').checked=p?.reviewPlan??true;$('team-create-folder').checked=false;$('team-include-captures').checked=p?.includeCaptures??false;for(const [field,key] of [['tool-blender','blender'],['tool-python','python'],['tool-engine','engine'],['tool-discovery','discoveryScript'],['tool-python-paths','pythonPaths'],['tool-search-roots','searchRoots']])$(field).value=Array.isArray(p?.toolchain?.[key])?p.toolchain[key].join('\n'):p?.toolchain?.[key]||'';$('role-editors').replaceChildren(...state.roles.map(r=>roleEditor(r,p?.roles.find(a=>a.role===r.id))));if(!relay.hosts.length)$('team-error').textContent='尚未连接工作电脑，请先启动本机连接程序。';show('team-dialog');}
+function openTeam(p){editing=p?.id||null;$('team-repository-url').value=p?.repositoryUrl||'';$('save-repository-url').disabled=!editing;$('save-toolchain').disabled=!editing;$('toolchain-note').textContent=editing?'可在制作过程中单独更新工具环境；已有任务和审批会保留。':'新团队请先保存团队。';$('team-dialog-title').textContent=p?'团队配置':'组建游戏团队';$('team-error').textContent='';$('team-name').value=p?.name||'';$('team-host').replaceChildren(...relay.hosts.map(h=>option(h.id,h.name+(h.online?' · 在线':' · 离线'))));if(p)$('team-host').value=p.hostId;else if(relay.hosts.some(h=>h.id===desktopHostId))$('team-host').value=desktopHostId;else if(relay.hosts.some(h=>h.online))$('team-host').value=relay.hosts.find(h=>h.online).id;hostProjects(p?.projectId,p?.workspaceIndex);$('team-concurrency').value=p?.concurrency||1;$('team-permission').value=p?.permissionMode||'request';$('team-review').checked=p?.reviewPlan??true;$('team-create-folder').checked=false;$('team-include-captures').checked=p?.includeCaptures??false;for(const [field,key] of [['tool-blender','blender'],['tool-python','python'],['tool-engine','engine'],['tool-discovery','discoveryScript'],['tool-python-paths','pythonPaths'],['tool-search-roots','searchRoots']])$(field).value=Array.isArray(p?.toolchain?.[key])?p.toolchain[key].join('\n'):p?.toolchain?.[key]||'';$('role-editors').replaceChildren(...state.roles.map(r=>roleEditor(r,p?.roles.find(a=>a.role===r.id))));if(!relay.hosts.length)$('team-error').textContent='尚未连接工作电脑，请先启动本机连接程序。';show('team-dialog');}
 let briefProposal=null,briefParent=null,briefRequest=null;
 function briefDraftKey(){return briefParent?'relay-studio-continuation:'+briefParent.id:briefProposal?'relay-proposal-flow:'+briefProposal.proposalId:'relay-studio-brief:'+current().id;}
 function briefContext(){const p=briefParent?projectForRun(briefParent):current();return p?{key:briefParent?'continuation:'+briefParent.id:p.id,target:{hostId:p.hostId,projectId:p.projectId}}:null;}
@@ -320,6 +321,7 @@ $('team-workspace').onchange=()=>{const host=relay.hosts.find(h=>h.id===$('team-
 $('team-path').oninput=syncProjectFromPath;
 $('team-path').onchange=syncProjectFromPath;
 $('team-browse').onclick=async()=>{try{const result=await window.relayStudioDesktop.pickDirectory($('team-path').value);if(!result.cancelled&&result.hostId===$('team-host').value){$('team-path').value=result.path;syncProjectFromPath();}}catch(e){$('team-error').textContent=e.message;}};
+$('save-repository-url').onclick=async()=>{try{const result=await api('studio/project/repository',{projectId:editing,repositoryUrl:$('team-repository-url').value.trim()});await refresh(true);$('team-error').textContent='';notify('项目仓库地址已保存，已有需求和审批保持。');}catch(e){$('team-error').textContent=e.message;}};
 $('team-form').onsubmit=async e=>{
   e.preventDefault();$('team-save').disabled=true;$('team-error').textContent='';
   try{
@@ -327,11 +329,11 @@ $('team-form').onsubmit=async e=>{
     let target=matchingStudioProject(host,path,$('team-project').value);
     if(!target){
       const registration=studioProjectRegistration(host,path,$('team-create-folder').checked,crypto.randomUUID());
-      const {project}=await api('actions',registration);await refresh(true);
+      const {project,workspaceIndex=0}=$('team-repository-url').value.trim()?await repository.prepare({hostId,path,repositoryUrl:$('team-repository-url').value.trim(),name:$('team-name').value||registration.projectName},$('team-error')):await api('actions',registration);await refresh(true);
       const updated=relay.hosts.find(h=>h.id===hostId);if(updated&&!updated.projects.some(p=>p.id===project.id))updated.projects.push(project);
-      hostProjects(project.id,0);target={projectId:project.id,workspaceIndex:0};
+      hostProjects(project.id,workspaceIndex);target={projectId:project.id,workspaceIndex};
     }
-    const value={id:editing||undefined,name:$('team-name').value,hostId,...target,concurrency:Number($('team-concurrency').value),permissionMode:$('team-permission').value,reviewPlan:$('team-review').checked,includeCaptures:$('team-include-captures').checked,toolchain:readToolchain(),roles:assignments()};
+    const value={repositoryUrl:$('team-repository-url').value.trim(),id:editing||undefined,name:$('team-name').value,hostId,...target,concurrency:Number($('team-concurrency').value),permissionMode:$('team-permission').value,reviewPlan:$('team-review').checked,includeCaptures:$('team-include-captures').checked,toolchain:readToolchain(),roles:assignments()};
     const result=await api('studio/project',value);selected=result.project.id;await refresh(true);$('team-dialog').close();notify('团队与工程路径已保存，可以提出制作需求了');
   }catch(e){$('team-error').textContent=e.message;}finally{$('team-save').disabled=false;}
 };

@@ -188,4 +188,4 @@ node --env-file=.env --import tsx scripts/verify-remote.ts https://relay.example
 
 游戏工作室支持一个项目仓库、每个制作需求一个分支。需求、进度、审批和续做所需的近期公开上下文自动保存到本机；点击“同步需求”才提交并推送。主干保存轻量需求索引，需求分支保存代码、正式资产与业务存档；完整历史、旧版本资产、过程录屏、截图和缓存留在原电脑，按需中转。默认只同步当前交付及其运行依赖，避免上传整个生产历史。
 
-新电脑 clone / pull 后，将游戏仓库登记到新版本机 Relay，即可读取需求与进度。打开需求的“同步需求”，可比较双方版本并选择采用本地或远程；采用远程会保留原副本、建立独立 worktree，保持暂停供核对后续做。详见 [Relay 需求仓库协议 v1](docs/requirement-repository-protocol.md)。
+项目配置中保存 GitHub 仓库地址。网页选择目标电脑并填写本地路径后，可自动创建目录、拉取工程并读取需求；已有工程会核对 origin，保留本地改动和暂存区。也支持自行 clone / pull 后登记仓库。打开需求的“同步需求”，可比较双方版本并选择采用本地或远程；采用远程会保留原副本、建立独立 worktree，保持暂停供核对后续做。详见 [Relay 需求仓库协议 v1](docs/requirement-repository-protocol.md)。

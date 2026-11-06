@@ -1,18 +1,20 @@
 import {spawn} from 'node:child_process';
 import {randomUUID,createHash} from 'node:crypto';
-import {mkdir,readFile,writeFile,rename,lstat,realpath,unlink,readdir} from 'node:fs/promises';
+import {mkdir,readFile,writeFile,rename,lstat,realpath,unlink,readdir,rmdir} from 'node:fs/promises';
 import {existsSync} from 'node:fs';
 import {resolve,relative,isAbsolute,join,dirname} from 'node:path';
 import {archiveHash,archivePath,validateArchive,validRepositoryPath,repositoryId,type RequirementArchive,type RequirementIndex,type RepositoryRequest} from '../shared/studio-repository.js';
 import type {Project} from '../shared/protocol.js';
 import type {BridgeStore} from './store.js';
 import type {StudioWorkspace} from './studio-workspace.js';
+import {repositoryAddress,repositoryKey} from '../shared/repository-url.js';
+import {createLocalProject,localProjectFolder} from './projects.js';
 
 const queues=new Map<string,Promise<any>>();
 async function exclusive<T>(root:string,work:()=>Promise<T>):Promise<T>{const prior=queues.get(root)??Promise.resolve(),job=prior.catch(()=>{}).then(work);queues.set(root,job);try{return await job;}finally{if(queues.get(root)===job)queues.delete(root);}}
 export async function repositoryGit(cwd:string,args:string[],input?:string,env:Record<string,string>={}):Promise<string>{
   return new Promise((yes,no)=>{const child=spawn('git',['-c','core.fsmonitor=false',...args],{cwd,windowsHide:true,shell:false,env:{...process.env,GIT_TERMINAL_PROMPT:'0',...env},stdio:'pipe'}),out:Buffer[]=[];let err='',size=0,ended=false;
-    const done=(e?:Error)=>{if(ended)return;ended=true;clearTimeout(timer);e?no(e):yes(Buffer.concat(out).toString('utf8'));},timer=setTimeout(()=>{child.kill();done(Error('仓库操作超时；已保留原文件，请重新检查同步状态'));},args.includes('push')?900_000:90_000);
+    const done=(e?:Error)=>{if(ended)return;ended=true;clearTimeout(timer);e?no(e):yes(Buffer.concat(out).toString('utf8'));},timer=setTimeout(()=>{child.kill();done(Error('仓库操作超时；已保留原文件，请重新检查同步状态'));},args.some(a=>['push','clone'].includes(a))?900_000:90_000);
     child.on('error',done);child.stdout.on('data',b=>{size+=b.length;if(size>32*1024*1024){child.kill();done(Error('仓库读取超过 32 MB 限制'));}else out.push(b);});child.stderr.on('data',b=>err=(err+b).slice(-3000));child.on('close',code=>done(code===0?undefined:Error(err.trim()||'Git 操作失败')));child.stdin.on('error',()=>{});child.stdin.end(input);
   });
 }
@@ -30,10 +32,41 @@ async function rootFor(p:Project){return (await repositoryGit(p.path,['rev-parse
 async function common(root:string){return resolve(root,(await repositoryGit(root,['rev-parse','--git-common-dir'])).trim());}
 async function defaultBranch(root:string){try{const b=(await repositoryGit(root,['symbolic-ref','refs/remotes/origin/HEAD'])).trim();if(/^refs\/remotes\/origin\/.+/.test(b))return b.slice('refs/remotes/origin/'.length);}catch{}for(const b of ['main','master'])if(await refHash(root,'refs/remotes/origin/'+b)||await refHash(root,'refs/heads/'+b))return b;throw Error('找不到主干，请先设置 origin 的默认分支');}
 async function repositoryIdentity(root:string){const branch=await defaultBranch(root).catch(()=>undefined),remote=branch?await gitJson(root,'refs/remotes/origin/'+branch,'.relay/project.json'):undefined;return remote??await localJson(root,'.relay/project.json')??await localJson(await common(root),'relay/project.json')??await gitJson(root,'HEAD','.relay/project.json');}
-async function fetchRepository(root:string,refs=['+refs/heads/*:refs/remotes/origin/*']){for(let attempt=0;attempt<5;attempt++)try{await repositoryGit(root,['fetch','--no-tags','origin',...refs]);return;}catch(e){if(attempt===4||!/timed? out|connection|could not resolve|unable to access|network|远程主机/i.test((e as Error).message))throw e;await new Promise(r=>setTimeout(r,60000));}}
+async function fetchRepository(root:string,refs=['+refs/heads/*:refs/remotes/origin/*'],git=repositoryGit){for(let attempt=0;attempt<5;attempt++)try{await git(root,['fetch','--no-tags','origin',...refs]);return;}catch(e){if(attempt===4||!/timed? out|connection|could not resolve|unable to access|network|远程主机/i.test((e as Error).message))throw e;await new Promise(r=>setTimeout(r,60000));}}
 function excluded(path:string){return /(^|\/)(captures?|screenshots?|recordings?|frames?|cache|__pycache__|node_modules|\.venv|\.ssh|\.aws|\.codex|\.claude|\.godot|\.git|\.data|\.runtime|dist|build|tmp|temp)(\/|$)/i.test(path)||/\.(mp4|mov|mkv|webm|avi|log|tmp|bak|pyc|exe|dll|dylib|so|zip|7z|tar|gz)$/i.test(path)||/(^|\/)(\.env(?:\..*)?|\.mcp\.json|auth\.json|id_rsa|id_ed25519|credentials[^/]*|.*\.(pem|key))$/i.test(path)||path.startsWith('.relay/')||path.startsWith('.studio/')&&!/\.(md|json|txt|csv|ya?ml|svg|mmd|dot|py|gd|ps1|sh|js|mjs)$/i.test(path);}
 export function repositoryFilePolicy(path:string){return validRepositoryPath(path)&&!excluded(path);}
 const processAsset=(path:string)=>/(^|\/)(validation|rebuild|previews?|renders?|trials?|history|archive|fixtures?)(\/|$)/i.test(path);
+
+export async function connectRepository(store:BridgeStore,v:RepositoryRequest,id:string,known:Project[]=[],git=repositoryGit){
+  const {name,full}=localProjectFolder({projectName:v.name,projectPath:v.path}),url=repositoryAddress(v.repositoryUrl)!;
+  if(!url)throw Error('请先配置项目的 GitHub 仓库地址');
+  return exclusive('connect:'+(process.platform==='win32'?full.toLowerCase():full),async()=>{
+    const existing=existsSync(full);if(existing&&!(await lstat(full)).isDirectory())throw Error('目标路径不是普通文件夹');const entries=existing?await readdir(full):[];let cloned=false;
+    if(existing&&(await lstat(full)).isSymbolicLink())throw Error('请选择真实工程目录，不使用目录链接作为新工程路径');
+    if(entries.length){
+      let root;try{root=(await git(full,['rev-parse','--show-toplevel'])).trim();}catch{throw Error('目标文件夹已有内容，但不是 Git 工程；请选择空目录或已有仓库');}
+      if(await realpath(root)!==await realpath(full))throw Error('目标路径位于其他仓库内部，请选择工程仓库根目录');
+      const origin=(await git(full,['config','--get','remote.origin.url'])).trim();if(repositoryKey(origin)!==repositoryKey(url))throw Error('此目录的 origin 与项目仓库地址不同，未修改本地文件');
+      // Updating refs is sufficient to discover progress and prepare a new worktree.
+      // Never pull/reset a user's existing working tree as a side effect of connecting.
+      await fetchRepository(full,undefined,git);
+    }else{
+      await mkdir(dirname(full),{recursive:true});let stage='';
+      for(let attempt=0;attempt<5;attempt++){
+        stage=join(dirname(full),'.relay-clone-'+id+'-'+attempt);
+        if(existsSync(stage))throw Error('上次拉取目录仍存在，请先检查原操作记录：'+stage);
+        try{await git(dirname(full),['clone','--filter=blob:none','--no-tags','--',url,stage]);break;}
+        catch(e){if(attempt===4||!/timed? out|connection|could not resolve|unable to access|network|远程主机/i.test((e as Error).message))throw Error('目标电脑拉取失败；请检查本机 GitHub 登录和网络。原目录未覆盖，检查目录：'+stage+'；'+(e as Error).message);await new Promise(r=>setTimeout(r,60000));}
+      }
+      if(repositoryKey((await git(stage,['config','--get','remote.origin.url'])).trim())!==repositoryKey(url))throw Error('拉取仓库来源校验失败，暂存目录保留：'+stage);
+      if(existsSync(full)){if((await readdir(full)).length)throw Error('拉取期间目标目录有新增内容，未覆盖；暂存目录：'+stage);await rmdir(full);}
+      await rename(stage,full);cloned=true;
+    }
+    const actual=await realpath(full);let existingProject:Project|undefined,workspaceIndex=0;for(const p of known)for(const [index,path] of (p.roots??[p.path]).entries())try{if(await realpath(path)===actual){existingProject=p;workspaceIndex=index;break;}}catch{}
+    const project:Project={...(existingProject??createLocalProject(store,{id,type:'create-project',projectName:name,projectPath:actual,createFolder:false})),repositoryUrl:url};if(!existingProject||store.projects().some(p=>p.id===project.id))store.saveProject(project);
+    return {project,workspaceIndex,cloned,workingTreePreserved:!cloned};
+  });
+}
 
 export class StudioRepository {
   constructor(private store:BridgeStore,private dataDir:string){}
@@ -52,20 +85,23 @@ export class StudioRepository {
   });}
   private async save(root:string,repo:string,w:StudioWorkspace,a:RequirementArchive){
     const stateRoot=await common(root),old=await repositoryIdentity(root);
-    a=structuredClone(a);if(old){if(old.version!==1||typeof old.id!=='string')throw Error('仓库项目身份文件无效');if(old.id!==a.projectId)a.project.sourceTeamId=a.projectId;a.projectId=old.id;a.project.id=old.id;a.run.projectId=old.id;if(typeof old.name==='string')a.project.name=old.name;}
+    a=structuredClone(a);let origin:string|undefined;try{origin=repositoryAddress((await repositoryGit(root,['config','--get','remote.origin.url'])).trim());}catch{}
+    if(a.project.repositoryUrl&&origin&&repositoryKey(a.project.repositoryUrl)!==repositoryKey(origin))throw Error('项目配置的 GitHub 地址与本机 origin 不同，请先核对工程');
+    if(origin)a.project.repositoryUrl=a.project.repositoryUrl||origin;
+    if(old){if(old.version!==1||typeof old.id!=='string')throw Error('仓库项目身份文件无效');if(old.id!==a.projectId)a.project.sourceTeamId=a.projectId;a.projectId=old.id;a.project.id=old.id;a.run.projectId=old.id;if(typeof old.name==='string')a.project.name=old.name;}
     a.projectRelative=relative(repo,w.project.path).replaceAll('\\','/');
     const portable=(path:string)=>{const normalized=path.replaceAll('\\','/'),base=w.project.path.replaceAll('\\','/').replace(/\/$/,'');return normalized.startsWith(base+'/')?normalized.slice(base.length+1):path;};
     for(const t of [a.run.planner,...a.run.tasks,...a.run.delivery?[a.run.delivery]:[]]){for(const artifact of t.artifacts??[])artifact.path=portable(artifact.path);for(const snapshot of t.visualSnapshots??[])snapshot.path=portable(snapshot.path);}
     validateArchive(a);
     // Mainline files are committed through a temporary tree, never written as
     // untracked files into a protected checkout where they could block git pull.
-    await jsonFile(stateRoot,'relay/project.json',{version:1,id:a.projectId,name:a.project.name});
-    await jsonFile(repo,'.relay/project.json',{version:1,id:a.projectId,name:a.project.name});
+    await jsonFile(stateRoot,'relay/project.json',{version:1,id:a.projectId,name:a.project.name,repositoryUrl:a.project.repositoryUrl});
+    await jsonFile(repo,'.relay/project.json',{version:1,id:a.projectId,name:a.project.name,repositoryUrl:a.project.repositoryUrl});
     // Git carries the current handoff, not an ever-growing transcript archive.
     a.conversations=a.conversations.map(c=>({...c,messages:c.messages.slice(-12).map(m=>({...m,text:m.text.length>12000?'[公开上下文节选；完整记录保留原机器]\n'+m.text.slice(-12000):m.text}))}));a.contextPolicy={messageLimit:12,completeHistory:false};a.run.log=a.run.log.slice(-20);a.run.guidance=(a.run.guidance??[]).slice(-12);a.run.publicGroup=(a.run.publicGroup??[]).slice(-12);delete a.run.deliveryHistory;delete a.run.feedbackFileHistory;for(const t of [a.run.planner,...a.run.tasks,...a.run.delivery?[a.run.delivery]:[]]){delete t.attempts;delete t.recovery;delete t.preflightRetry;delete t.autoFollowup;}validateArchive(a);
     await jsonFile(repo,archivePath(a.runId),a);
     const index=await localJson(stateRoot,'relay/requirements.json') as RequirementIndex|undefined;if(index&&index.projectId!==a.projectId)index.projectId=a.projectId;
-    await jsonFile(stateRoot,'relay/requirements.json',this.index(a,index));return {saved:true,hash:archiveHash(a)};
+    await jsonFile(stateRoot,'relay/requirements.json',this.index(a,index));return {saved:true,hash:archiveHash(a),repositoryUrl:a.project.repositoryUrl};
   }
   private index(a:RequirementArchive,old?:RequirementIndex):RequirementIndex{if(old&&(old.version!==1||old.projectId!==a.projectId||!Array.isArray(old.requirements)))throw Error('项目需求索引身份不匹配');return {version:1,projectId:a.projectId,requirements:[...(old?.requirements??[]).filter(r=>r.id!==a.runId),{id:a.runId,title:String(a.run.title),branch:a.branch,status:String(a.run.status),revision:Number(a.run.revision),updatedAt:Number(a.run.updatedAt)}].sort((x,y)=>x.id.localeCompare(y.id))};}
   private async inspect(root:string,repo:string,w:StudioWorkspace,fetch:boolean){
@@ -124,8 +160,8 @@ export class StudioRepository {
   private async publish(root:string,repo:string,w:StudioWorkspace,v:RepositoryRequest,view:Awaited<ReturnType<StudioRepository['inspect']>>){
     const paths=v.paths??view.files.map(f=>f.path);if(paths.some(p=>!view.files.some(f=>f.path===p)))throw Error('文件不在本轮可提交清单中，请重新检查');
     // Snapshot commits are separate from the working branch and its index. User staging is untouched.
-    const demand=await this.commit(repo,view.remoteHead||view.head,paths,{'.relay/project.json':{version:1,id:view.archive.projectId,name:view.archive.project.name},[archivePath(w.runId)]:view.archive},[view.remoteHead,view.head],`Studio: ${view.archive.run.title}`);
-    const previous=await gitJson(root,view.mainHead,'.relay/requirements.json'),index=this.index(view.archive,previous);Object.assign(index.requirements.find(r=>r.id===w.runId)!,{commit:demand,sha256:archiveHash(view.archive)});const main=await this.commit(root,view.mainHead,[],{'.relay/project.json':{version:1,id:view.archive.projectId,name:view.archive.project.name},'.relay/requirements.json':index},[view.mainHead],'Studio: sync requirement index');
+    const demand=await this.commit(repo,view.remoteHead||view.head,paths,{'.relay/project.json':{version:1,id:view.archive.projectId,name:view.archive.project.name,repositoryUrl:view.archive.project.repositoryUrl},[archivePath(w.runId)]:view.archive},[view.remoteHead,view.head],`Studio: ${view.archive.run.title}`);
+    const previous=await gitJson(root,view.mainHead,'.relay/requirements.json'),index=this.index(view.archive,previous);Object.assign(index.requirements.find(r=>r.id===w.runId)!,{commit:demand,sha256:archiveHash(view.archive)});const main=await this.commit(root,view.mainHead,[],{'.relay/project.json':{version:1,id:view.archive.projectId,name:view.archive.project.name,repositoryUrl:view.archive.project.repositoryUrl},'.relay/requirements.json':index},[view.mainHead],'Studio: sync requirement index');
     const receipt=randomUUID(),journal=join(this.dataDir,'repository-sync',receipt+'.json');await mkdir(dirname(journal),{recursive:true});await writeFile(journal,JSON.stringify({runId:w.runId,demand,main,branch:view.branch,mainBranch:view.main,at:Date.now()}),{mode:0o600});
     await repositoryGit(root,['update-ref','refs/relay-sync/'+receipt+'/demand',demand]);await repositoryGit(root,['update-ref','refs/relay-sync/'+receipt+'/index',main]);
     // Re-check working files before publishing the prepared tree.

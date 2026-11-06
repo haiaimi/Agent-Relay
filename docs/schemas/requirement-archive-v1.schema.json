@@ -11,7 +11,7 @@
     "runId": {"type": "string", "format": "uuid"},
     "branch": {"type": "string", "pattern": "^codex/studio-[a-f0-9-]{36}$"},
     "projectRelative": {"type": "string"},
-    "project": {"type":"object", "required":["id","name","roles"], "properties":{"id":{"type":"string","format":"uuid"},"name":{"type":"string"},"roles":{"type":"array"}}},
+    "project": {"type":"object", "required":["id","name","roles"], "properties":{"id":{"type":"string","format":"uuid"},"name":{"type":"string"},"repositoryUrl":{"type":"string","maxLength":500},"roles":{"type":"array"}}},
     "run": {
       "type":"object", "required":["id","title","brief","status","revision","createdAt","updatedAt","planner","tasks","log"],
       "properties": {

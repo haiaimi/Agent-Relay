@@ -1,13 +1,14 @@
+import {repositoryAddress,repositoryKey} from '../src/shared/repository-url.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtempSync,mkdirSync,readFileSync,writeFileSync,existsSync,rmSync} from 'node:fs';
+import {mkdtempSync,mkdirSync,readFileSync,writeFileSync,existsSync,rmSync,realpathSync} from 'node:fs';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {execFileSync} from 'node:child_process';
 import {randomUUID} from 'node:crypto';
 import {BridgeStore} from '../src/bridge/store.js';
 import {prepareStudioWorkspace} from '../src/bridge/studio-workspace.js';
-import {StudioRepository,repositoryFilePolicy} from '../src/bridge/studio-repository.js';
+import {StudioRepository,repositoryFilePolicy,connectRepository,repositoryGit} from '../src/bridge/studio-repository.js';
 import {archivePath,validateArchive,type RequirementArchive} from '../src/shared/studio-repository.js';
 import {validateAction} from '../src/shared/protocol.js';
 import {RelayStore} from '../src/relay/store.js';
@@ -120,4 +121,41 @@ test('explicit Git continuation starts only the imported blocked task with local
 
 test('cancelled requirements publish current progress without traversing or uploading abandoned files',async()=>{
  const f=await fixture();try{f.archive.run.status='cancelled';writeFileSync(join(f.workspace.project.path,'game.txt'),'abandoned change stays local');await f.engine.handle(f.project,{op:'save',runId:f.runId,archive:f.archive});const view:any=await f.engine.handle(f.project,{op:'inspect',runId:f.runId});assert.deepEqual(view.files,[]);await f.engine.handle(f.project,{op:'publish',runId:f.runId,token:view.token,choice:'local',paths:[]});assert.equal(git(f.remote,'show',f.archive.branch+':game.txt'),'baseline');assert.equal(JSON.parse(git(f.remote,'show',f.archive.branch+':'+archivePath(f.runId))).run.status,'cancelled');assert.equal(readFileSync(join(f.workspace.project.path,'game.txt'),'utf8'),'abandoned change stays local');}finally{await f.close();}
+});
+
+
+test('project GitHub addresses accept workstation SSH/HTTPS and reject embedded credentials and unsafe transports',()=>{
+ assert.equal(repositoryKey('git@github.com:Owner/Game.git'),repositoryKey('https://github.com/owner/game'));
+ assert.equal(repositoryAddress(' ssh://git@github.com/owner/game.git '),'ssh://git@github.com/owner/game.git');
+ for(const address of ['https://token@github.com/owner/game.git','https://github.com/owner/game?token=secret','ext::sh -c bad','file:///private/repo','git@github.com:../game.git','https://github.com/owner/game.git#secret'])assert.throws(()=>repositoryAddress(address));
+ assert.doesNotThrow(()=>validateAction({id:randomUUID(),type:'studio-repository',repository:{op:'connect',name:'Game',path:'/Users/test/Game',repositoryUrl:'git@github.com:owner/game.git'}}));
+ assert.throws(()=>validateAction({id:randomUUID(),type:'send',sessionId:'s',text:'text',repository:{op:'connect'}}));
+});
+
+test('connecting a missing project clones and registers it; reconnecting preserves dirty files and the original index',async()=>{
+ const f=await fixture();try{
+  const address='https://github.com/relay-fixtures/game.git',path=join(f.root,'new-parent','game');
+  const runner:typeof repositoryGit=async(cwd,args,input,env)=>{if(args[0]==='clone'){const changed=args.map(x=>x===address?f.remote:x),result=await repositoryGit(cwd,changed,input,env);await repositoryGit(args.at(-1)!,['remote','set-url','origin',address]);return result;}return repositoryGit(cwd,args.map(x=>args[0]==='fetch'&&x==='origin'?f.remote:x),input,env);};
+  const request:any={op:'connect',path,name:'Game',repositoryUrl:address},connected=await connectRepository(f.store,request,randomUUID(),[],runner);assert.equal(connected.cloned,true);assert.equal(connected.project.path,realpathSync.native(path));assert.equal(connected.project.repositoryUrl,address);assert.equal(readFileSync(join(path,'game.txt'),'utf8'),'baseline');
+  writeFileSync(join(path,'game.txt'),'staged content');git(path,'add','game.txt');writeFileSync(join(path,'game.txt'),'unstaged content');const before=git(path,'diff','--cached'),head=git(path,'rev-parse','HEAD');const again=await connectRepository(f.store,request,randomUUID(),[connected.project],runner);assert.equal(again.project.id,connected.project.id);assert.equal(again.workingTreePreserved,true);assert.equal(git(path,'diff','--cached'),before);assert.equal(git(path,'rev-parse','HEAD'),head);assert.equal(readFileSync(join(path,'game.txt'),'utf8'),'unstaged content');
+  const registeredCount=f.store.projects().length,native={...connected.project,id:'configured-native'};const nativeResult=await connectRepository(f.store,request,randomUUID(),[native],runner);assert.equal(nativeResult.project.id,native.id);assert.equal(f.store.projects().length,registeredCount,'a configured/native project must not be registered a second time');
+  await assert.rejects(connectRepository(f.store,{...request,repositoryUrl:'https://github.com/other/game.git'},randomUUID(),[],runner),/origin/);
+  const occupied=join(f.root,'occupied');mkdirSync(occupied);writeFileSync(join(occupied,'keep.txt'),'keep');await assert.rejects(connectRepository(f.store,{...request,path:occupied},randomUUID(),[],runner),/已有内容/);assert.equal(readFileSync(join(occupied,'keep.txt'),'utf8'),'keep');
+ }finally{await f.close();}
+});
+
+test('authenticated webpage preparation connects a new machine with no registered roots and discovers Git requirements without native agents',async()=>{
+ const f=await fixture(),phone='phone-'+randomUUID(),token='bridge-'+randomUUID(),app=createRelay({dataDir:join(f.root,'connect-relay'),phoneToken:phone,bridgeToken:token});let bridge:ReturnType<typeof startBridge>|undefined;
+ const names=['GIT_CONFIG_COUNT','GIT_CONFIG_KEY_0','GIT_CONFIG_VALUE_0'],env=Object.fromEntries(names.map(n=>[n,process.env[n]]));let cookie='';app.server.listen(0,'127.0.0.1');await once(app.server,'listening');const base='http://127.0.0.1:'+(app.server.address() as any).port;
+ const request=async(path:string,payload?:any)=>{const response=await fetch(base+path,{method:payload?'POST':'GET',headers:{cookie,...payload?{Origin:base,'Content-Type':'application/json'}:{}},body:payload?JSON.stringify(payload):undefined});if(response.headers.get('set-cookie'))cookie=response.headers.get('set-cookie')!.split(';')[0];return response;};
+ try{
+  const view:any=await f.engine.handle(f.project,{op:'inspect',runId:f.runId});await f.engine.handle(f.project,{op:'publish',runId:f.runId,token:view.token,choice:'local'});
+  process.env.GIT_CONFIG_COUNT='1';process.env.GIT_CONFIG_KEY_0='url.'+f.remote.replaceAll('\\','/')+'.insteadOf';process.env.GIT_CONFIG_VALUE_0='https://github.com/relay-fixtures/game.git';
+  bridge=startBridge({relayUrl:base.replace('http','ws')+'/bridge',hostId:'fresh',name:'Fresh',dataDir:join(f.root,'connect-bridge'),projects:[],discoverCodexProjects:false,syncHistory:false,codexHome:join(f.root,'empty-codex'),claudeHome:join(f.root,'empty-claude')},token);
+  for(let n=0;n<100&&!app.store.hosts().length;n++)await new Promise(r=>setTimeout(r,30));assert.equal(app.store.hosts()[0].capabilities?.studioRepositoryConnect,true);
+  const value={id:randomUUID(),op:'connect',hostId:'fresh',name:'New Game',path:join(f.root,'new-computer','game'),repositoryUrl:'https://github.com/relay-fixtures/game.git'};
+  assert.equal((await request('/api/studio/repository',value)).status,401);await request('/api/login',{token:phone});assert.equal((await request('/api/studio/repository',value)).status,202);assert.equal((await request('/api/studio/repository',value)).status,202);
+  let job:any;for(let n=0;n<800;n++){job=await (await request('/api/studio/repository/job?id='+value.id)).json();if(job.phase!=='running')break;await new Promise(r=>setTimeout(r,50));}assert.equal(job.phase,'done',job.error);assert.equal(job.result.cloned,true);assert.equal(job.result.catalog.requirements[0].id,f.runId);assert.equal(app.studio.runs()[0].paused,true);assert.equal(app.studio.runs()[0].repositoryReadOnly,true);assert.equal(app.studio.projects()[0].repositoryUrl,value.repositoryUrl);assert.equal(bridge.runtime.list().filter(s=>s.provider!=='api').length,0);
+  const project=app.studio.projects()[0],roles=JSON.stringify(project.roles);const changed=await request('/api/studio/project/repository',{projectId:project.id,repositoryUrl:'git@github.com:relay-fixtures/game.git'});assert.equal(changed.status,200);assert.equal(JSON.stringify(app.studio.projects()[0].roles),roles);assert.equal(app.studio.runs()[0].paused,true);
+ }finally{await bridge?.close();await app.close();for(const n of names)if(env[n]===undefined)delete process.env[n];else process.env[n]=env[n];await f.close();}
 });

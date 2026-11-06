@@ -10,7 +10,7 @@ export interface AgentInfo {id:string;provider:Provider;name:string;configured?:
 export type PermissionMode = 'request' | 'auto' | 'full';
 export type Status = 'history' | 'running' | 'idle' | 'waiting' | 'failed' | 'interrupted';
 export interface Activity {kind:'thinking'|'tool'|'reply'|'plan'|'waiting';label:string;detail?:string;at?:number}
-export interface Project { id: string; name: string; path: string; roots?: string[]; source?: 'codex'|'configured'; nativeProjectId?:string }
+export interface Project { repositoryUrl?:string;id: string; name: string; path: string; roots?: string[]; source?: 'codex'|'configured'; nativeProjectId?:string }
 export interface Session {
   agentId?:string;agentName?:string;
   id: string; hostId: string; provider: Provider; nativeId: string;
@@ -43,7 +43,7 @@ export interface Action {
   questionId?:string;answers?:Record<string,string[]>;queueOnly?:boolean;
   permissionMode?:PermissionMode;approvalScope?:'once'|'session';projectName?:string;projectPath?:string;createFolder?:boolean;
 }
-export interface Host { agents?:AgentInfo[]; id: string; name: string; hostname?: string; platform?: string; projects: Project[]; online: boolean; lastSeen: number;capabilities?:{createProject?:boolean;permissions?:boolean;studioWorkspaces?:boolean;studioArtifacts?:boolean;studioLaunch?:boolean;studioMigration?:boolean;studioRepository?:boolean;brainstorm?:boolean}; sync?:{done:number;total:number;pages:number;state:string;errors:number} }
+export interface Host { agents?:AgentInfo[]; id: string; name: string; hostname?: string; platform?: string; projects: Project[]; online: boolean; lastSeen: number;capabilities?:{createProject?:boolean;permissions?:boolean;studioWorkspaces?:boolean;studioArtifacts?:boolean;studioLaunch?:boolean;studioMigration?:boolean;studioRepository?:boolean;studioRepositoryConnect?:boolean;brainstorm?:boolean}; sync?:{done:number;total:number;pages:number;state:string;errors:number} }
 export interface AgentModel { id: string; name: string; description?: string; isDefault?: boolean;efforts?:string[];defaultEffort?:string;aliases?:string[] }
 export interface AgentCommand {name:string;description:string;argumentHint?:string;source?:'relay'|'claude'}
 export const sessionKey = (host: string, provider: Provider, nativeId: string) => `${host}:${provider}:${nativeId}`;
@@ -52,7 +52,7 @@ export function validateAction(value: any): Action {
   if (!value || typeof value !== 'object' || !/^[a-zA-Z0-9_-]{8,100}$/.test(value.id ?? '')) throw new Error('Invalid action ID');
   if (!['start', 'send', 'steer', 'cancel-input', 'stop', 'approve', 'answer', 'history', 'asset', 'file', 'models', 'commands', 'set-model','upload','direct','create-project','set-permissions','prepare-workspace','prepare-brainstorm','studio-artifact','studio-video','studio-migration','studio-launch','studio-repository'].includes(value.type)) throw new Error('Unknown action');
   if(value.repository!==undefined&&value.type!=='studio-repository')throw Error('无效仓库同步参数');
-  if(value.type==='studio-repository'){validateRepositoryRequest(value.repository);if(typeof value.projectId!=='string'||!value.projectId||value.projectId.length>100)throw Error('请选择本机仓库');}
+  if(value.type==='studio-repository'){validateRepositoryRequest(value.repository);if(value.repository.op!=='connect'&&(typeof value.projectId!=='string'||!value.projectId||value.projectId.length>100))throw Error('请选择本机仓库');}
   if(value.launch!==undefined&&value.type!=='studio-launch')throw Error('启动参数只能用于启动操作');
   if(value.type==='studio-launch'){const l=value.launch;if(!l||!['inspect','start','status'].includes(l.op)||!uploadId.test(value.workspaceId??''))throw Error('无效本机启动请求');launchTargets([l.target]);if(l.op==='start'&&!/^[a-f0-9]{64}$/.test(l.hash??''))throw Error('启动脚本版本未核对');if(l.op==='status'&&!uploadId.test(l.requestId??''))throw Error('无效启动回执 ID');}
   if(value.migration!==undefined&&value.type!=='studio-migration')throw Error('迁移参数只能用于迁移操作');
