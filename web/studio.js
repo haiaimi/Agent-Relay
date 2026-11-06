@@ -1,3 +1,4 @@
+import {createStudioStartup} from './studio-startup.js';
 import {studioMainline} from './studio-mainline.js';
 import {studioPlaytests} from './studio-playtests.js';
 import {stageGuidance} from './studio-stage-guide.js';
@@ -20,7 +21,8 @@ import {studioBrainstorm} from './studio-brainstorm.js';
 import {studioChat} from './studio-chat.js';
 import {matchingStudioProject,studioProjectRegistration} from './studio-projects.js';
 const $=id=>document.getElementById(id);
-const embed=prepareStudioEmbed(active=>{if(active){syncDesktop();stream();void refresh(true).catch(()=>{});}else{source?.close();source=null;}},()=>void refresh(true).catch(()=>{}),studioSidebarCommand);
+let startup,studioStarted=false;
+const embed=prepareStudioEmbed(active=>{if(active){syncDesktop();if(!studioStarted){void start();return;}stream();void refresh(true).catch(()=>{});}else{source?.close();source=null;}},()=>void(studioStarted?refresh(true):start()).catch(()=>{}),studioSidebarCommand);
 setupStudioViewport();
 try{const previous=localStorage.getItem('relay-last-session');if(previous)document.querySelector('.app-nav-item[href="/"]').href='/?sessionId='+encodeURIComponent(previous);}catch{}
 let desktopHostId='';
@@ -37,7 +39,7 @@ const hostOf=p=>relay.hosts.find(h=>h.id===p?.hostId);
 const allTasks=r=>[r.planner,...r.tasks,...r.delivery?[r.delivery]:[]];
 const date=at=>new Date(at).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false});
 function notify(message){const notice=$('notice'),dialog=document.activeElement?.closest('dialog[open]')||[...document.querySelectorAll('dialog[open]')].at(-1);(dialog||document.body).append(notice);notice.textContent=message;notice.hidden=false;clearTimeout(noticeTimer);noticeTimer=setTimeout(()=>notice.hidden=true,6000);}
-const api=createStudioApi({sharedState:()=>embed.state(),onUnauthorized:()=>{void clearConversationCache();$('app').hidden=true;$('login').hidden=false;source?.close();for(const panel of attentionPanels)panel.reset();chats.resetAttention();selfRepair.reset();}});
+const api=createStudioApi({sharedState:()=>embed.state(),onUnauthorized:()=>{studioStarted=false;startup?.stop();void clearConversationCache();$('app').hidden=true;$('login').hidden=false;source?.close();for(const panel of attentionPanels)panel.reset();chats.resetAttention();selfRepair.reset();}});
 function option(value,label){const o=document.createElement('option');o.value=value;o.textContent=label;return o;}
 function button(label,fn,cls='quiet'){const b=node('button',cls,label);b.type='button';b.onclick=()=>Promise.resolve().then(fn).catch(e=>notify(e.message));return b;}
 function link(label,url){const a=node('a','button quiet',label);a.href=url;return a;}
@@ -374,8 +376,10 @@ $('brief-form').onsubmit=async e=>{
 };
 $('feedback-form').onsubmit=async e=>{e.preventDefault();if(feedbackSubmitting)return;feedbackSubmitting=true;$('feedback-submit').disabled=true;$('feedback-error').textContent='';try{const context=feedbackContext(),attachmentIds=['accept','skip-task'].includes(feedback.op)?[]:await feedbackFiles.upload(context);await api('studio/command',{op:'retry',...feedback,feedback:$('feedback-text').value,attachmentIds});if(context)feedbackFiles.clear(context.key);await refresh(true);$('feedback-dialog').close();notify(feedback.op==='skip-task'?'已记录跳过，继续分发后续任务；原失败记录保留':feedback.op==='accept'?'已确认遗留问题并验收':feedback.op==='reject-step'?'已打回修改，本轮审批与下游将重新验证':feedback.op==='reject-visual'?'已安排原画修改；旧视觉确认与下游结果已失效':'已安排返工，下游任务将重新执行');}catch(e){$('feedback-error').textContent=e.message;}finally{feedbackSubmitting=false;if(feedback?.op==='skip-task'&&$('feedback-dialog').open)void inspectSkip(true);else $('feedback-submit').disabled=false;}};
 function stream(){source?.close();source=new EventSource('/api/events');for(const type of ['studio','state','sessions','reset','event'])source.addEventListener(type,()=>void refresh().catch(()=>{}));source.onerror=()=>{$('connection').textContent='连接恢复中';$('connection').dataset.offline='true';};}
-async function start(){await refresh(true);conversationCache.enable();$('login').hidden=true;$('app').hidden=false;updateAttention();if(embed.active)stream();embed.ready();}
+const startupPanel=node('section','workspace-summary'),startupText=node('p'),startupRetry=button('重新读取工作室',()=>void start());startupPanel.setAttribute('role','status');startupPanel.append(startupText,startupRetry);document.querySelector('#app main').prepend(startupPanel);
+startup=createStudioStartup({load:()=>refresh(true),show:()=>{$('login').hidden=true;$('app').hidden=false;startupPanel.hidden=false;startupText.textContent='正在读取工作室数据…';startupRetry.disabled=true;render();},ready:()=>embed.ready(),success:()=>{studioStarted=true;startupPanel.hidden=true;conversationCache.enable();updateAttention();if(embed.active)stream();},error:(e,count,retry)=>{startupPanel.hidden=false;startupText.textContent='工作室数据读取失败：'+e.message+'（'+count+'/5）'+(retry?'，一分钟后自动重试。':'，可点击重新读取。');startupRetry.disabled=false;}});
+function start(){return startup.start();}
 $('login-form').onsubmit=async e=>{e.preventDefault();$('login-error').textContent='';try{await api('login',{token:$('token').value});$('token').value='';await start();}catch(e){$('login-error').textContent=e.message;}};
-setInterval(()=>{if(embed.active&&!$('app').hidden&&!document.hidden)void refresh().catch(()=>{});},5000);
-document.addEventListener('visibilitychange',()=>{if(embed.active&&!document.hidden&&!$('app').hidden)void refresh().catch(()=>{});});
+setInterval(()=>{if(studioStarted&&embed.active&&!$('app').hidden&&!document.hidden)void refresh().catch(()=>{});},5000);
+document.addEventListener('visibilitychange',()=>{if(studioStarted&&embed.active&&!document.hidden&&!$('app').hidden)void refresh().catch(()=>{});});
 void start().catch(e=>{if($('login').hidden)notify(e.message);});

@@ -2,10 +2,10 @@
 import {setupStudioSidebar} from './studio-sidebar.js';
 export function workspaceRoute(value){const url=new URL(value,'http://relay.local');return {view:url.pathname==='/studio'?'studio':'sessions',sessionId:url.searchParams.get('sessionId')};}
 export function setupWorkspaceShell({getState,selectSession,getSelected,drawer,onView}){
-  const $=id=>document.getElementById(id),frame=$('studio-frame');let view='sessions',ready=false,studioReady=false,sessionScroll=0;
+  const $=id=>document.getElementById(id),frame=$('studio-frame');let view='sessions',ready=false,studioReady=false,sessionScroll=0,loadTimer;
   const studioSidebar=setupStudioSidebar($('studio-sidebar'),command=>{frame.contentWindow?.postMessage({type:'relay-studio-command',...command},location.origin);if(command.command!=='project')drawer.close();});
   function sendActive(){frame.contentWindow?.postMessage({type:'relay-workspace-active',active:view==='studio'},location.origin);}
-  function loadStudio(){if(!ready||$('workspace').hidden||frame.hasAttribute('src'))return;studioReady=false;$('studio-loading').hidden=false;frame.src='/studio?embedded=1';}
+  function loadStudio(){if(!ready||$('workspace').hidden||frame.hasAttribute('src'))return;studioReady=false;const loading=$('studio-loading');loading.textContent='正在打开工作室…';loading.hidden=false;frame.src='/studio?embedded=1';clearTimeout(loadTimer);loadTimer=setTimeout(()=>{if(studioReady)return;loading.textContent='工作室暂未就绪，制作任务仍在后台保留。';const retry=document.createElement('button');retry.type='button';retry.textContent='重新连接工作室';retry.onclick=()=>{frame.removeAttribute('src');loadStudio();};loading.append(retry);},20000);loadTimer?.unref?.();}
   function show(next,{push=true,sessionId}={}){
     const changed=view!==next;if(changed&&view==='sessions')sessionScroll=$('timeline').scrollTop;
     view=next;$('session-view').hidden=view!=='sessions';$('studio-view').hidden=view!=='studio';$('workspace').dataset.view=view;
@@ -23,7 +23,8 @@ export function setupWorkspaceShell({getState,selectSession,getSelected,drawer,o
   async function route(value,{push=true}={}){const target=workspaceRoute(value);show(target.view,{push,sessionId:target.sessionId});if(target.view==='sessions'&&target.sessionId&&getSelected()?.id!==target.sessionId){const session=getState().sessions.find(s=>s.id===target.sessionId);if(session)await selectSession(session);}}
   document.querySelector('#sidebar .app-nav').addEventListener('click',e=>{const a=e.target.closest('a');if(!a||e.button||e.metaKey||e.ctrlKey||e.shiftKey||e.altKey)return;e.preventDefault();void route(a.href);});
   window.addEventListener('popstate',()=>void route(location.href,{push:false}));
-  window.addEventListener('message',e=>{if(e.origin!==location.origin||e.source!==frame.contentWindow)return;if(e.data?.type==='relay-studio-ready'){studioReady=true;$('studio-loading').hidden=true;sendActive();}if(e.data?.type==='relay-studio-progress')studioSidebar.update(e.data.progress);if(e.data?.type==='relay-open-session'&&typeof e.data.sessionId==='string')void route('/?sessionId='+encodeURIComponent(e.data.sessionId));});
+  window.addEventListener('message',e=>{if(e.origin!==location.origin||e.source!==frame.contentWindow)return;if(e.data?.type==='relay-studio-ready'){studioReady=true;clearTimeout(loadTimer);$('studio-loading').hidden=true;sendActive();}if(e.data?.type==='relay-studio-progress')studioSidebar.update(e.data.progress);if(e.data?.type==='relay-open-session'&&typeof e.data.sessionId==='string')void route('/?sessionId='+encodeURIComponent(e.data.sessionId));});
+  frame.addEventListener?.('load',()=>{if(frame.hasAttribute('src')&&!studioReady)frame.contentWindow?.postMessage({type:'relay-studio-probe'},location.origin);});
   // Same-origin child reads the existing snapshot instead of downloading it again.
   window.relayWorkspace=Object.freeze({getState,connectDrawer:win=>drawer.connect(win),get active(){return view==='studio';}});
   return {get view(){return view;},show,reset(){studioSidebar.reset();},async start(){ready=true;await route(location.href,{push:false});if(window.requestIdleCallback)window.requestIdleCallback(loadStudio,{timeout:1800});else setTimeout(loadStudio,800);},refreshStudio(){if(studioReady)frame.contentWindow.postMessage({type:'relay-studio-refresh'},location.origin);}};
@@ -35,11 +36,11 @@ export function prepareStudioEmbed(onActive,onRefresh,onCommand){
   const parent=window.parent,shared=parent.relayWorkspace;
   document.documentElement.classList.add('studio-embedded');
   if(parent.relayStudioDesktop)window.relayStudioDesktop=parent.relayStudioDesktop;
-  shared?.connectDrawer(window);let active=shared?.active??true;
+  shared?.connectDrawer(window);let active=shared?.active??true,uiReady=false;
   document.addEventListener('click',e=>{const a=e.target.closest('a[href]');if(!a||e.button||e.metaKey||e.ctrlKey||e.shiftKey||e.altKey||a.target||a.download)return;const url=new URL(a.href,location.href);if(url.origin===location.origin&&url.pathname==='/'&&url.searchParams.has('sessionId')){e.preventDefault();parent.postMessage({type:'relay-open-session',sessionId:url.searchParams.get('sessionId')},location.origin);}});
-  window.addEventListener('message',e=>{if(e.origin!==location.origin||e.source!==parent)return;if(e.data?.type==='relay-workspace-active'&&active!==!!e.data.active){active=!!e.data.active;onActive(active);}if(e.data?.type==='relay-studio-refresh')onRefresh();if(e.data?.type==='relay-studio-command')onCommand?.(e.data);});
+  window.addEventListener('message',e=>{if(e.origin!==location.origin||e.source!==parent)return;if(e.data?.type==='relay-studio-probe'&&uiReady)parent.postMessage({type:'relay-studio-ready'},location.origin);if(e.data?.type==='relay-workspace-active'&&active!==!!e.data.active){active=!!e.data.active;onActive(active);}if(e.data?.type==='relay-studio-refresh')onRefresh();if(e.data?.type==='relay-studio-command')onCommand?.(e.data);});
   // storage events also reach the retained studio when the parent changes theme.
   const syncTheme=()=>{for(const key of ['theme','themeMode'])document.documentElement.dataset[key]=parent.document.documentElement.dataset[key];};
   new MutationObserver(syncTheme).observe(parent.document.documentElement,{attributes:true,attributeFilter:['data-theme','data-theme-mode']});syncTheme();
-  return {get active(){return active;},state:()=>shared?.getState(),ready:()=>parent.postMessage({type:'relay-studio-ready'},location.origin),sidebar:progress=>parent.postMessage({type:'relay-studio-progress',progress},location.origin)};
+  return {get active(){return active;},state:()=>shared?.getState(),ready:()=>{uiReady=true;parent.postMessage({type:'relay-studio-ready'},location.origin);},sidebar:progress=>parent.postMessage({type:'relay-studio-progress',progress},location.origin)};
 }

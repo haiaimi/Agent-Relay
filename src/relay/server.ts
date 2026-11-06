@@ -1,3 +1,4 @@
+import {studioSnapshot} from './studio-snapshot.js';
 import {StudioMainline} from './studio-mainline.js';
 import {StudioPlaytests} from './studio-playtests.js';
 import {QuestionState} from './question-state.js';
@@ -35,6 +36,7 @@ const staticFiles: Record<string,[string,string]> = {
   '/studio-sidebar.js':['studio-sidebar.js','text/javascript; charset=utf-8'],
   '/studio-playtests.js':['studio-playtests.js','text/javascript; charset=utf-8'],
   '/studio-mainline.js':['studio-mainline.js','text/javascript; charset=utf-8'],
+  '/studio-startup.js':['studio-startup.js','text/javascript; charset=utf-8'],
   '/studio-stage-guide.js':['studio-stage-guide.js','text/javascript; charset=utf-8'],
   '/studio-attention.js':['studio-attention.js','text/javascript; charset=utf-8'],
   '/studio-api.js':['studio-api.js','text/javascript; charset=utf-8'],
@@ -168,6 +170,7 @@ export function createRelay(options: Options) {
   const mainline=new StudioMainline(store,studio,remote,host=>bridges.get(host)?.readyState===WebSocket.OPEN,()=>emit('studio',{}));
   const playtests=new StudioPlaytests(store,studio,remote,host=>launcherBridges.get(host)?.readyState===WebSocket.OPEN,()=>emit('studio',{}));
   const brains=new Brainstorms(store,studio,remote,host=>bridges.get(host)?.readyState===WebSocket.OPEN,()=>emit('studio',{}),files,media);
+  const sendStudioSnapshot=studioSnapshot();
   const server=createServer(async(req,res)=>{
     res.setHeader('Cache-Control','no-store'); res.setHeader('X-Content-Type-Options','nosniff');
     res.setHeader('Referrer-Policy','no-referrer'); res.setHeader('X-Frame-Options','DENY');
@@ -202,9 +205,7 @@ export function createRelay(options: Options) {
       }
       if(!auth(req)) return json(res,401,{error:'请先登录'});
       if(req.method==='GET'&&url.pathname==='/api/studio'){
-        const state=studio.state(),text=JSON.stringify({...state,features:{...state.features,repairVersion:uiRevision},brainstorms:brains.list()}),etag='"'+createHash('sha256').update(text).digest('hex')+'"';res.setHeader('ETag',etag);
-        if(req.headers['if-none-match']?.split(',').some(value=>value.trim()==='*'||value.trim().replace(/^W\//,'')===etag)){res.writeHead(304);return res.end();}
-        res.writeHead(200,{'Content-Type':'application/json; charset=utf-8'});return res.end(text);
+        const state=studio.state(),text=JSON.stringify({...state,features:{...state.features,repairVersion:uiRevision},brainstorms:brains.list()});return await sendStudioSnapshot(req,res,text);
       }
       if(req.method==='GET'&&url.pathname==='/api/studio/attention')return json(res,200,attention.read(url.searchParams.get('runId')??'',url.searchParams.get('refresh')==='1'));
       if(req.method==='GET'&&url.pathname==='/api/studio/repairs')return json(res,200,repairs.state(url.searchParams.get('runId')??'',url.searchParams.get('taskId')||undefined));
@@ -231,7 +232,7 @@ export function createRelay(options: Options) {
       if(['GET','HEAD'].includes(req.method??'')&&url.pathname==='/api/studio/video'){const target=studio.visualArtifact(url.searchParams.get('runId')??'',url.searchParams.get('taskId')??'',Number(url.searchParams.get('index')??'-1'),'video');try{await streamStudioVideo(req,res,target,remote);}catch(error){if(res.headersSent)res.destroy();else throw error;}return;}
       if(req.method==='GET'&&url.pathname==='/api/studio/artifact'){
         const target=studio.visualArtifact(url.searchParams.get('runId')??'',url.searchParams.get('taskId')??'',Number(url.searchParams.get('index')??'-1'));
-        const run=studio.runs().find(r=>r.id===url.searchParams.get('runId'))!,task=run.tasks.find(t=>t.id===url.searchParams.get('taskId'))!,isPreview=url.searchParams.get('preview')==='1';
+        const run=studio.runs().find(r=>r.id===url.searchParams.get('runId'))!,task=[run.planner,...run.tasks,...run.delivery?[run.delivery]:[]].find(t=>t.id===url.searchParams.get('taskId'))!,isPreview=url.searchParams.get('preview')==='1';
         const key=JSON.stringify([run.id,task.id,task.actionId,task.finishedAt,run.tasks.find(t=>t.kind==='visual-review')?.reviewId,target.sessionId,target.path]);
         const image=await studioPreviews.get(key,target.sessionId,async()=>{
           let value:{payload:any;sha256:string}|undefined;
