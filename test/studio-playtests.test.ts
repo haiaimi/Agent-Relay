@@ -64,7 +64,20 @@ test('launcher companion cannot replace the main bridge, publish sessions or acc
   const login=await fetch(base+'/api/login',{method:'POST',headers:{Origin:base,'Content-Type':'application/json'},body:JSON.stringify({token})}),cookie=login.headers.get('set-cookie')!.split(';')[0];
   const payload={id:randomUUID(),type:'studio-launch',sessionId:'h:s',workspaceId:randomUUID(),launch:{op:'inspect',target:{id:'f',kind:'functional',title:'f',script:'run.ps1',cwd:'.',scene:'test',controls:''}}};
   const response=await fetch(base+'/api/actions',{method:'POST',headers:{Origin:base,Cookie:cookie,'Content-Type':'application/json'},body:JSON.stringify(payload)});assert.equal(response.status,400);
-  launcher.send(JSON.stringify({type:'sessions',sessions:[]}));await once(launcher,'close');assert.equal(main.readyState,WebSocket.OPEN);assert.equal(app.store.hosts()[0].capabilities?.studioLaunch,false);
+  launcher.send(JSON.stringify({type:'sessions',sessions:[]}));await once(launcher,'close');assert.equal(main.readyState,WebSocket.OPEN);for(let n=0;n<100&&app.store.hosts()[0].capabilities?.studioLaunch!==false;n++)await pause(10);assert.equal(app.store.hosts()[0].capabilities?.studioLaunch,false);
   assert.equal((await fetch(base+'/studio-playtests.js')).status,200);
  }finally{launcher?.terminate();main?.terminate();await app.close();rmSync(dir,{recursive:true,force:true});}
+});
+
+
+test('relay shutdown drains companion disconnect handlers before closing the database',async()=>{
+ const dir=mkdtempSync(join(tmpdir(),'launcher-shutdown-')),token='phone-'+randomUUID(),bridge='bridge-'+randomUUID(),app=createRelay({dataDir:dir,phoneToken:token,bridgeToken:bridge});
+ app.server.listen(0,'127.0.0.1');await once(app.server,'listening');const url='ws://127.0.0.1:'+(app.server.address() as any).port+'/bridge';
+ let main:WebSocket|undefined,launcher:WebSocket|undefined,closed=false;
+ try{
+  main=new WebSocket(url,{headers:{Authorization:'Bearer '+bridge}});await once(main,'open');main.send(JSON.stringify({type:'hello',host:{id:'shutdown-host',name:'main',projects:[]}}));await once(main,'message');
+  launcher=new WebSocket(url,{headers:{Authorization:'Bearer '+bridge}});await once(launcher,'open');launcher.send(JSON.stringify({type:'hello',host:{id:'shutdown-host',name:'launcher',service:'launcher',projects:[]}}));await once(launcher,'message');
+  const closeStore=app.store.close.bind(app.store);app.store.close=()=>{assert.equal(app.store.hosts()[0].capabilities?.studioLaunch,false,'disconnect state must be persisted while the store is open');closeStore();};
+  const disconnected=Promise.all([once(main,'close'),once(launcher,'close')]);await app.close();closed=true;await disconnected;
+ }finally{main?.terminate();launcher?.terminate();if(!closed)await app.close();rmSync(dir,{recursive:true,force:true});}
 });
