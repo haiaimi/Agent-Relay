@@ -72,6 +72,9 @@ export class StudioRepository {
     if(fetch)await fetchRepository(root);let archive=await localJson(repo,archivePath(w.runId));validateArchive(archive);const identity=await repositoryIdentity(root);if(identity?.id&&identity.id!==archive.projectId){await this.save(root,repo,w,archive);archive=await localJson(repo,archivePath(w.runId));validateArchive(archive);}
     const remoteHead=await refHash(root,'refs/remotes/origin/'+archive.branch),main=await defaultBranch(root),mainHead=await refHash(root,'refs/remotes/origin/'+main)||await refHash(root,'refs/heads/'+main);
     const remote=remoteHead?await gitJson(root,remoteHead,archivePath(w.runId)):undefined;if(remote)validateArchive(remote);
+    const files:{path:string;bytes:number;deleted:boolean;hash:string}[]=[],omitted:string[]=[];
+    // Cancelled work carries its current status/context, not its abandoned asset history.
+    if(archive.run.status!=='cancelled'){
     const diff=(await repositoryGit(repo,['diff',remoteHead||'HEAD','--name-only','-z','--no-ext-diff','--ignore-submodules=none'])).split('\0').filter(Boolean),untracked=(await repositoryGit(repo,['ls-files','--others','--exclude-standard','-z'])).split('\0').filter(Boolean);
     const stages=(await repositoryGit(repo,['ls-files','--stage','-z'])).split('\0'),tracked=new Set(stages.map(p=>p.slice(p.indexOf('\t')+1))),modules=new Set(stages.filter(p=>p.startsWith('160000 ')).map(p=>p.slice(p.indexOf('\t')+1)));
     const current=[archive.run.planner,...archive.run.tasks,...archive.run.delivery?[archive.run.delivery]:[]],design=new Set<string>();
@@ -79,7 +82,7 @@ export class StudioRepository {
     const allowed=(p:string)=>repositoryFilePolicy(p)||design.has(p)&&repositoryFilePolicy(p.replace(/\.(png|jpe?g|webp|gif)$/i,'.md'));
     const formal=current.flatMap(t=>(t.artifacts??[]).map((a:any)=>relative(repo,resolve(w.project.path,a.path)).replaceAll('\\','/'))).filter(p=>allowed(p)&&existsSync(join(repo,p))),declared=new Set(formal),groups=new Set<string>(),documents:string[]=[],sources:string[]=[],visited=new Set<string>();
     const projectRoot=existsSync(join(w.project.path,'project.godot'))?w.project.path:existsSync(join(w.project.path,'project','project.godot'))?join(w.project.path,'project'):w.project.path;
-    const addGroup=(path:string,whole=true)=>{if(!/(^|\/)assets\//.test(path))return;const version=path.match(/^(.*?\/v\d+)(?:\/|$)/)?.[1],parent=dirname(path).replaceAll('\\','/'),scope=parent.replace(/^.*?(?:^|\/)assets\/?/,'').split('/').filter(Boolean);groups.add(version??(whole&&scope.length>=2?parent:path));};
+    const addGroup=(path:string,whole=true)=>{if(!/(^|\/)assets\//.test(path))return;const version=path.match(/^(.*?\/v\d+)(?:\/|$)/)?.[1],parent=dirname(path).replaceAll('\\','/'),scope=parent.replace(/^.*?(?:^|\/)assets\/?/,'').split('/').filter(Boolean);groups.add(whole?(version??(scope.length>=2?parent:path)):path);};
     for(const path of formal){if((await lstat(join(repo,path))).isDirectory())groups.add(path);else{addGroup(path);sources.push(path);}}
     for(const path of [...diff,...untracked])if(repositoryFilePolicy(path)&&!/(^|\/)(assets|\.studio)\//.test(path)&&/\.(gd|tscn|tres|godot|ps1|sh|py|js|json)$/i.test(path))sources.push(path);
     const runtime=[archive.run.planner,...archive.run.tasks,...archive.run.delivery?[archive.run.delivery]:[]].some(t=>t.launchers?.length||['implementation','assembly','integration','functional-test'].includes(t.stage));
@@ -93,10 +96,10 @@ export class StudioRepository {
         for(const ref of refs)if(inside(repo,ref)&&existsSync(ref)&&(await lstat(ref)).isFile()){const p=relative(repo,ref).replaceAll('\\','/');if(repositoryFilePolicy(p)&&!processAsset(p)){declared.add(p);documents.push(p);addGroup(p,false);if(/\.(json|gltf|gd|tscn|tres|gdshader|glsl|glslinc)$/i.test(p))sources.push(p);}}
       }
     }
-    const candidates=[...new Set([...diff,...untracked,...documents,...formal])].sort(),files:{path:string;bytes:number;deleted:boolean;hash:string}[]=[],omitted:string[]=[],blobs=new Map<string,string>();
+    const candidates=[...new Set([...diff,...untracked,...documents,...formal])].sort(),blobs=new Map<string,string>();
     if(remoteHead)for(const entry of (await repositoryGit(repo,['ls-tree','-r','-z',remoteHead])).split('\0')){const tab=entry.indexOf('\t');if(tab>=0)blobs.set(entry.slice(tab+1),entry.slice(0,tab).split(' ')[2]);}
     const rootReal=await realpath(repo);
-    for(const path of candidates){if(modules.has(path)){omitted.push(path+'（子模块改动需先单独提交并推送，当前只同步需求与顶层工程）');continue;}if(!allowed(path)){omitted.push(path);continue;}
+    for(const path of candidates){if(modules.has(path)){omitted.push(path+'（子模块改动需先单独提交并推送，当前只同步需求与顶层工程）');continue;}if(!allowed(path)||path.startsWith('.studio/')&&processAsset(path)){omitted.push(path);continue;}
       if(!tracked.has(path)&&(/(^|\/)assets\//.test(path)&&(!declared.has(path)&&![...groups].some(g=>path===g||path.startsWith(g+'/'))||processAsset(path))||path.startsWith('.studio/')&&!declared.has(path))){omitted.push(path+'（非当前交付或运行依赖，保留本机）');continue;}
       const file=resolve(repo,path);if(!existsSync(file)){files.push({path,bytes:0,deleted:true,hash:'deleted'});continue;}
       const st=await lstat(file);if(st.isDirectory())continue;if(!st.isFile()||!inside(rootReal,await realpath(file)))throw Error('提交文件包含符号链接或子模块，请先单独同步：'+path);
@@ -104,6 +107,7 @@ export class StudioRepository {
       if(st.size>25*1024*1024){omitted.push(path+'（超过 25 MB，请配置 LFS 后单独同步）');continue;}
       const bytes=await readFile(file),blob=createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex');if(blobs.get(path)===blob)continue;
       files.push({path,bytes:st.size,deleted:false,hash:createHash('sha256').update(bytes).digest('hex')});
+    }
     }
     const head=await refHash(repo,'HEAD'),localHash=archiveHash(archive),remoteHash=remote?archiveHash(remote):null;
     const token=archiveHash({head,remoteHead,mainHead,localHash,files});
