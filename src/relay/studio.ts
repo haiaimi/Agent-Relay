@@ -1,4 +1,4 @@
-import {deferredChecks,followupInstructions,type TaskFollowup,type DeferredCheck} from './studio-followups.js';
+import {blockerSignature,repeatedFailure,deferredChecks,followupInstructions,type TaskFollowup,type DeferredCheck} from './studio-followups.js';
 import {autonomyInstructions} from './studio-autonomy.js';
 import {withShowcase,videoPath} from './studio-showcase.js';
 import {normalizeProductionFlow,productionFlowInstructions,productionRoleIds,ProductionPlanError} from './studio-flow.js';
@@ -35,7 +35,7 @@ type TaskState='queued'|'starting'|'running'|'done'|'blocked'|'skipped'|'cancell
 interface TaskSkip {at:number;reason:string;previousStatus:'blocked';summary?:string;error?:string;blockers?:StudioBlocker[]}
 // A producer waiver releases dependencies; it never changes the recorded verification result.
 const released=(t:Task)=>t.status==='done'||t.status==='skipped'&&!!t.skip;
-export interface Task {autoFollowup?:TaskFollowup;deferred?:DeferredCheck[]}
+export interface Task {remediationFor?:{taskId:string;blockerKey:string;sourceActionId:string};autoFollowup?:TaskFollowup;deferred?:DeferredCheck[]}
 export interface Task {skip?:TaskSkip;planRepairs?:number;showcase?:boolean}
 export interface Task {recovery?:StudioRecovery}
 export interface Task {preflightRetry?:PreflightRetry}
@@ -356,13 +356,27 @@ export class Studio {
       r.paused=false;this.saveRun(r,'制作人跳过并继续：'+task.title+'\n原因：'+reason+'\n原阻断与验证结果保留，交给后续 QA 核查。',task);void this.tick();return this.run(r.id);
     }
     if(v.op==='upgrade-scene-flow'){const pending=this.flowUpgrades.get(r.id);if(pending)return pending;const job=this.upgradeScene(r,p).finally(()=>this.flowUpgrades.delete(r.id));this.flowUpgrades.set(r.id,job);return job;}
-    if(v.op==='recheck-task'){
+    if(v.op==='recheck-task'||v.op==='collaborate-task'){
       if(v.automatic&&(r.paused||r.autoAnswerQuestions===false||task?.actionId!==v.expectedActionId||(task?.finishedAt??null)!==v.expectedFinishedAt||(task?.checkpoint?.at??null)!==v.expectedCheckpointAt))throw Error('自动补做条件或本轮执行记录已变化，未重复投递');
       if(!task||task.kind||task.status!=='blocked'||!task.sessionId)throw Error('请选择已阻断且已绑定会话的职能任务');
       if(!this.online(p.hostId)||!this.dependenciesReady(r,task))throw Error('请先完成前置任务、制作人审批并确认电脑在线');
       const session=this.store.getSession(task.sessionId),receipt=task.actionId?this.store.db.prepare('SELECT result FROM actions WHERE id=?').get(task.actionId):undefined;
       if(!session||session.hostId!==p.hostId||session.projectId!==this.execution(r).id||!['idle','failed','interrupted'].includes(session.status)||session.pendingCount||receipt&&!receipt.result)throw Error('会话仍忙或投递结果未确认，不能重复发送复核');
       if(this.chatBusy(r)||this.allTasks(r).some(t=>['starting','running'].includes(t.status)))throw Error('请等待当前任务和角色对话结束后复核');
+      if(v.op==='collaborate-task'){
+        if(v.automatic!==true||!repeatedFailure(task)||v.blockerKey!==blockerSignature(task)||task.remediationFor||task.role==='engineering'||!['implementation','integration'].includes(task.stage??'')||r.workflow?.selection&&!r.workflow.selection.stages.includes(task.stage as any)||!p.roles.some(a=>a.role==='engineering'&&a.enabled))throw Error('当前问题不满足所选阶段内的程序协作条件');
+        let repair=r.tasks.find(t=>t.remediationFor?.taskId===task.id&&t.remediationFor.blockerKey===v.blockerKey);
+        if(repair?.remediationFor?.sourceActionId===task.actionId)return r;
+        const brief='这是当前制作阶段内部的程序协作修复，不是执行后续完整验收或新增制作阶段。原任务 '+task.id+' 连续出现相同阻断：'+JSON.stringify(task.blockers)+'\n先读取原任务现有报告与候选，核对当前程序和材质实际采样路径。逐条对照制作人原需求与原任务验收：区分“实际检查并报告观感/已知限制”和“必须达到硬性通过标准”，不能自行把观察项扩大成新的硬门禁，也不能把场景接入无限扩大成整个渲染器研究。最终场景视觉交给已配置的制作人场景审批，而不是新增一个技术审批。仍属本轮必需的真实质量失败必须修复，不伪造通过。区分原需求与 Agent 自行扩大的验收；针对真实未完成目标提出不同于已失败候选的可验证假设，实际实施最小修复并用真实入口和目标镜头验证。允许在本需求独立副本内协调必要的程序、着色器、当前场景适配和材质修复，不能把修复推给依赖本任务完成的后续任务。Agent 自行编写的旧文件分工可在此子任务内调整，原制作人明确限制仍有效。保留源工程、默认预设、既定玩法、已选视觉与审批，禁止修改源目录、增加未选阶段或伪造通过。失败候选可撤回但保留证据，不能仅产出同一份诊断建议。需要内部讨论自行完成，不另问制作人是否允许继续修复。\n原任务：'+task.title+'\n验收标准：'+task.acceptance+'\n上轮摘要：'+(task.summary??task.error??'')+'\n最近交付：'+JSON.stringify(task.artifacts??[]);
+        if(!repair){
+          const id='studio-collab-'+createHash('sha256').update(task.id+'|'+v.blockerKey).digest('hex').slice(0,12);
+          repair={id,title:'程序协作修复 · '+task.title,role:'engineering',stage:task.stage,brief:brief.slice(0,12000),acceptance:'给出针对当前阻断的实际修复、变更清单、真实样张和验证；只在真实修复完成时 done，不能把诊断或技术指标通过等同画质通过。',dependencies:[...task.dependencies],status:'queued',remediationFor:{taskId:task.id,blockerKey:v.blockerKey,sourceActionId:task.actionId!}};
+          r.tasks.splice(r.tasks.indexOf(task),0,repair);task.dependencies.push(repair.id);
+        }else{
+          repair.attempts=[...(repair.attempts??[]),{sessionId:repair.sessionId,output:repair.output,at:Date.now()}];repair.resumeSessionId=repair.sessionId;repair.status='queued';repair.actionId=undefined;repair.finishedAt=undefined;repair.error=undefined;repair.brief=brief.slice(0,12000);repair.remediationFor!.sourceActionId=task.actionId!;
+        }
+        this.saveRun(r,'连续同类阻断转程序协作：'+repair.id+'；原任务等待实际修复后验证，已完成任务和制作人审批保留',task);void this.tick();return this.run(r.id);
+      }
       task.attempts=[...(task.attempts??[]),{sessionId:task.sessionId,output:task.output,at:Date.now()}];
       task.resumeSessionId=task.sessionId;task.status='queued';task.actionId=undefined;task.error=undefined;task.finishedAt=undefined;
       task.feedback=(task===r.planner?'计划校验修正：沿用原会话的工程分析，只修正任务拆解。严格遵守制作人所选阶段、职能对应和审批设置；删除未选阶段的任务并修正依赖，不能把场景组装或集成校验改标为资产生产来绕过范围。重新输出完整 STUDIO_PLAN，不执行制作、不修改工程。':(v.automatic?'自动补做：按最新制作人范围处理。必需项失败自行修复；已明确延期项引用原指引记录 deferred 并保留证据，不再作为当前门禁，不声称通过。':'技术阻断复核：')+'先读取团队最新工具配置和原检查报告，在同一工作副本与原会话只补做未完成步骤。区分不适用项与硬阻断；核对最新上游程序交付，不以旧规格快照覆盖合法更新。本轮仍必需且未解决的质量或构建来源门禁保持 blocked，已按制作人范围延期的项不能重新加作当前门禁。')+(v.feedback?text(v.feedback,2000,'复核说明'):'');

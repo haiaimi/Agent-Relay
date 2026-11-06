@@ -4,8 +4,18 @@ import type {Studio,StudioRun,Task,StudioProject} from './studio.js';
 import type {RelayStore} from './store.js';
 import type {Action} from '../shared/protocol.js';
 
-export interface TaskFollowup {phase:'scheduled'|'checking'|'queued'|'unavailable';round:number;nextAt?:number;note:string}
-interface Followup extends TaskFollowup {id:string;runId:string;taskId:string;sessionId:string;actionId:string;finishedAt:number;probes:number}
+export interface TaskFollowup {phase:'scheduled'|'checking'|'queued'|'unavailable'|'collaborating';round:number;nextAt?:number;note:string}
+interface Followup extends TaskFollowup {id:string;runId:string;taskId:string;sessionId:string;actionId:string;finishedAt:number;probes:number;loop?:{key:string;count:number};collaborationTaskId?:string}
+export function blockerSignature(t:Pick<Task,'blockers'>){return t.blockers?.length?t.blockers.map(b=>b.category+':'+b.code).sort().join('|'):'';}
+export function repeatedFailure(t:Task){
+  const key=blockerSignature(t);if(!key)return;
+  let count=1;
+  for(const attempt of [...t.attempts??[]].reverse()){
+    const matches=[...(attempt.output??'').matchAll(/```STUDIO_RESULT\s*([\s\S]*?)```/g)];
+    try{const v=JSON.parse(matches.at(-1)?.[1]??'');if(v.outcome!=='blocked'||blockerSignature(v)!==key)break;count++;}catch{break;}
+  }
+  return count>=3?{key,count}:undefined;
+}
 export interface DeferredCheck {code:string;details:string;basis:string}
 export function deferredChecks(value:unknown,run:StudioRun):DeferredCheck[]{
   if(value===undefined)return [];
@@ -61,6 +71,8 @@ export class StudioFollowups {
         const round=Number(rounds.n)+1,delay=round===1?3000:Math.min(900_000,60_000*2**Math.min(round-2,4));
         d={id,runId:run.id,taskId:task.id,sessionId:task.sessionId!,actionId:task.actionId!,finishedAt:(task.finishedAt??task.checkpoint!.at),phase:'scheduled',round,probes:0,nextAt:this.now()+delay,note:'未完成项将自动交回原 Agent；保留前置成果及所选审批'};this.save(d);
       }
+      const loop=repeatedFailure(task);
+      if(loop&&!d.loop){d.loop=loop;d.nextAt=this.now()+3000;d.note='连续 '+loop.count+' 轮同类阻断，自动调整修复分工与方案，不再只重复原检查';this.save(d);}
       if(d.phase==='queued'||(d.nextAt??0)>this.now())continue;
       if(d.phase==='unavailable')d.probes=0;d.phase='checking';d.probes++;this.save(d);this.busy.add(run.id);
       const job=this.resume(d);this.jobs.add(job);void job.catch(()=>{}).finally(()=>{this.jobs.delete(job);this.busy.delete(run.id);});
@@ -73,7 +85,16 @@ export class StudioFollowups {
       if(page.cached||!Array.isArray(page.questions)||!Number.isFinite(page.questionsAsOf))throw Error('原会话实时状态尚未确认');
       const run=this.studio.runs().find(r=>r.id===d.runId),task=run&&this.tasks(run).find(t=>t.id===d.taskId);
       if(this.closed||!run||!task||!this.eligible(run,task)||task.actionId!==d.actionId||(task.finishedAt??task.checkpoint?.at)!==d.finishedAt||task.sessionId!==d.sessionId||page.questions.some((q:any)=>['pending','unknown'].includes(q.status))){d.phase='scheduled';d.nextAt=this.now()+60_000;d.note='等待原会话、前置步骤或已有问题处理完成；不重复投递';this.save(d);return;}
-      const feedback=(task===run.planner?'只修正原 STUDIO_PLAN 的格式、阶段和依赖，不执行制作。':'在原工作副本补齐未完成部分，不能重跑已完成前置制作。')+'这是第 '+d.round+' 轮自动补做，不需要制作人另点继续。依据最新指引核对本轮范围；明确延期项引用原指引写 deferred，保留失败证据，不作为当前门禁，不声称通过。本轮仍必需的失败自行定位修复。'+(d.round>2?'不要原样重复失败检查；先定位根因、核对范围与工具，再换一种可验证的最小修复。':'')+'\n上轮未完成原因：'+(task.error??task.summary??'交付未完成').slice(-900);
+      const loop=repeatedFailure(task),partner=run.tasks.find(t=>t.remediationFor?.taskId===task.id&&t.remediationFor.blockerKey===loop?.key);
+      const sameRepair=partner?.remediationFor?.sourceActionId===d.actionId;
+      const canCollaborate=loop&&!task.remediationFor&&task.role!=='engineering'&&['implementation','integration'].includes(task.stage??'')&&(!run.workflow?.selection||run.workflow.selection.stages.includes(task.stage as any))&&project.roles.some(a=>a.role==='engineering'&&a.enabled);
+      if(canCollaborate&&!(sameRepair&&(partner?.status==='done'||partner?.status==='skipped'&&partner.skip))){
+        await this.studio.command({op:'collaborate-task',runId:run.id,taskId:task.id,automatic:true,blockerKey:loop!.key,expectedActionId:d.actionId,expectedFinishedAt:task.finishedAt??null,expectedCheckpointAt:task.checkpoint?.at??null});
+        d.collaborationTaskId=this.studio.runs().find(r=>r.id===run.id)?.tasks.find(t=>t.remediationFor?.taskId===task.id&&t.remediationFor.blockerKey===loop!.key)?.id;
+        d.phase='collaborating';d.nextAt=undefined;d.note='同类阻断已转程序协作修复；修复后返回原职能验证，后续审批保持不变';this.save(d);return;
+      }
+      const correction=loop?'连续 '+loop.count+' 轮同类失败，必须改变解决策略：先核对原验收是否被误扩展、已验证事实和失败候选，形成一个有依据的修复假设、最小产品改动及明确成功/失败判据；禁止仅重复诊断并把同一建议留给依赖自己的下游。'+(partner?.status==='done'?'程序协作修复已完成，先读取 '+partner.id+' 的实际改动与样张，只验证相关变化并收口。':''):'';
+      const feedback=(task===run.planner?'只修正原 STUDIO_PLAN 的格式、阶段和依赖，不执行制作。':'在原工作副本补齐未完成部分，不能重跑已完成前置制作。')+'这是第 '+d.round+' 轮自动补做，不需要制作人另点继续。依据最新指引核对本轮范围；明确延期项引用原指引写 deferred，保留失败证据，不作为当前门禁，不声称通过。本轮仍必需的失败自行定位修复。'+correction+'\n上轮未完成原因：'+(task.error??task.summary??'交付未完成').slice(-900);
       await this.studio.command({op:'recheck-task',runId:run.id,taskId:task.id,automatic:true,expectedActionId:d.actionId,expectedFinishedAt:task.finishedAt??null,expectedCheckpointAt:task.checkpoint?.at??null,feedback:feedback.slice(0,2000)});
       d.phase='queued';d.nextAt=undefined;d.note='已自动交回原 Agent 补做，沿用原会话和工作副本；真实失败记录保留';this.save(d);
     }catch(error){

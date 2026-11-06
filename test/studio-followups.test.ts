@@ -5,7 +5,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {RelayStore} from '../src/relay/store.js';
-import {StudioFollowups,deferredChecks} from '../src/relay/studio-followups.js';
+import {StudioFollowups,deferredChecks,repeatedFailure} from '../src/relay/studio-followups.js';
 
 function fixture(){
  const dir=mkdtempSync(join(tmpdir(),'studio-followup-')),store=new RelayStore(dir);let now=100_000,online=true,reads=0;
@@ -43,4 +43,20 @@ test('runtime failures resume automatically, while an explicit stop and model re
  const f=fixture();try{f.run.tasks[1].finishedAt=undefined;f.run.tasks[1].checkpoint={at:75_000,reason:'导出脚本抛出异常，已保存断点'};f.store.session({...f.store.getSession('h:one')!,status:'failed'});await f.tick();f.time(3000);await f.tick();assert.equal(f.commands.length,1);assert.equal(f.commands[0].expectedCheckpointAt,75_000);}finally{await f.close();}
  const stopped=fixture();try{const a={id:randomUUID(),type:'stop',sessionId:'h:one'};stopped.store.beginAction(a.id,'h',a);stopped.store.finishAction(a.id,{ok:true});await stopped.tick();stopped.time(3000);await stopped.tick();assert.equal(stopped.commands.length,0);}finally{await stopped.close();}
  const model=fixture();try{model.run.tasks[1].checkpoint={at:70_000,reason:'Selected model is at capacity'};await model.tick();model.time(3000);await model.tick();assert.equal(model.commands.length,0);}finally{await model.close();}
+});
+
+
+test('loop detection uses consecutive structured blocker identities, not round labels or historic unrelated errors',()=>{
+ const failure=(code:string)=>'```STUDIO_RESULT\n'+JSON.stringify({outcome:'blocked',blockers:[{category:'quality',code}]})+'\n```';
+ const t:any={blockers:[{category:'quality',code:'RGB'}],attempts:[{output:failure('OLD')},{output:failure('RGB')},{output:failure('RGB')}]};assert.deepEqual(repeatedFailure(t),{key:'quality:RGB',count:3});t.attempts.push({output:failure('DIFFERENT')});assert.equal(repeatedFailure(t),undefined);
+});
+
+test('repeated cross-role blockers hand off to engineering, without repeatedly dispatching the original owner',async()=>{
+ const f=fixture();try{
+  const t=f.run.tasks[1];t.role='techart';t.stage='integration';f.run.workflow.selection.stages=['integration'];t.blockers=[{category:'quality',code:'RGB'}];t.attempts=[0,1].map(()=>({output:'```STUDIO_RESULT\n'+JSON.stringify({outcome:'blocked',blockers:t.blockers})+'\n```'}));
+  const studio=(f.followups as any).studio;studio.projects=()=>[{id:'team',hostId:'h',roles:[{role:'engineering',enabled:true}]}];
+  studio.command=async(a:any)=>{f.commands.push(a);assert.equal(a.op,'collaborate-task');f.run.tasks.push({id:'repair-child',status:'running',dependencies:[],remediationFor:{taskId:t.id,blockerKey:a.blockerKey,sourceActionId:t.actionId}});t.dependencies.push('repair-child');};
+  await f.tick();f.time(3000);await f.tick();assert.equal(f.commands.length,1);assert.equal(f.commands[0].op,'collaborate-task');assert.equal(f.notes.at(-1).phase,'collaborating');assert.equal(t.status,'blocked');await f.restart();await f.tick();assert.equal(f.commands.length,1);
+  f.run.tasks.find((x:any)=>x.id==='repair-child').status='done';studio.command=async(a:any)=>{f.commands.push(a);assert.equal(a.op,'recheck-task');t.status='queued';};await f.tick();assert.equal(f.commands.length,2);assert.equal(f.commands[1].op,'recheck-task');
+ }finally{await f.close();}
 });

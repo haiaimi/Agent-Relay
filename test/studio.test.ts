@@ -787,3 +787,17 @@ test('autonomous repair resumes the exact original task and a scoped deferral un
   t=f.run().tasks[0];assert.equal(t.status,'done');assert.equal(t.deferred![0].code,'GI_AB');assert.match(t.checks![1],/FAIL/);assert.equal(f.run().tasks[1].status,'running');assert.match(f.actions.at(-1)!.text!,/本轮已按制作人范围延期/);assert.notEqual(f.run().status,'accepted');
  }finally{await followups?.close();await f.close();}
 });
+
+
+test('cross-role technical repair breaks a dependency deadlock without releasing verification or producer gates',async()=>{
+ const f=await fixture();try{
+  f.studio.createRun({workflow:'general',projectId:f.project.id,title:'程序协作',brief:'修复实际画面，保持既定审批',flowConfig:{template:'custom',stages:['integration'],approvals:{plan:false,design:false,visual:false,scene:true,final:true}}});await f.settle();
+  f.finish(f.run().planner,plan([{...task('art',[],'techart'),stage:'integration'},{...task('final-code',['art']),stage:'integration'}]));await f.settle();
+  let r=f.run(),t=r.tasks.find(x=>x.id==='art')!;const failure='```STUDIO_RESULT\n'+JSON.stringify({outcome:'blocked',summary:'RGB仍未通过，需要程序修复',blockers:[{category:'quality',code:'RGB',details:'实际画面失败',remedy:'局部修复程序接收链'}],checks:['FAIL'],artifacts:[]})+'\n```';
+  f.finish(t,failure);await f.settle();r=f.run();t=r.tasks.find(x=>x.id==='art')!;t.attempts=[{output:failure,at:1},{output:failure,at:2}];f.store.db.prepare('UPDATE studio_runs SET json=? WHERE id=?').run(JSON.stringify(r),r.id);
+  const request={op:'collaborate-task',runId:r.id,taskId:t.id,automatic:true,blockerKey:'quality:RGB',expectedActionId:t.actionId,expectedFinishedAt:t.finishedAt??null,expectedCheckpointAt:null};
+  await f.studio.command(request);await f.settle();r=f.run();const child=r.tasks.find(x=>x.remediationFor)!;assert.equal(child.role,'engineering');assert.equal(child.status,'running');assert.deepEqual(child.dependencies,[]);assert.equal(r.tasks.find(x=>x.id==='art')!.status,'blocked');assert.ok(r.tasks.find(x=>x.id==='art')!.dependencies.includes(child.id));assert.equal(r.tasks.find(x=>x.id==='final-code')!.status,'queued');assert.equal(r.workflow!.selection!.approvals.scene,true);assert.equal(r.tasks.find(x=>x.kind==='producer-review')!.status,'queued');
+  f.finish(child,result());await f.settle();await f.studio.command(request);assert.equal(f.run().tasks.filter(x=>x.remediationFor).length,1);
+  const parent=f.run().tasks.find(x=>x.id==='art')!;await f.studio.command({op:'recheck-task',runId:r.id,taskId:parent.id});await f.settle();assert.equal(f.run().tasks.find(x=>x.id==='art')!.sessionId,t.sessionId);assert.equal(f.run().tasks.find(x=>x.id==='art')!.status,'running');assert.match(f.actions.at(-1)!.text!,/程序协作修复/);assert.equal(f.run().tasks.find(x=>x.id==='final-code')!.status,'queued');
+ }finally{await f.close();}
+});
