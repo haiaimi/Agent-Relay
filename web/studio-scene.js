@@ -1,5 +1,5 @@
 const el=(tag,cls,text)=>{const n=document.createElement(tag);if(cls)n.className=cls;if(text!==undefined)n.textContent=text;return n;};
-export const sceneStageName=stage=>({requirements:'玩法与 LD 设计',prototype:'LD 设计（旧流程）',balance:'数值配置与难度',implementation:'程序实现玩法',concept:'原画与视觉方案','visual-review':'制作人视觉确认','design-review':'关卡设计审批','scene-review':'实机场景审批','asset-spec':'资产清单与规格',assets:'资产生产',assembly:'LA 正式场景搭建',integration:'布光、效果与程序集成',validation:'QA 验证'}[stage]||'');
+export const sceneStageName=stage=>({requirements:'玩法与 LD 设计',prototype:'LD 设计（旧流程）',balance:'数值配置与难度',implementation:'程序实现玩法','functional-test':'功能白模与操作验证',concept:'原画与视觉方案','visual-review':'制作人视觉确认','design-review':'关卡设计审批','scene-review':'实机场景审批','asset-spec':'资产清单与规格',assets:'资产生产',assembly:'LA 正式场景搭建',integration:'布光、效果与程序集成',validation:'QA 验证'}[stage]||'');
 const imagePath=path=>/\.(png|jpe?g|gif|webp)$/i.test(path);
 export function scenePanel(run,{command,openTask,feedbackFor,notify,fresh=false}){
   if(run.workflow?.kind!=='scene')return null;

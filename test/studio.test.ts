@@ -801,3 +801,24 @@ test('cross-role technical repair breaks a dependency deadlock without releasing
   const parent=f.run().tasks.find(x=>x.id==='art')!;await f.studio.command({op:'recheck-task',runId:r.id,taskId:parent.id});await f.settle();assert.equal(f.run().tasks.find(x=>x.id==='art')!.sessionId,t.sessionId);assert.equal(f.run().tasks.find(x=>x.id==='art')!.status,'running');assert.match(f.actions.at(-1)!.text!,/程序协作修复/);assert.equal(f.run().tasks.find(x=>x.id==='final-code')!.status,'queued');
  }finally{await f.close();}
 });
+
+
+test('functional whitebox stage reuses engineering and does not inject asset, lighting or producer-review work',async()=>{
+ const f=await fixture();try{
+  f.studio.createRun({workflow:'general',projectId:f.project.id,title:'3C',brief:'操作角色',flowConfig:{template:'custom',stages:['implementation','functional-test'],approvals:{plan:false,design:false,visual:false,scene:false,final:true}}});await f.settle();
+  f.finish(f.run().planner,plan([{...task('code'),stage:'implementation'}]));await f.settle();const functional=f.run().tasks.find(t=>t.stage==='functional-test')!;assert.equal(functional.role,'engineering');assert.ok(functional.dependencies.includes('code'));assert.match(functional.brief,/同一|复用/);assert.equal(f.run().tasks.some(t=>t.kind),false);assert.equal(f.run().tasks.some(t=>t.stage==='assets'||t.stage==='integration'),false);
+  f.finish(f.run().tasks.find(t=>t.id==='code'),result());await f.settle();assert.equal(f.run().tasks.find(t=>t.stage==='functional-test')!.status,'running');
+  f.finish(f.run().tasks.find(t=>t.stage==='functional-test'),result());await f.settle();assert.equal(f.run().tasks.find(t=>t.stage==='functional-test')!.status,'blocked');assert.match(f.run().tasks.find(t=>t.stage==='functional-test')!.error!,/真实启动入口/);
+ }finally{await f.close();}
+});
+
+test('adding functional validation waits for delivery, preserves completed 3C work and retains final acceptance',async()=>{
+ const f=await fixture();try{
+  f.studio.saveProject({...f.project,reviewPlan:false});f.studio.createRun({workflow:'general',projectId:f.project.id,title:'角色3C',brief:'现有控制',flowConfig:{template:'code',stages:['implementation'],approvals:{plan:false,design:false,visual:false,scene:false,final:true}}});await f.settle();f.finish(f.run().planner,plan([{...task('code'),stage:'implementation'}]));await f.settle();f.finish(f.run().tasks[0],result());await f.settle();
+  const previous=JSON.stringify(f.run().tasks),delivery=f.run().delivery!,sid=delivery.sessionId;
+  await f.studio.command({op:'add-functional-test',runId:f.run().id});await f.settle();assert.equal(f.run().functionalTestRequested,true);assert.equal(JSON.stringify(f.run().tasks),previous);assert.equal(f.run().delivery!.sessionId,sid);
+  f.finish(delivery,result());await f.settle();let r=f.run();assert.equal(r.status,'executing');assert.equal(r.deliveryHistory![0].sessionId,sid);assert.equal(JSON.stringify(r.tasks.slice(0,1)),previous);const t=r.tasks.find(t=>t.stage==='functional-test')!;assert.equal(t.status,'running');assert.equal(r.workflow!.selection!.approvals.final,true);
+  const n=f.actions.length;await f.studio.command({op:'add-functional-test',runId:r.id});await f.settle();assert.equal(f.actions.length,n);
+  f.finish(t,'```STUDIO_RESULT\n'+JSON.stringify({outcome:'done',summary:'真实白模操作完成，双入口就绪',artifacts:[{path:'Play.ps1',description:'启动脚本'}],checks:['实际白模角色与真实游戏启动验证'],launchers:[{id:'functional',kind:'functional',title:'白模',script:'Play.ps1',cwd:'.',scene:'res://tests/3c.tscn',controls:'实际操作'},{id:'game',kind:'game',title:'真实游戏',script:'Game.ps1',cwd:'.',scene:'res://game.tscn',controls:'实际操作'}]})+'\n```');await f.settle();r=f.run();assert.equal(r.tasks.find(t=>t.stage==='functional-test')!.launchers!.length,2);assert.equal(r.status,'delivery');f.finish(r.delivery,result());await f.settle();assert.equal(f.run().status,'review');assert.equal(f.run().deliveryHistory!.length,1);
+ }finally{await f.close();}
+});

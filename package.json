@@ -10,6 +10,7 @@
   "scripts": {
     "relay": "node --env-file-if-exists=.env --import tsx src/relay/main.ts",
     "bridge": "node --env-file-if-exists=.env --import tsx src/bridge/main.ts",
+    "launcher": "node --env-file-if-exists=.env --import tsx src/bridge/launcher-main.ts",
     "check": "tsc --noEmit",
     "build": "tsc",
     "test": "node --import tsx --test test/*.test.ts",

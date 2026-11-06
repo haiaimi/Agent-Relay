@@ -29,3 +29,5 @@ if (Test-Path -LiteralPath $relayStop) { Remove-Item -LiteralPath $relayStop }
 Start-ScheduledTask -TaskName $relayTaskName
 @{ taskName = $relayTaskName; configPath = $relayConfigFull; user = $relayUser } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $relayData 'background-service.json') -Encoding UTF8
 Write-Output "Agent Relay background service enabled: $relayTaskName"
+
+if (Test-Path -LiteralPath (Join-Path $relayRoot 'dist/bridge/launcher-main.js')) { & (Join-Path $PSScriptRoot 'install-launcher-service.ps1') -ConfigPath $relayConfigFull }

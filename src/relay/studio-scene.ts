@@ -1,10 +1,10 @@
 import {compileProductionFlow,requireProductionRoles,productionFlowInstructions,type ProductionFlow} from './studio-flow.js';
 import type {Task} from './studio.js';
 
-export type SceneStage='requirements'|'prototype'|'balance'|'implementation'|'concept'|'asset-spec'|'assets'|'assembly'|'integration'|'validation'|'visual-review'|'design-review'|'scene-review';
+export type SceneStage='requirements'|'prototype'|'balance'|'implementation'|'functional-test'|'concept'|'asset-spec'|'assets'|'assembly'|'integration'|'validation'|'visual-review'|'design-review'|'scene-review';
 export interface SceneWorkflow {selection?:ProductionFlow;version:1|2;kind:'general'|'scene';assetMode:'new'|'reuse';explicitGeneral?:boolean;reuseReason?:string;error?:string;upgradeRestorePaused?:boolean}
 export const VISUAL_GATE='studio-visual-review';
-export const sceneStages=new Set<string>(['requirements','prototype','balance','implementation','concept','asset-spec','assets','assembly','integration','validation']);
+export const sceneStages=new Set<string>(['requirements','prototype','balance','implementation','functional-test','concept','asset-spec','assets','assembly','integration','validation']);
 export const visualPath=(path:string)=>/\.(png|jpe?g|webp|gif)$/i.test(path);
 const sceneHint=/(场景|关卡|原画|场景美术|地图制作|scene|level design|environment art)/i;
 const sceneRole=(role:string)=>['concept','model','environment'].includes(role);
@@ -45,7 +45,7 @@ export function compileScenePlan(input:Task[],workflow:SceneWorkflow,roles:{role
   for(const t of tasks){
     if(t.stage==='prototype'&&['gameplay','level','systems','balance','engineering','qa'].includes(t.role))t.stage=t.role==='engineering'?'implementation':t.role==='balance'?'balance':t.role==='qa'?'validation':'requirements';
     t.stage??=t.role==='concept'?'concept':t.role==='model'?'assets':t.role==='environment'?'assembly':t.role==='gameplay'?'requirements':['level','systems'].includes(t.role)?'requirements':t.role==='balance'?'balance':t.role==='qa'?'validation':t.role==='engineering'&&beforeAssembly.has(t.id)?'implementation':'integration';
-    const allowed:Record<string,string[]>={requirements:['gameplay','level','systems'],prototype:['level'],balance:['balance'],implementation:['engineering'],concept:['concept'],'asset-spec':['concept','model','techart'],assets:['model'],assembly:['environment'],integration:['engineering','techart','ui','audio'],validation:['qa']};
+    const allowed:Record<string,string[]>={requirements:['gameplay','level','systems'],prototype:['level'],balance:['balance'],implementation:['engineering'],'functional-test':['engineering'],concept:['concept'],'asset-spec':['concept','model','techart'],assets:['model'],assembly:['environment'],integration:['engineering','techart','ui','audio'],validation:['qa']};
     if(!allowed[t.stage]?.includes(t.role))throw Error('职能与场景阶段不匹配：'+t.title+' / '+t.stage);
   }
   if(workflow.assetMode==='reuse'&&tasks.some(t=>t.stage==='assets'))throw Error('复用流程不能包含新资产生产；需要新资产时请选择新场景 / 新资产流程');
@@ -88,6 +88,7 @@ export function visualReferences(tasks:Task[],gate:Task){
   if(references.length>12)throw Error('本轮视觉确认最多 12 张图片，请统筹整理必要原画');return references;
 }
 export function sceneTaskInstructions(task:Task,workflow?:SceneWorkflow){
+  if(task.stage==='functional-test')return '\n当前是独立功能白模验证：复用真实角色、控制、相机和交互，不重做一套玩法。白模仅用于实际操控与功能测试，不制作正式场景，不追加原画或 GI 观感验收；正式游戏入口另行准确登记，不拿白模冒充正式关卡。\n';
   if(workflow?.selection)return '\n'+productionFlowInstructions(workflow.selection)+'\n当前阶段：'+(task.stage??'统筹规划')+'。只在本需求独立副本执行，保留已有实现和无关修改；测试实际加载内容与当前需求对应，不能以旧场景代替新关卡。\n';
   if(workflow?.kind!=='scene')return '';
   const restrictions:Partial<Record<SceneStage,string>>={requirements:'玩法策划与 LD 只读设计并形成文档、布局和验收规则，不另做一套玩法实现；功能代码交给程序在视觉确认后实现。',prototype:'仅补充 LD 设计文档与布局示意，不实现另一套玩法代码。',balance:'制作人已确认视觉；依据玩法与 LD 设计形成可复算的数值配置。',implementation:'制作人已确认视觉；程序在当前工程一次完成玩法实现，复用已有系统和已产生的代码，禁止另建第二套玩法原型或重复实现。',concept:'只制作 / 核对原画与视觉文件，不生产正式模型或搭建正式场景。图片必须实际存在于工作副本并列入 artifacts，最多 12 张。','asset-spec':'视觉已由制作人确认；只编写资产规格，不提前生产正式资产。',assets:'依据制作人确认的原画和资产清单生产，不擅自修改已确认视觉方向。',assembly:'使用已确认原画和已完成资产搭建正式场景。',integration:'在正式场景基础上复用已完成的玩法实现，只做接入、布光、效果和实际验证，不重新开发第二套玩法。'};
