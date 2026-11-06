@@ -388,8 +388,17 @@ export class Studio {
     if(v.op==='upgrade-scene-flow'){const pending=this.flowUpgrades.get(r.id);if(pending)return pending;const job=this.upgradeScene(r,p).finally(()=>this.flowUpgrades.delete(r.id));this.flowUpgrades.set(r.id,job);return job;}
     if(v.op==='recheck-task'||v.op==='collaborate-task'){
       if(v.automatic&&(r.paused||r.autoAnswerQuestions===false||task?.actionId!==v.expectedActionId||(task?.finishedAt??null)!==v.expectedFinishedAt||(task?.checkpoint?.at??null)!==v.expectedCheckpointAt))throw Error('自动补做条件或本轮执行记录已变化，未重复投递');
-      if(!task||task.kind||task.status!=='blocked'||!task.sessionId)throw Error('请选择已阻断且已绑定会话的职能任务');
+      if(!task||task.kind||task.status!=='blocked')throw Error('请选择已阻断的职能任务');
       if(!this.online(p.hostId)||!this.dependenciesReady(r,task))throw Error('请先完成前置任务、制作人审批并确认电脑在线');
+      if(!task.sessionId&&v.op==='recheck-task'&&!v.automatic&&r.repository?.imported&&task.migrationContext&&r.workspace?.status==='ready'){
+        if(this.chatBusy(r)||this.allTasks(r).some(t=>['starting','running'].includes(t.status)))throw Error('请等待当前任务和角色对话结束后继续');
+        task.attempts=[...(task.attempts??[]),{output:task.output,at:Date.now()}];
+        task.status='queued';task.actionId=undefined;task.error=undefined;task.finishedAt=undefined;task.checkpoint=undefined;task.recovery=undefined;task.autoFollowup=undefined;
+        task.feedback='Git 续做：核对当前工作副本，只处理未完成或未通过项；复用已完成前置成果及有效审批，保留原失败证据，不重做整套流程。'+(v.feedback?text(v.feedback,2000,'续做说明'):'');
+        r.status=task===r.planner?'planning':task===r.delivery?'delivery':'executing';r.paused=false;
+        this.saveRun(r,'制作人选择在此电脑继续本步骤：新建本机会话并携带 Git 上下文，已完成任务和审批保持不变',task);void this.tick();return this.run(r.id);
+      }
+      if(!task.sessionId)throw Error('请选择已绑定会话的任务，或先从仓库准备本机工作副本');
       const session=this.store.getSession(task.sessionId),receipt=task.actionId?this.store.db.prepare('SELECT result FROM actions WHERE id=?').get(task.actionId):undefined;
       if(!session||session.hostId!==p.hostId||session.projectId!==this.execution(r).id||!['idle','failed','interrupted'].includes(session.status)||session.pendingCount||receipt&&!receipt.result)throw Error('会话仍忙或投递结果未确认，不能重复发送复核');
       if(this.chatBusy(r)||this.allTasks(r).some(t=>['starting','running'].includes(t.status)))throw Error('请等待当前任务和角色对话结束后复核');

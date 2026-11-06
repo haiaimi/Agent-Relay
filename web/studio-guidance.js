@@ -1,5 +1,5 @@
 // Presentation only: recommendations do not approve, skip or change task state.
-export function taskGuidance(task,session,{online=true,syncError='',othersRunning=false,pendingDependencies=[],automatic=false}={}){
+export function taskGuidance(task,session,{online=true,syncError='',othersRunning=false,pendingDependencies=[],automatic=false,repositoryImported=false}={}){
  const reason=task.error||task.checkpoint?.reason||task.blockers?.map(b=>b.details).filter(Boolean).join('\n')||'';
  const result=(label,next,action='',button='',why=reason)=>({label,why,next,action,button});
  if(syncError)return result('状态暂未同步','现有记录已保留。先核对最新状态，再执行操作。','refresh','核对最新状态',syncError);
@@ -16,6 +16,7 @@ export function taskGuidance(task,session,{online=true,syncError='',othersRunnin
   const f=task.autoFollowup;if(f?.phase==='collaborating')return result('程序协作修复中',f.note);if(f?.nextAt>Date.now())return result('已安排自动续做','下一次核对：'+new Date(f.nextAt).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'})+'。'+f.note);return result(f?.phase==='checking'?'正在核对原会话':f?.phase==='unavailable'?'连接恢复后自动补做':'Agent 将自动补做未完成项',f?.note||'无需点击继续。系统会交回原 Agent 修复或按最新指引记录延期项，完成后继续后续流程。');
  }
  if(task.checkpoint)return result('上次工作已中断','断点和已有成果已保存，点击后接着未完成的部分做。','resume','继续上次工作');
+ if(!task.sessionId&&repositoryImported&&task.migrationContext&&!task.kind)return result('可在此电脑继续','使用 Git 中的进度和上下文开启本机对话，只处理本步骤未完成项，已完成成果和审批保持。','recheck','在此电脑继续处理');
  if(!task.sessionId||session?.status==='history')return result('任务启动或执行状态需核对','先检查投递回执与流程状态，避免重复启动任务。','repair','诊断并修复流程');
  if(/STUDIO_PLAN|职能与所选阶段不匹配|计划.*(?:校验|无效)/i.test(reason))return result('制作计划需要修正','让统筹修正拆解格式或依赖，保留已有工程分析与所选流程。','recheck','请统筹修正计划');
  if(/STUDIO_RESULT|交付.*(?:格式|outcome)|未提供实际验证记录|JSON.{0,12}(?:解析失败|格式错误)|(?:无法解析|无效).{0,12}JSON/i.test(reason))return result('Agent 的交付说明不完整','请 Agent 补齐实际交付、验证记录和结果格式，不能把缺失信息当作通过。','recheck','请 Agent 补齐交付结果');

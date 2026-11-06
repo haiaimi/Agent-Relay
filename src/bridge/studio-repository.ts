@@ -3,7 +3,7 @@ import {randomUUID,createHash} from 'node:crypto';
 import {mkdir,readFile,writeFile,rename,lstat,realpath,unlink,readdir} from 'node:fs/promises';
 import {existsSync} from 'node:fs';
 import {resolve,relative,isAbsolute,join,dirname} from 'node:path';
-import {archiveHash,archivePath,validateArchive,validRepositoryPath,type RequirementArchive,type RequirementIndex,type RepositoryRequest} from '../shared/studio-repository.js';
+import {archiveHash,archivePath,validateArchive,validRepositoryPath,repositoryId,type RequirementArchive,type RequirementIndex,type RepositoryRequest} from '../shared/studio-repository.js';
 import type {Project} from '../shared/protocol.js';
 import type {BridgeStore} from './store.js';
 import type {StudioWorkspace} from './studio-workspace.js';
@@ -12,7 +12,7 @@ const queues=new Map<string,Promise<any>>();
 async function exclusive<T>(root:string,work:()=>Promise<T>):Promise<T>{const prior=queues.get(root)??Promise.resolve(),job=prior.catch(()=>{}).then(work);queues.set(root,job);try{return await job;}finally{if(queues.get(root)===job)queues.delete(root);}}
 export async function repositoryGit(cwd:string,args:string[],input?:string,env:Record<string,string>={}):Promise<string>{
   return new Promise((yes,no)=>{const child=spawn('git',['-c','core.fsmonitor=false',...args],{cwd,windowsHide:true,shell:false,env:{...process.env,GIT_TERMINAL_PROMPT:'0',...env},stdio:'pipe'}),out:Buffer[]=[];let err='',size=0,ended=false;
-    const done=(e?:Error)=>{if(ended)return;ended=true;clearTimeout(timer);e?no(e):yes(Buffer.concat(out).toString('utf8'));},timer=setTimeout(()=>{child.kill();done(Error('仓库操作超时；已保留原文件，请重新检查同步状态'));},90_000);
+    const done=(e?:Error)=>{if(ended)return;ended=true;clearTimeout(timer);e?no(e):yes(Buffer.concat(out).toString('utf8'));},timer=setTimeout(()=>{child.kill();done(Error('仓库操作超时；已保留原文件，请重新检查同步状态'));},args.includes('push')?900_000:90_000);
     child.on('error',done);child.stdout.on('data',b=>{size+=b.length;if(size>32*1024*1024){child.kill();done(Error('仓库读取超过 32 MB 限制'));}else out.push(b);});child.stderr.on('data',b=>err=(err+b).slice(-3000));child.on('close',code=>done(code===0?undefined:Error(err.trim()||'Git 操作失败')));child.stdin.on('error',()=>{});child.stdin.end(input);
   });
 }
@@ -30,8 +30,8 @@ async function rootFor(p:Project){return (await repositoryGit(p.path,['rev-parse
 async function common(root:string){return resolve(root,(await repositoryGit(root,['rev-parse','--git-common-dir'])).trim());}
 async function defaultBranch(root:string){try{const b=(await repositoryGit(root,['symbolic-ref','refs/remotes/origin/HEAD'])).trim();if(/^refs\/remotes\/origin\/.+/.test(b))return b.slice('refs/remotes/origin/'.length);}catch{}for(const b of ['main','master'])if(await refHash(root,'refs/remotes/origin/'+b)||await refHash(root,'refs/heads/'+b))return b;throw Error('找不到主干，请先设置 origin 的默认分支');}
 async function repositoryIdentity(root:string){const branch=await defaultBranch(root).catch(()=>undefined),remote=branch?await gitJson(root,'refs/remotes/origin/'+branch,'.relay/project.json'):undefined;return remote??await localJson(root,'.relay/project.json')??await localJson(await common(root),'relay/project.json')??await gitJson(root,'HEAD','.relay/project.json');}
-async function fetchRepository(root:string){for(let attempt=0;attempt<5;attempt++)try{await repositoryGit(root,['fetch','--no-tags','origin','+refs/heads/*:refs/remotes/origin/*']);return;}catch(e){if(attempt===4||!/timed? out|connection|could not resolve|unable to access|network|远程主机/i.test((e as Error).message))throw e;await new Promise(r=>setTimeout(r,60000));}}
-function excluded(path:string){return /(^|\/)(captures?|screenshots?|recordings?|frames?|cache|__pycache__|node_modules|\.venv|\.ssh|\.aws|\.codex|\.claude|\.godot|\.git|\.data|\.runtime|dist|build|tmp|temp)(\/|$)/i.test(path)||/\.(mp4|mov|mkv|webm|avi|log|tmp|bak|pyc|exe|dll|dylib|so|zip|7z|tar|gz)$/i.test(path)||/(^|\/)(\.env(?:\..*)?|\.mcp\.json|auth\.json|id_rsa|id_ed25519|credentials[^/]*|.*\.(pem|key))$/i.test(path)||path.startsWith('.relay/')||path.startsWith('.studio/')&&!/\.(md|json|txt|csv|ya?ml|py|gd|ps1|sh|js|mjs)$/i.test(path);}
+async function fetchRepository(root:string,refs=['+refs/heads/*:refs/remotes/origin/*']){for(let attempt=0;attempt<5;attempt++)try{await repositoryGit(root,['fetch','--no-tags','origin',...refs]);return;}catch(e){if(attempt===4||!/timed? out|connection|could not resolve|unable to access|network|远程主机/i.test((e as Error).message))throw e;await new Promise(r=>setTimeout(r,60000));}}
+function excluded(path:string){return /(^|\/)(captures?|screenshots?|recordings?|frames?|cache|__pycache__|node_modules|\.venv|\.ssh|\.aws|\.codex|\.claude|\.godot|\.git|\.data|\.runtime|dist|build|tmp|temp)(\/|$)/i.test(path)||/\.(mp4|mov|mkv|webm|avi|log|tmp|bak|pyc|exe|dll|dylib|so|zip|7z|tar|gz)$/i.test(path)||/(^|\/)(\.env(?:\..*)?|\.mcp\.json|auth\.json|id_rsa|id_ed25519|credentials[^/]*|.*\.(pem|key))$/i.test(path)||path.startsWith('.relay/')||path.startsWith('.studio/')&&!/\.(md|json|txt|csv|ya?ml|svg|mmd|dot|py|gd|ps1|sh|js|mjs)$/i.test(path);}
 export function repositoryFilePolicy(path:string){return validRepositoryPath(path)&&!excluded(path);}
 const processAsset=(path:string)=>/(^|\/)(validation|rebuild|previews?|renders?|trials?|history|archive|fixtures?)(\/|$)/i.test(path);
 
@@ -69,12 +69,15 @@ export class StudioRepository {
   }
   private index(a:RequirementArchive,old?:RequirementIndex):RequirementIndex{if(old&&(old.version!==1||old.projectId!==a.projectId||!Array.isArray(old.requirements)))throw Error('项目需求索引身份不匹配');return {version:1,projectId:a.projectId,requirements:[...(old?.requirements??[]).filter(r=>r.id!==a.runId),{id:a.runId,title:String(a.run.title),branch:a.branch,status:String(a.run.status),revision:Number(a.run.revision),updatedAt:Number(a.run.updatedAt)}].sort((x,y)=>x.id.localeCompare(y.id))};}
   private async inspect(root:string,repo:string,w:StudioWorkspace,fetch:boolean){
-    if(fetch)await fetchRepository(root);const archive=await localJson(repo,archivePath(w.runId));validateArchive(archive);
+    if(fetch)await fetchRepository(root);let archive=await localJson(repo,archivePath(w.runId));validateArchive(archive);const identity=await repositoryIdentity(root);if(identity?.id&&identity.id!==archive.projectId){await this.save(root,repo,w,archive);archive=await localJson(repo,archivePath(w.runId));validateArchive(archive);}
     const remoteHead=await refHash(root,'refs/remotes/origin/'+archive.branch),main=await defaultBranch(root),mainHead=await refHash(root,'refs/remotes/origin/'+main)||await refHash(root,'refs/heads/'+main);
     const remote=remoteHead?await gitJson(root,remoteHead,archivePath(w.runId)):undefined;if(remote)validateArchive(remote);
     const diff=(await repositoryGit(repo,['diff',remoteHead||'HEAD','--name-only','-z','--no-ext-diff','--ignore-submodules=none'])).split('\0').filter(Boolean),untracked=(await repositoryGit(repo,['ls-files','--others','--exclude-standard','-z'])).split('\0').filter(Boolean);
     const stages=(await repositoryGit(repo,['ls-files','--stage','-z'])).split('\0'),tracked=new Set(stages.map(p=>p.slice(p.indexOf('\t')+1))),modules=new Set(stages.filter(p=>p.startsWith('160000 ')).map(p=>p.slice(p.indexOf('\t')+1)));
-    const formal=[archive.run.planner,...archive.run.tasks,...archive.run.delivery?[archive.run.delivery]:[]].flatMap(t=>(t.artifacts??[]).map((a:any)=>relative(repo,resolve(w.project.path,a.path)).replaceAll('\\','/'))).filter(p=>repositoryFilePolicy(p)&&existsSync(join(repo,p))),declared=new Set(formal),groups=new Set<string>(),documents:string[]=[],sources:string[]=[],visited=new Set<string>();
+    const current=[archive.run.planner,...archive.run.tasks,...archive.run.delivery?[archive.run.delivery]:[]],design=new Set<string>();
+    for(const t of current)for(const a of [...(['concept'].includes(t.role)||t.kind==='visual-review'?t.artifacts??[]:[]),...(t.visualSnapshots??[])])if(/\.(png|jpe?g|webp|gif)$/i.test(a.path))design.add(relative(repo,resolve(w.project.path,a.path)).replaceAll('\\','/'));
+    const allowed=(p:string)=>repositoryFilePolicy(p)||design.has(p)&&repositoryFilePolicy(p.replace(/\.(png|jpe?g|webp|gif)$/i,'.md'));
+    const formal=current.flatMap(t=>(t.artifacts??[]).map((a:any)=>relative(repo,resolve(w.project.path,a.path)).replaceAll('\\','/'))).filter(p=>allowed(p)&&existsSync(join(repo,p))),declared=new Set(formal),groups=new Set<string>(),documents:string[]=[],sources:string[]=[],visited=new Set<string>();
     const projectRoot=existsSync(join(w.project.path,'project.godot'))?w.project.path:existsSync(join(w.project.path,'project','project.godot'))?join(w.project.path,'project'):w.project.path;
     const addGroup=(path:string,whole=true)=>{if(!/(^|\/)assets\//.test(path))return;const version=path.match(/^(.*?\/v\d+)(?:\/|$)/)?.[1],parent=dirname(path).replaceAll('\\','/'),scope=parent.replace(/^.*?(?:^|\/)assets\/?/,'').split('/').filter(Boolean);groups.add(version??(whole&&scope.length>=2?parent:path));};
     for(const path of formal){if((await lstat(join(repo,path))).isDirectory())groups.add(path);else{addGroup(path);sources.push(path);}}
@@ -93,11 +96,11 @@ export class StudioRepository {
     const candidates=[...new Set([...diff,...untracked,...documents,...formal])].sort(),files:{path:string;bytes:number;deleted:boolean;hash:string}[]=[],omitted:string[]=[],blobs=new Map<string,string>();
     if(remoteHead)for(const entry of (await repositoryGit(repo,['ls-tree','-r','-z',remoteHead])).split('\0')){const tab=entry.indexOf('\t');if(tab>=0)blobs.set(entry.slice(tab+1),entry.slice(0,tab).split(' ')[2]);}
     const rootReal=await realpath(repo);
-    for(const path of candidates){if(modules.has(path)){omitted.push(path+'（子模块改动需先单独提交并推送，当前只同步需求与顶层工程）');continue;}if(!repositoryFilePolicy(path)){omitted.push(path);continue;}
+    for(const path of candidates){if(modules.has(path)){omitted.push(path+'（子模块改动需先单独提交并推送，当前只同步需求与顶层工程）');continue;}if(!allowed(path)){omitted.push(path);continue;}
       if(!tracked.has(path)&&(/(^|\/)assets\//.test(path)&&(!declared.has(path)&&![...groups].some(g=>path===g||path.startsWith(g+'/'))||processAsset(path))||path.startsWith('.studio/')&&!declared.has(path))){omitted.push(path+'（非当前交付或运行依赖，保留本机）');continue;}
       const file=resolve(repo,path);if(!existsSync(file)){files.push({path,bytes:0,deleted:true,hash:'deleted'});continue;}
       const st=await lstat(file);if(st.isDirectory())continue;if(!st.isFile()||!inside(rootReal,await realpath(file)))throw Error('提交文件包含符号链接或子模块，请先单独同步：'+path);
-      if(path.startsWith('.studio/')&&st.size>1024*1024){omitted.push(path+'（大体积过程报告留在本机）');continue;}
+      if(path.startsWith('.studio/')&&/\.(md|json|txt|csv|ya?ml)$/i.test(path)&&st.size>1024*1024){omitted.push(path+'（大体积过程报告留在本机）');continue;}
       if(st.size>25*1024*1024){omitted.push(path+'（超过 25 MB，请配置 LFS 后单独同步）');continue;}
       const bytes=await readFile(file),blob=createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex');if(blobs.get(path)===blob)continue;
       files.push({path,bytes:st.size,deleted:false,hash:createHash('sha256').update(bytes).digest('hex')});
@@ -130,6 +133,13 @@ export class StudioRepository {
   }
   private async scan(root:string){
     const identity=await repositoryIdentity(root);if(!identity)return {requirements:[]};
+    const main=await defaultBranch(root),index=await gitJson(root,'refs/remotes/origin/'+main,'.relay/requirements.json');
+    if(index){if(index.version!==1||index.projectId!==identity.id||!Array.isArray(index.requirements)||index.requirements.some((e:any)=>!e||e.branch!=='codex/studio-'+e.id||!repositoryId.test(e.id)))throw Error('无效主干需求索引');
+      // A normal pull of a shallow/single-branch clone may only fetch main.
+      // The index tells the reader which demand refs it still needs locally.
+      const missing:string[]=[];for(const e of index.requirements)if(!await refHash(root,'refs/remotes/origin/'+e.branch))missing.push('+'+e.branch+':refs/remotes/origin/'+e.branch);
+      if(missing.length)await fetchRepository(root,missing);
+    }
     const refs=(await repositoryGit(root,['for-each-ref','--format=%(refname)','refs/remotes/origin/codex','refs/heads/codex'])).trim().split('\n').filter(Boolean),catalog=new Map<string,any>();
     for(const ref of refs){const id=ref.match(/\/codex\/studio-([a-f0-9-]{36})$/)?.[1];if(!id)continue;const a=await gitJson(root,ref,archivePath(id));if(!a)continue;validateArchive(a);if(a.projectId!==identity.id)continue;const entry={id,title:a.run.title,status:a.run.status,revision:a.run.revision,updatedAt:a.run.updatedAt,branch:a.branch,ref,hash:archiveHash(a),done:a.run.tasks.filter((t:any)=>t.status==='done').length,total:a.run.tasks.length};const old=catalog.get(id);if(!old||ref.startsWith('refs/remotes/')||entry.updatedAt>old.updatedAt&&!old.ref.startsWith('refs/remotes/'))catalog.set(id,entry);}
     return {projectId:identity.id,requirements:[...catalog.values()]};

@@ -7,7 +7,7 @@ import type {RelayStore} from './store.js';
 import type {Action} from '../shared/protocol.js';
 import {assertMainlineIdle} from './studio-mainline.js';
 
-export interface RepositoryStatus {savedAt?:number;hash?:string;error?:string;attempts?:number;retryAt?:number;syncedAt?:number;commit?:string;indexCommit?:string;branch?:string;imported?:boolean;backupPath?:string;importHash?:string}
+export interface RepositoryStatus {jobId?:string;pending?:boolean;operation?:string;savedAt?:number;hash?:string;error?:string;attempts?:number;retryAt?:number;syncedAt?:number;commit?:string;indexCommit?:string;branch?:string;imported?:boolean;backupPath?:string;importHash?:string}
 declare module './studio.js' {interface StudioRun {repository?:RepositoryStatus;repositoryBusy?:boolean;repositoryReadOnly?:boolean}}
 const tasks=(r:StudioRun)=>[r.planner,...r.tasks,...r.delivery?[r.delivery]:[]];
 export class StudioRepositories {
@@ -16,7 +16,7 @@ export class StudioRepositories {
     store.db.exec('CREATE TABLE IF NOT EXISTS studio_repository_catalog(id TEXT PRIMARY KEY,json TEXT NOT NULL); CREATE TABLE IF NOT EXISTS studio_repository_archives(id TEXT PRIMARY KEY,json TEXT NOT NULL); CREATE TABLE IF NOT EXISTS studio_repository_jobs(id TEXT PRIMARY KEY,request TEXT NOT NULL,json TEXT NOT NULL)');
     for(const row of store.db.prepare('SELECT id,json FROM studio_repository_jobs').all()){const job=JSON.parse(String(row.json));if(job.phase==='running'){job.phase='failed';job.error='服务重启中断了同步核对，请重新检查远程记录；不会自动重复提交。';store.db.prepare('UPDATE studio_repository_jobs SET json=? WHERE id=?').run(JSON.stringify(job),row.id!);}}
     // No interrupted mutation is resent. The next user action re-reads both Git refs.
-    for(const r of studio.runs())if(r.repositoryBusy){r.repositoryBusy=false;r.paused=true;r.repository={...r.repository,error:'上次同步中断，请检查本地与远程差异后再选择；没有自动重复推送。'};this.persist(r);}
+    for(const r of studio.runs())if(r.repositoryBusy||r.repository?.pending){if(r.repositoryBusy)r.paused=true;r.repositoryBusy=false;r.repository={...r.repository,pending:false,error:'上次同步中断，请检查本地与远程差异后再选择；没有自动重复推送。'};this.persist(r);}
     this.timer=setInterval(()=>void this.tick(),5000);this.timer.unref();
   }
   private persist(r:StudioRun){this.store.db.prepare('INSERT OR REPLACE INTO studio_runs VALUES(?,?)').run(r.id,JSON.stringify(r));this.changed();}
@@ -80,17 +80,18 @@ export class StudioRepositories {
   start(v:any){
     if(!repositoryId.test(v.id??''))throw Error('无效同步请求 ID');const request=JSON.stringify(v),old=this.store.db.prepare('SELECT request,json FROM studio_repository_jobs WHERE id=?').get(v.id);
     if(old){if(old.request!==request)throw Error('同步请求 ID 已用于其他操作');return JSON.parse(String(old.json));}
-    const job:any={id:v.id,runId:v.runId,phase:'running',startedAt:Date.now()};this.store.db.prepare('INSERT INTO studio_repository_jobs VALUES(?,?,?)').run(v.id,request,JSON.stringify(job));
+    const job:any={id:v.id,runId:v.runId,op:v.op,phase:'running',startedAt:Date.now()};this.store.db.prepare('INSERT INTO studio_repository_jobs VALUES(?,?,?)').run(v.id,request,JSON.stringify(job));
     const work=Promise.resolve().then(()=>this.command(v)).then(result=>{job.phase='done';job.result=result;},e=>{job.phase='failed';job.error=(e as Error).message;}).finally(()=>{job.finishedAt=Date.now();this.store.db.prepare('UPDATE studio_repository_jobs SET json=? WHERE id=?').run(JSON.stringify(job),job.id);this.changed();this.background.delete(work);});this.background.add(work);return job;
   }
   private background=new Set<Promise<any>>();
   conversations(runId:string){const r=this.studio.runs().find(r=>r.id===runId);if(!r)throw Error('需求不存在');return this.archive(r).conversations;}
-  media(runId:string){const row=this.store.db.prepare('SELECT json FROM studio_repository_archives WHERE id=?').get(runId);return row?(JSON.parse(String(row.json)) as RequirementArchive).media:[];}
-  mediaTarget(runId:string,index:number){const row=this.store.db.prepare('SELECT json FROM studio_repository_archives WHERE id=?').get(runId),a=row?JSON.parse(String(row.json)) as RequirementArchive:undefined,target=Number.isInteger(index)&&index>=0?a?.media[index]:undefined;if(!target?.sessionId||this.store.getSession(target.sessionId)?.hostId!==target.hostId)throw Error('原机器媒体未连接或历史会话不可用；媒体没有存入 Git');return {...target,sessionId:target.sessionId};}
+  media(runId:string):RequirementArchive['media']{const row=this.store.db.prepare('SELECT json FROM studio_repository_archives WHERE id=?').get(runId);if(row)return (JSON.parse(String(row.json)) as RequirementArchive).media;const r=this.studio.runs().find(r=>r.id===runId);if(!r)throw Error('需求不存在');const hostId=this.binding(r).hostId;return [...new Map(tasks(r).flatMap(t=>t.sessionId?(t.artifacts??[]).map(a=>({hostId,sessionId:t.sessionId,path:a.path,description:a.description})):[]).map(m=>[m.path,m])).values()];}
+  mediaTarget(runId:string,index:number){const target=Number.isInteger(index)&&index>=0?this.media(runId)[index]:undefined;if(!target?.sessionId||this.store.getSession(target.sessionId)?.hostId!==target.hostId)throw Error('原机器媒体未连接或历史会话不可用；媒体没有存入 Git');return {...target,sessionId:target.sessionId};}
   async command(v:any){
     if(v.op==='scan'){if(typeof v.hostId!=='string'||typeof v.projectId!=='string')throw Error('请选择工作电脑和项目');if(v.workspaceIndex!==undefined&&(!Number.isInteger(v.workspaceIndex)||v.workspaceIndex<0))throw Error('Invalid workspace index');return this.discover(v.hostId,v.projectId,v.workspaceIndex??0);}
     const r=this.studio.runs().find(r=>r.id===v.runId);if(!r||!repositoryId.test(v.runId??''))throw Error('需求不存在');if(this.jobs.has(r.id))throw Error('此需求正在同步，请等待最新结果');assertMainlineIdle(this.store,r.id);
-    const job=this.execute(r,v).finally(()=>this.jobs.delete(r.id));this.jobs.set(r.id,job);return job;
+    r.repository={...r.repository,jobId:v.id,pending:true,operation:v.op};this.persist(r);
+    const job=this.execute(r,v).finally(()=>{this.jobs.delete(r.id);const latest=this.studio.runs().find(x=>x.id===r.id);if(latest?.repository&&latest.repository.jobId===v.id){latest.repository.pending=false;this.persist(latest);}});this.jobs.set(r.id,job);return job;
   }
   private async execute(r:StudioRun,v:any){
     const p=this.binding(r),hostId=v.hostId??p.hostId,projectId=v.projectId??p.projectId,workspaceIndex=v.workspaceIndex??(hostId===p.hostId&&projectId===p.projectId?p.workspaceIndex:0);if(!Number.isInteger(workspaceIndex)||workspaceIndex<0)throw Error('Invalid workspace index');
@@ -106,7 +107,7 @@ export class StudioRepositories {
     const backup=join(this.store.dir,'repository-backups',r.id+'-'+randomUUID()+'.json');mkdirSync(join(this.store.dir,'repository-backups'),{recursive:true});writeFileSync(backup,JSON.stringify(r),{mode:0o600});
     try{
       const result=await this.call(hostId,projectId,{op:v.op,runId:r.id,token:v.token,choice:v.op==='publish'?'local':'remote',paths:v.paths},workspaceIndex);
-      if(v.op==='restore'){const imported=this.import(result.archive,hostId,projectId,result.workspace,result.session,result.backupPath,workspaceIndex);return {run:imported,backup:result.backupPath,restored:true};}
+      if(v.op==='restore'){const imported=this.import(result.archive,hostId,projectId,result.workspace,result.session,result.backupPath,workspaceIndex);imported.repository={...imported.repository,jobId:v.id,pending:true,operation:v.op};this.persist(imported);return {run:imported,backup:result.backupPath,restored:true};}
       const latest=this.studio.runs().find(x=>x.id===r.id)!;latest.repository={...latest.repository,syncedAt:Date.now(),commit:result.commit,indexCommit:result.indexCommit,branch:result.branch,error:undefined};this.persist(latest);return result;
     }catch(e){const latest=this.studio.runs().find(x=>x.id===r.id)!;latest.repository={...latest.repository,error:(e as Error).message};this.persist(latest);throw e;}
     finally{const latest=this.studio.runs().find(x=>x.id===r.id);if(latest){latest.repositoryBusy=false;this.persist(latest);}}

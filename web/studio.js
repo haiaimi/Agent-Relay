@@ -172,7 +172,7 @@ async function revealTask(runId,taskId){
  const section=$('task-content').querySelector('[data-task-section="'+kind+'"]')||$('task-content').querySelector('.task-info');
  if(revealTaskSection(section,container,reduced))notify(kind==='blocker'?'已定位本任务的阻断原因与下一步':kind==='delivery'?'已定位本任务的交付内容':'已定位当前任务的执行状态');else notify('当前任务尚未提供这部分记录，请刷新流程状态核对。');
 }
-function guidanceFor(r,t,s){const p=projectForRun(r);return taskGuidance(t,s,{automatic:r.autoAnswerQuestions!==false,online:!!hostOf(p)?.online,syncError:studioSyncError,pendingDependencies:allTasks(r).filter(x=>(t.dependencies??[]).includes(x.id)&&x.status!=='done'&&!(x.status==='skipped'&&x.skip)),othersRunning:allTasks(r).some(x=>x.id!==t.id&&['starting','running'].includes(x.status))||(r.chats??[]).some(c=>!c.error&&!c.resolved&&(!c.sessionId||c.sessionId!==t.sessionId&&['running','waiting'].includes(relay.sessions.find(s=>s.id===c.sessionId)?.status)))});}
+function guidanceFor(r,t,s){const p=projectForRun(r);return taskGuidance(t,s,{repositoryImported:!!r.repository?.imported,automatic:r.autoAnswerQuestions!==false,online:!!hostOf(p)?.online,syncError:studioSyncError,pendingDependencies:allTasks(r).filter(x=>(t.dependencies??[]).includes(x.id)&&x.status!=='done'&&!(x.status==='skipped'&&x.skip)),othersRunning:allTasks(r).some(x=>x.id!==t.id&&['starting','running'].includes(x.status))||(r.chats??[]).some(c=>!c.error&&!c.resolved&&(!c.sessionId||c.sessionId!==t.sessionId&&['running','waiting'].includes(relay.sessions.find(s=>s.id===c.sessionId)?.status)))});}
 const taskOperations=new Map();
 const taskOperationKey=(r,t)=>JSON.stringify([r.id,t.id,t.actionId,t.finishedAt,t.checkpoint?.at]);
 function taskDecision(r,t,s,g){
